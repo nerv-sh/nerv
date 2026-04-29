@@ -31,10 +31,7 @@ pub enum Position {
         partial: String,
     },
     /// `git checkout <branch>` — typing a positional argument.
-    ArgumentSlot {
-        path: Vec<String>,
-        partial: String,
-    },
+    ArgumentSlot { path: Vec<String>, partial: String },
     /// Unparseable / unsupported (treat as "no completion").
     Unknown,
 }

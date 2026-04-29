@@ -20,7 +20,7 @@ use tracing::{info, warn};
 #[derive(Parser, Debug)]
 #[command(
     name = "nerv-spec-build",
-    about = "Transpile withfig/autocomplete TS specs into static JSON.",
+    about = "Transpile withfig/autocomplete TS specs into static JSON."
 )]
 struct Args {
     /// Path to `vendor/withfig-autocomplete/src/`.
@@ -61,12 +61,18 @@ fn main() -> anyhow::Result<()> {
         warn!(spec = stem, "transpile not yet implemented (M0-2)");
     }
 
-    info!(specs = considered, "scanned (no output yet — M0-2 fills this in)");
+    info!(
+        specs = considered,
+        "scanned (no output yet — M0-2 fills this in)"
+    );
     Ok(())
 }
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_env("NERV_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }

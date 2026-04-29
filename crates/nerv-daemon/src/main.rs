@@ -100,9 +100,9 @@ async fn handle_connection(stream: tokio::net::UnixStream) {
 async fn write_pid_file(path: &std::path::Path) -> anyhow::Result<()> {
     use std::process;
     let s = format!("{}\n", process::id());
-    tokio::fs::write(path, s).await.with_context(|| {
-        format!("cannot write PID file at {}", path.display())
-    })?;
+    tokio::fs::write(path, s)
+        .await
+        .with_context(|| format!("cannot write PID file at {}", path.display()))?;
     Ok(())
 }
 
@@ -118,7 +118,9 @@ async fn shutdown_signal() {
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter =
-        EnvFilter::try_from_env("NERV_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
+    let filter = EnvFilter::try_from_env("NERV_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
