@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/nerv-cli",
+    "crates/nerv-daemon",
+    "crates/nerv-engine",
+    "crates/nerv-shell",
+    "build/spec-transpile",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["Nerv contributors"]
+repository = "https://github.com/nerv-sh/nerv"
+homepage = "https://nerv.sh"
+readme = "README.md"
+
+[workspace.dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive", "cargo"] }
+
+# Async / IPC
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "fs", "time"] }
+interprocess = { version = "2.2", features = ["tokio"] }
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TUI / ANSI
+crossterm = "0.28"
+
+# Errors / logging
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Misc
+once_cell = "1"
+# `directories` (XDG path crate) intentionally not workspace-declared:
+# our path constants are docs-driven (uninstall-spec.md §2), so we
+# resolve $HOME directly in nerv-engine::paths.
+
+# Internal
+nerv-engine = { path = "crates/nerv-engine" }
+nerv-shell = { path = "crates/nerv-shell" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 0
+debug = true

@@ -1,0 +1,25 @@
+[package]
+name = "nerv-daemon"
+description = "The `nervd` background process — IPC + spec matching"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[[bin]]
+name = "nervd"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+nerv-engine = { workspace = true }
+# `interprocess` will return for cross-platform UDS/named pipe abstraction
+# in M1; v1.0 macOS-only PoC uses tokio::net::UnixListener directly.

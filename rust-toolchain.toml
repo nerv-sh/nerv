@@ -1,0 +1,6 @@
+[toolchain]
+# 1.85 stabilized `edition2024`, which clap >= 4.6 (and a growing number
+# of crates as of 2026) require. Bumping is harmless — rustup auto-downloads.
+channel = "1.85"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

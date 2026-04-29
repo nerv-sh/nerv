@@ -1,0 +1,22 @@
+Nerv
+Copyright 2026 Nerv contributors
+
+This product is licensed under the Apache License, Version 2.0 (the "License").
+You may not use this product except in compliance with the License.
+A copy of the License is included as the LICENSE file in this repository,
+or available at <https://www.apache.org/licenses/LICENSE-2.0>.
+
+---
+
+This product includes software developed by Fig (now part of AWS):
+    withfig/autocomplete   <https://github.com/withfig/autocomplete>
+    Licensed under the MIT License.
+
+The bundled CLI specifications (vendored under `vendor/withfig-autocomplete/`)
+remain under their original MIT license. Build artifacts derived from these
+specifications (under `specs-prebuilt/` in releases) preserve the same MIT
+attribution.
+
+The pinned upstream commit is recorded in `vendor/withfig-autocomplete/`
+metadata and in release notes. Fork policy is documented in
+`docs/spec-conversion-policy.md` §5.
