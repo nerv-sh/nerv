@@ -1,0 +1,28 @@
+# Rust
+/target
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# Build artifacts
+specs-prebuilt/*.json
+specs-prebuilt/manifest.json
+!specs-prebuilt/.gitkeep
+
+# Vendor (subtree pulled at M0-9)
+# vendor/withfig-autocomplete/  # tracked via subtree, not ignored
+
+# macOS
+.DS_Store
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Local nerv state (during dev)
+.nerv-local/

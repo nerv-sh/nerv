@@ -97,7 +97,7 @@ AI / 자연어, bash·fish·PowerShell·nushell, Linux·Windows, 동적 generato
 
 - 매 키 입력 후 디바운스 5–10 ms로 토큰화 → 위치 추론.
 - 50개 CLI 정적 spec 즉시 사용. 정상 위치는 추천, 동적 위치는 §5.1 힌트.
-- **매칭 알고리즘 — v1.0 은 prefix-only**: `git co` → `commit` / `checkout` 둘 다 (prefix). `git chk` → 결과 0 (fuzzy 미지원). Fuzzy 는 §4 비목표 → v1.x 검토.
+- **매칭 알고리즘 — v1.0 은 prefix-only**: `git co` → `commit` / `config` (prefix), 단 `checkout` 은 `git ch` 에서만 매칭 (`checkout` 은 `c-h-...` 로 시작). `git chk` → 결과 0 (fuzzy 미지원). Fuzzy 는 §4 비목표 → v1.x 검토.
 - **동적 generator 인자 힌트 UX** (URL 직접 임베드, GO 조건 ①):
   ```
   ⤷ 동적 완성은 v1.1에서 지원 예정 — 직접 입력하세요
@@ -196,7 +196,7 @@ $ git c⎵                       # 즉시 추천 표시
 
 ## 7. 기술 스택
 
-- **언어**: Rust 1.78+
+- **언어**: Rust 1.85+ (edition2024 안정화 버전 — clap 4.6+ 등 요구)
 - **CLI**: `clap` v4
 - **IPC**: `tokio` + `interprocess` (UDS)
 - **TUI/ANSI**: `crossterm` (직접 ANSI; alternate screen 회피)

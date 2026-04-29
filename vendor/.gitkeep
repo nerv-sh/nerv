@@ -1,0 +1,7 @@
+vendor/ — third-party source trees.
+
+withfig-autocomplete/ will be added here as a git subtree at M0-9.
+See docs/spec-conversion-policy.md §5 for the pin/fork policy.
+
+    git subtree add --prefix=vendor/withfig-autocomplete \
+        https://github.com/withfig/autocomplete.git <pinned-commit> --squash
