@@ -78,7 +78,10 @@ fn main() -> anyhow::Result<()> {
     init_tracing();
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { shell, shell_script } => cmd_init(shell, shell_script),
+        Command::Init {
+            shell,
+            shell_script,
+        } => cmd_init(shell, shell_script),
         Command::Doctor => cmd_doctor(),
         Command::Start => cmd_start(),
         Command::Stop => cmd_stop(),
@@ -91,9 +94,11 @@ fn main() -> anyhow::Result<()> {
 
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
-    let filter =
-        EnvFilter::try_from_env("NERV_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
-    let _ = fmt().with_env_filter(filter).with_writer(std::io::stderr).try_init();
+    let filter = EnvFilter::try_from_env("NERV_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 // ---------- command stubs (M0–M1) ----------
@@ -108,9 +113,7 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 println!("# nerv zsh shell-script — populated in M0-1");
                 Ok(())
             } else {
-                let bin = std::env::current_exe()?
-                    .to_string_lossy()
-                    .into_owned();
+                let bin = std::env::current_exe()?.to_string_lossy().into_owned();
                 let block = nerv_shell::init_block(
                     &bin,
                     env!("CARGO_PKG_VERSION"),
