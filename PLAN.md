@@ -1,28 +1,29 @@
-# Nerv — 셸 자동완성 CLI 기획서 v0.4 (최종 / GO)
+# Nerv — 셸 자동완성 CLI 기획서 v0.5 (구현 진입 직전)
 
 > **한 줄 요약**: 사라진 Fig의 인라인 자동완성을 **macOS + zsh + 정적 spec 한 점**에서 다시 살린다. 로그인·텔레메트리·AI 없음.
 
-> **상태**: CEO v0.3 리뷰의 GO 조건 4개 반영 — **v0.4로 확정, 구현 진입 가능**.
+> **상태**: CEO v0.4 리뷰의 GO 조건 3건 + 제거 3건 + 추가 4건 반영 — **v0.5로 확정, 구현 진입 가능**.
 
 ---
 
-## 0. v0.3 → v0.4 변경 요약 (CEO GO 조건 반영)
+## 0. v0.4 → v0.5 변경 요약 (CEO v0.4 리뷰 반영)
 
-| GO 조건 | v0.3 | v0.4 |
-|---------|------|------|
-| **① `nerv spec update` / `nerv feedback dyn` 제거** | CLI에 존재 | **둘 다 제거** (§9). spec 갱신 = `brew upgrade`. 동적 generator 힌트는 URL 직접 임베드 (§5.1) |
-| **② 첫 5분 사용 시나리오 M0 산출물화** | 없음 | **M0-7 신설** (§10). git/docker/kubectl 시연 스크립트 + 녹화 |
-| **③ Developer ID 서명/공증 M0 선행** | M1 1주차 | **M0-8로 앞당김** (§10). 빈 바이너리로 파이프라인 완료가 GO 조건 |
-| **④ v1+ 로드맵에서 AI 항목 제거** | "AI 자연어 모드" 포함 | **로드맵에서 제거** (§10). 외부 플러그인 생태계로 분리 명시 |
-
-| 추가 반영 (CEO 제안) | v0.3 | v0.4 |
-|----|------|------|
-| M1 일정 기본 | 12주 (체크포인트 시 16주 연장) | **16주 기본**, spec 30 축소는 *최후 수단* (§10). "상위 50개" 메시지 보존 |
-| zsh 플러그인 매니저 호환 | 미정 | **oh-my-zsh / zinit / antigen 가이드 + 설치 경로** M1 포함 (§5.6 신설) |
-| spec 변환 실패 정책 | 미정 | **명시적 정책** — 변환 불가 spec은 빈 셸로 두고 `nerv spec list` 에 *(limited)* 라벨 (§5.7 신설) |
-| North Star Metric | 없음 | **공개 신호 4종** + v1.x 옵트인 설문 (§12 신설) |
-| Developer ID 리스크 | 중간 | **높음** 으로 상향 + M0 우선 (§14) |
-| `withfig/autocomplete` 포크 전략 | M1 11주차 결정 | **M0-9로 앞당김** (§10). vendor subtree 기준선 + 버전 핀 결정 |
+| 카테고리 | 항목 | 결과 |
+|----------|------|------|
+| **GO 조건 ①** | `error-states.md` 의 `nerv spec update` 잔존 참조 제거 | **완료** — `brew upgrade` 로 정정. PLAN.md GO 조건 ① 정합 회복 |
+| **GO 조건 ②** | `first-5-min.md` 에 0.5단계 (설치 실패 path) 추가 | **완료** — 0.5-A (Xcode CLT 미설치), 0.5-B (oh-my-zsh 충돌), 0.5-C (재설치 멱등) |
+| **GO 조건 ③** | withfig/autocomplete fork 트리거 6개월 → 3개월 | **완료** — 모니터링 주기도 30일 → 2주 (`spec-conversion-policy.md` §5.3) |
+| 제거 ① | `nerv spec list --changes` (v1.x) | **삭제** — 빌드 파이프라인 단순화. v1.0 은 manifest SHA 기록만 |
+| 제거 ② | LaunchAgent (uninstall §2 #7) | **삭제** — v1.0 은 수동 `nerv start/stop` 만. 자동 기동 도입 시 부활 |
+| 제거 ③ | VS Code / JetBrains / Hyper / Warp (terminal-compat §1) | **삭제** — 매트릭스 외 *Triage 정책* 으로 대체 |
+| 추가 ① | `nerv doctor` 자동 실행 트리거 (§3.6 신설) | **완료** — `nerv start` 직후 / 첫 IPC / `brew upgrade` 후 1회 |
+| 추가 ② | spec age soft notice | **완료** — 30일 경과 시 doctor 의 `ℹ` 항목으로 표시 |
+| 추가 ③ | Fuzzy matching 비목표 명시 | **완료** — §4 비목표 + §5.1 인용 |
+| 추가 ④ | M0-2 의사결정 트리 (Tier C 비율별 spec 50/30) | **완료** — §10 M0 끝 |
+| 리스크 | 문서 vs 구현 delta 체크포인트 | **완료** — §10 M0 끝 추가 |
+| 리스크 | zsh-autosuggestions 공존 e2e | **완료** — §10 M0-5 에 시각적 충돌 검증 1건 추가 |
+| 정합성 | terminal-compat §5.1 오타 (iTcerm2) | **완료** |
+| 정합성 | PLAN §15 cargo new 중복 | **완료** |
 
 ---
 
@@ -35,7 +36,7 @@
 - **crates.io** `nerv`: 미관리 클러스터 워크로드 매니저(2021, 1버전, ~1.2k DL). 우회: 패키지명 `nerv-cli` 게시, 바이너리는 `nerv` 유지.
 - **Nerves (Elixir/IoT)**: 카테고리 다름. 도큐먼트에 *"Nerv (no s) — shell autocomplete for macOS zsh"* 일관 표기.
 - **Homebrew formula 이름**: M0 첫째 날 확인.
-- **GitHub org `nerv`**: 확보 시도, 실패 시 `nerv-sh` 또는 `usenerv`.
+- **GitHub org**: ✅ **`nerv-sh` 확보 완료**. 모든 레포는 `nerv-sh/*` 네임스페이스 사용.
 - **상표 (NERV / Evangelion)**: 픽션 IP라 직접 충돌 낮음. 시각 모티프 차용 금지.
 
 ---
@@ -82,7 +83,7 @@ Fig는 2023년 Amazon에 인수되어 Amazon Q Developer CLI(`q`)로 흡수됐�
 
 ### 비목표 (v1)
 
-AI / 자연어, bash·fish·PowerShell·nushell, Linux·Windows, 동적 generator, 클라우드/팀 동기화, 인증, 텔레메트리, 자체 업데이트(brew에 위임), GUI 설정 앱, frecency, `nerv config` 명령, `nerv spec update` / `nerv feedback` 명령(GO 조건 ①).
+AI / 자연어, bash·fish·PowerShell·nushell, Linux·Windows, 동적 generator, 클라우드/팀 동기화, 인증, 텔레메트리, 자체 업데이트(brew에 위임), GUI 설정 앱, frecency, `nerv config` 명령, `nerv spec update` / `nerv feedback` 명령(GO 조건 ①), **fuzzy matching** (v1.x 검토 — §5.1 prefix-only 정책), **`nerv spec list --changes`** (v1.0 빌드 파이프라인 단순화 위해 v1.1+ 로 이연).
 
 ### 상위 50 spec 후보 풀
 
@@ -96,6 +97,7 @@ AI / 자연어, bash·fish·PowerShell·nushell, Linux·Windows, 동적 generato
 
 - 매 키 입력 후 디바운스 5–10 ms로 토큰화 → 위치 추론.
 - 50개 CLI 정적 spec 즉시 사용. 정상 위치는 추천, 동적 위치는 §5.1 힌트.
+- **매칭 알고리즘 — v1.0 은 prefix-only**: `git co` → `commit` / `checkout` 둘 다 (prefix). `git chk` → 결과 0 (fuzzy 미지원). Fuzzy 는 §4 비목표 → v1.x 검토.
 - **동적 generator 인자 힌트 UX** (URL 직접 임베드, GO 조건 ①):
   ```
   ⤷ 동적 완성은 v1.1에서 지원 예정 — 직접 입력하세요
@@ -251,19 +253,32 @@ nerv uninstall          # 깔끔한 제거
 
 ### M0 — 스파이크 (4주, +1주는 Developer ID 선행 검증분)
 
-산출물 9개. M0 끝에서 GO/No-Go.
+산출물 10개. M0 끝에서 GO/No-Go + 의사결정 트리 + 문서-구현 delta 점검.
 
 1. **ZLE → UDS → Rust → 인라인 ANSI** PoC. p95 < 25 ms (Apple Silicon, iTerm2).
 2. **3개 spec 변환** (`git`, `docker`, `kubectl`). 정적 추출 비율 측정 → v1.0 50개 확정 외삽.
 3. **`?` 인라인 도움말 PoC** (위 3개 spec).
 4. **30초 온보딩 시뮬레이션** — `brew tap` 흉내 + 녹화 영상.
-5. **터미널 호환성 + tmux 검증** — iTerm2 + Terminal.app e2e + tmux 안 깨짐. WezTerm/Alacritty/Kitty 1회 수동.
+5. **터미널 호환성 + tmux 검증 + zsh-autosuggestions 공존 e2e** — iTerm2 + Terminal.app e2e + tmux 안 깨짐. **zsh-autosuggestions 활성 상태에서 Nerv 팝업 + ghost text 시각적 충돌 0** 검증 (실패 path 0.5-B 의 합격 기준과 정합). WezTerm/Alacritty/Kitty 1회 수동.
 6. **Inshellisense 1대1 정량 벤치** — `git c` 5타 latency, RSS. carapace-bin / zsh-autocomplete 정성 1단락.
-7. **★ 첫 5분 사용 시나리오 스크립트** (GO 조건 ②) — `git status / log / checkout` → `docker ps / build / run` → `kubectl get / describe / logs` 12단계 사용 흐름. 각 단계에서 *어디서 추천이 뜨고 어디서 §5.1 힌트가 뜨는지* 명시. 스크립트 + 녹화 영상을 `docs/first-5-min.md` 에 커밋.
+7. **★ 첫 5분 사용 시나리오 스크립트** (GO 조건 ②) — `git status / log / checkout` → `docker ps / build / run` → `kubectl get / describe / logs` 12단계 + **0.5단계 (설치 실패 path 3건)**. 각 단계에서 *어디서 추천이 뜨고 어디서 §5.1 힌트가 뜨는지* 명시. 스크립트 + 녹화 영상을 `docs/first-5-min.md` 에 커밋.
 8. **★ Developer ID 서명/공증 선행 검증** (GO 조건 ③) — Apple 개발자 프로그램 가입 + 인증서 발급 + 빈 바이너리(`fn main(){}`)로 sign + notarize + Homebrew tap 설치 → Gatekeeper 통과 e2e. **이 항목 미통과 시 M0 = No-Go**.
-9. **★ `withfig/autocomplete` 포크 전략 확정** — vendor subtree 기준선 commit hash 핀, 자체 PR 수용 정책 초안, 원본 archived 시 forward-only fork 결정. `docs/spec-conversion-policy.md` 의 1장으로 작성.
+9. **★ `withfig/autocomplete` 포크 전략 확정** — vendor subtree 기준선 commit hash 핀, 자체 PR 수용 정책 초안, **3개월 commit 부재 또는 archived 시 forward-only fork** 결정 (v0.5 GO 조건 ③). `docs/spec-conversion-policy.md` 의 §5.3.
+10. **★ 문서 vs 구현 delta 점검** (CEO 리스크 #1 대응) — M0 끝에 5종 docs (`uninstall-spec`, `error-states`, `terminal-compat`, `first-5-min`, `spec-conversion-policy`) 의 인수 기준 vs M0 PoC 구현 사이의 갭을 1쪽 표로 정리. 갭이 큰 항목은 M1 0–6주차 우선순위로 끌어올리거나, 문서를 현실에 맞춰 v1.2 로 개정.
 
-**M0 Go/No-Go**: 1+2+3+5+8 동시 충족, 6에서 latency 동급 이상, 7 시나리오에서 12단계 중 10단계 이상 만족 시 GO. 미달 시 ZLE 통합 / spec 매칭 / 사용 시나리오 재설계.
+**M0 Go/No-Go**: 1+2+3+5+8 동시 충족, 6에서 latency 동급 이상, 7 시나리오에서 12단계 중 10단계 + 0.5단계 3건 중 2건 만족 시 GO. 미달 시 ZLE 통합 / spec 매칭 / 사용 시나리오 재설계.
+
+**M0-2 결과 의사결정 트리** (CEO 리스크 #4 대응 — 사전 확정으로 6주차 심리적 저항 최소화):
+
+| Tier C 비율 (3종 외삽) | 결정 |
+|------------------------|------|
+| 0% (모두 A 또는 B) | **그대로 50개** + M1 16주 |
+| 1–10% (1–5개 교체 필요) | **그대로 50개** + 대체 큐 5개로 보강 + M1 16주 |
+| 11–20% (6–10개 교체 필요) | **그대로 50개** 시도하되 M1 6주차 체크포인트에서 80% 변환률 미달 시 즉시 30개로 축소 |
+| 21–40% (11–20개 교체 필요) | **사전 30개로 축소** 시작 — 메시지: *"상위 30개 지원, 이후 50→100 점진 확장"* |
+| > 40% | **No-Go**. 정적 변환 전략 자체 재검토 (deno_core 도입 v1.0 재검토) |
+
+이 트리를 M0-2 직전에 *글로 박아둠* — Tier 분포 결과를 본 표에 매칭만 하면 결정 자동화.
 
 ### M1 — v1.0 (16주 기본, 6주차 + 12주차 체크포인트)
 
@@ -299,11 +314,14 @@ nerv uninstall          # 깔끔한 제거
 
 - v1.1: 동적 generator (`deno_core`).
 - v1.1: SQLite frecency 학습.
+- v1.1: `nerv spec list --changes` (manifest diff 명령).
 - v1.2: spec 50 → 200+ 점진 확장.
+- v1.x: **fuzzy matching** (prefix-only → fuzzy 옵션 도입).
 - v1.3: bash 지원.
 - v1.4: Linux.
 - v2.0: fish.
 - v2.x: spec 레지스트리 (`nerv spec install <pkg>`), `nerv config`.
+- v?.x: LaunchAgent 자동 기동 (도입 시 `uninstall-spec.md` §2 인벤토리에 항목 부활).
 - 일정 미정: PowerShell, nushell, Windows.
 - **AI / 자연어 모드는 본 로드맵에서 제거**. 필요 시 외부 플러그인 / 별도 프로젝트로 분리. *"AI 없음"* 포지셔닝과 정합.
 
@@ -319,8 +337,8 @@ nerv uninstall          # 깔끔한 제거
 | Alacritty | 베스트에포트 | M0 1회 수동 |
 | Kitty | 베스트에포트 | M0 1회 수동 |
 | tmux (위 안에서) | **보장** | M0 e2e + M1 CI |
-| Warp | 미보장 | (자체 기능 존재) |
-| VS Code 통합 | 베스트에포트 | M0 1회 수동 |
+
+매트릭스 외 (Warp / VS Code 통합 / JetBrains / Hyper / Tabby 등) 는 **공식 지원 외** — `terminal-compat.md` §1 의 *Triage 정책* 따름.
 
 ANSI는 raw cursor save/restore + line clearing만, alternate screen 진입 안 함.
 
@@ -369,15 +387,14 @@ carapace-bin / zsh-autocomplete: 아키텍처 상이로 정량 비교 의미 낮
 
 ## 15. 다음 액션 (착수 직후 1–2주)
 
-1. GitHub org `nerv-sh` (또는 `usenerv`) + Homebrew tap 레포 확보.
-2. `cargo new --workspace nerv` + 폴더 구조 스캐폴딩.
-3. **Apple 개발자 프로그램 가입 절차 즉시 시작** (계정 검토 1주 소요 가능).
-4. M0-1 (zsh ZLE → UDS → ANSI) 30줄 PoC + latency 측정.
-5. M0-2 트랜스파일러 진입점 + git/docker/kubectl 3종 스파이크.
-6. `docs/uninstall-spec.md` + `docs/error-states.md` + `docs/terminal-compat.md` + `docs/first-5-min.md` + `docs/spec-conversion-policy.md` — *인수 기준이 코드보다 먼저 글로* 작성.
-7. M0-7 첫 5분 시나리오 12단계 초안.
-8. M0-9 `withfig/autocomplete` subtree vendor + 버전 핀 commit.
+1. ✅ GitHub org `nerv-sh` 확보. **다음**: Homebrew tap 레포 `nerv-sh/homebrew-tap` 생성.
+2. ✅ Apple 개발자 프로그램 가입.
+3. ✅ **5종 인수 기준 문서 완료 (v1.1)** — `docs/uninstall-spec.md` (§5.4) + `docs/error-states.md` (§5.5) + `docs/terminal-compat.md` (§11) + `docs/first-5-min.md` (§5.3 / M0-7) + `docs/spec-conversion-policy.md` (§5.7 / M0-9).
+4. `cargo new --workspace nerv` + 폴더 구조 스캐폴딩.
+5. M0-9 `withfig/autocomplete` subtree vendor + 버전 핀 commit.
+6. M0-1 (zsh ZLE → UDS → ANSI) 30줄 PoC + latency 측정.
+7. M0-2 트랜스파일러 진입점 + git/docker/kubectl 3종 스파이크.
 
 ---
 
-*문서 v0.4 — CEO v0.3 리뷰의 GO 조건 4개 모두 반영 + 추가 제안 6건 반영. 본 문서로 구현 진입. 다음 갱신 트리거: M0 종료, 6주차 / 12주차 체크포인트, 또는 핵심 비목표 변경.*
+*문서 v0.5 — CEO v0.4 리뷰의 GO 조건 3건 + 제거 3건 + 추가 4건 + 정합성 3건 모두 반영. docs 5종도 v1.1 로 갱신 (error-states / first-5-min / spec-conversion-policy / terminal-compat / uninstall-spec). 본 문서로 구현 진입. 다음 갱신 트리거: M0 종료 (산출물 10번 — 문서 vs 구현 delta 점검), 6주차 / 12주차 체크포인트, 또는 핵심 비목표 변경.*

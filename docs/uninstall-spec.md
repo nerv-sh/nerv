@@ -1,0 +1,270 @@
+# `nerv uninstall` — 인수 기준 명세서
+
+> **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.4 §5.4 정합.
+> **출시 차단 요건**: 본 문서의 *모든* 인수 기준이 e2e 자동 테스트에서 통과해야 v1.0 출시.
+
+---
+
+## 1. 원칙
+
+> *"깔끔히 떠날 수 있다는 신뢰가 설치를 유도한다."*
+
+Nerv는 사용자의 시스템에 다음 4가지 흔적을 남긴다. uninstall은 이를 **모두** 제거해야 한다 (단, `--keep-config` 명시 시 설정 디렉터리만 보존).
+
+1. `~/.zshrc` 의 마커 라인
+2. 백그라운드 데몬 (`nervd`)
+3. 캐시 디렉터리
+4. 설정 디렉터리 (옵션)
+
+---
+
+## 2. 흔적 인벤토리
+
+uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 목록.
+
+| # | 종류 | 경로 / 리소스 | 생성 주체 | `--keep-config` 시 |
+|---|------|---------------|----------|-------------------|
+| 1 | shell hook | `~/.zshrc` 의 `# >>> nerv >>>` ~ `# <<< nerv <<<` 블록 | `nerv init zsh >> ~/.zshrc` | **삭제** |
+| 2 | 데몬 프로세스 | `nervd` (PID 추적: `~/Library/Caches/nerv/nervd.pid`) | `nerv start` 또는 자동 기동 | **종료** |
+| 3 | 데몬 소켓 | `~/Library/Caches/nerv/nervd.sock` | nervd | 삭제 |
+| 4 | 데몬 로그 | `~/Library/Logs/nerv/nervd.log` (+ 회전 파일) | nervd | 삭제 |
+| 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 | 다양 | 삭제 |
+| 6 | 설정 디렉터리 | `~/.config/nerv/` (XDG_CONFIG_HOME 존중) | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존) |
+| 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, formula 메타 | `brew install` | brew 가 처리 |
+
+> **v1.0 비대상**: LaunchAgent (`~/Library/LaunchAgents/sh.nerv.nervd.plist`) — v1.0 은 `nerv start` / `stop` 수동 라이프사이클만. 자동 기동 도입 (v1.x) 시점에 본 인벤토리에 8번으로 추가하고 §4 step 6 도 함께 부활한다.
+
+> **macOS 경로 일관성 원칙**: 캐시 = `~/Library/Caches/nerv/`, 로그 = `~/Library/Logs/nerv/`, 설정 = `~/.config/nerv/`.
+
+---
+
+## 3. 마커 블록 형식
+
+`nerv init zsh` 가 `~/.zshrc` 에 추가하는 정확한 형식 (멱등성 보장의 핵심):
+
+```sh
+# >>> nerv >>>
+# Managed by `nerv init zsh`. Do not edit between markers.
+# Version: 1.0.0
+# Installed: 2026-04-29T15:30:00Z
+eval "$(/opt/homebrew/bin/nerv init zsh --shell-script)"
+# <<< nerv <<<
+```
+
+규칙:
+
+- 시작 마커 `# >>> nerv >>>` 와 종료 마커 `# <<< nerv <<<` 는 **고정 문자열**. 변경 금지.
+- `Version` / `Installed` 메타 라인은 갱신 시 덮어쓴다.
+- 마커 사이 라인은 `nerv init zsh` 출력으로 *완전 대체* 한다 (사용자 수정 무효).
+- `nerv init zsh` 를 여러 번 실행해도 마커 블록은 **항상 1개만** 존재해야 한다.
+
+---
+
+## 4. uninstall 절차 (정확한 순서)
+
+```
+1. lock 획득 (~/Library/Caches/nerv/uninstall.lock)
+2. 데몬 graceful stop:
+   a. nervd.pid 읽기
+   b. SIGTERM 전송 → 5초 대기
+   c. 살아있으면 SIGKILL → 1초 대기
+   d. nervd.sock 파일 삭제
+3. shell hook 제거:
+   a. 모든 알려진 zsh init 파일 스캔 — ~/.zshrc, ~/.zshenv, ~/.zprofile, ~/.zlogin
+   b. 마커 블록 (시작~종료 마커 포함) 추출
+   c. 블록 1개씩 모두 제거 (여러 개 발견 시 모두)
+   d. 마커 블록만 제거된 결과를 atomic write (임시파일 → rename)
+   e. 백업: 원본을 ~/.zshrc.nerv-backup-<timestamp> 로 1회 복사
+4. 캐시 삭제: rm -rf ~/Library/Caches/nerv/
+5. 로그 삭제: rm -rf ~/Library/Logs/nerv/ (단, 본 uninstall 의 로그 §10 은 보존)
+6. 설정 삭제 (--keep-config 미지정 시): rm -rf ~/.config/nerv/
+7. lock 해제
+8. 사용자 알림: stdout 1줄 — "nerv removed. backup: ~/.zshrc.nerv-backup-<ts>"
+```
+
+**원자성 (atomicity)**:
+
+- `~/.zshrc` 수정은 *반드시* 임시파일 + `rename(2)` 로 처리 — uninstall 중 SIGKILL을 받아도 `.zshrc` 가 깨지지 않아야 한다.
+- 각 단계는 멱등 — 중간 실패 후 재실행 가능해야 한다.
+
+**실패 시 동작**:
+
+- 단계별 실패는 stderr에 1줄 + 다음 단계 계속 (best effort).
+- 완료 후 `nerv: 7/8 steps OK, 1 warning — see above` 형식 요약.
+- exit code: `0` (완전 성공) / `1` (부분 실패, 흔적 일부 잔존) / `2` (lock 획득 실패).
+
+---
+
+## 5. `--keep-config` 옵션
+
+```bash
+nerv uninstall --keep-config
+```
+
+- §2 인벤토리 표의 *"--keep-config 시"* 컬럼 따름.
+- 보존: `~/.config/nerv/` 만.
+- 삭제: 그 외 모두 + zshrc 마커 블록 제거.
+- 재설치 시 기존 사용자 설정 복원.
+
+**⚠️ shell hook 은 항상 제거** — config 보존이 hook 보존을 의미하지 않는다 (hook 이 남아있으면 nerv 가 없는데도 zsh 시작 시 에러가 난다).
+
+---
+
+## 6. brew 통합
+
+`brew uninstall nerv` 도 본 문서의 *모든 인수 기준* 을 만족해야 한다.
+
+Homebrew formula 의 `post_uninstall` 훅에서:
+
+```ruby
+def post_uninstall
+  system "#{bin}/nerv", "uninstall", "--quiet" if File.exist?("#{bin}/nerv")
+end
+```
+
+`caveats` 사용자 안내:
+
+```
+nerv has been removed.
+A backup of your .zshrc was saved to ~/.zshrc.nerv-backup-<timestamp>.
+Restart your shell to complete cleanup.
+```
+
+`brew uninstall` 후 `nerv` 바이너리는 brew 가 제거하므로, post_uninstall 은 brew 가 바이너리 삭제하기 *전에* 실행되어야 한다 (Homebrew 의 기본 순서).
+
+---
+
+## 7. 인수 기준 (e2e 테스트 시나리오)
+
+각 시나리오는 `expectrl` 기반 e2e 로 자동화. M1 12주차 베타 체크포인트의 차단 요건.
+
+### 7.1 정상 경로 (Happy path)
+
+```
+GIVEN: 깨끗한 macOS + zsh 5.8+, brew 설치됨
+WHEN:
+  brew install nerv-sh/tap/nerv
+  eval "$(nerv init zsh)"
+  echo "source ~/.zshrc" | zsh -i -c 'git c<TAB>'   # 추천 1회 사용
+  nerv uninstall
+THEN:
+  - exit code = 0
+  - ~/.zshrc 에 마커 블록 0개
+  - ~/.zshrc.nerv-backup-* 1개 존재
+  - nervd 프로세스 0개
+  - ~/Library/Caches/nerv/ 디렉터리 부재
+  - ~/.config/nerv/ 디렉터리 부재
+  - ~/Library/Logs/nerv/ 디렉터리 부재 (uninstall 자체 로그 제외)
+  - 새 zsh 세션 시작 시 에러 없음
+```
+
+### 7.2 멱등성
+
+```
+WHEN: nerv uninstall 을 2회 연속 실행
+THEN: 두 번째 실행도 exit 0, 메시지는 "nerv: nothing to remove"
+```
+
+### 7.3 사용자 .zshrc 수정 보호
+
+```
+GIVEN: 사용자가 .zshrc 의 마커 *외부* 에 자신의 코드를 직접 추가한 상태
+WHEN: nerv uninstall
+THEN:
+  - 마커 외부 라인은 100% 보존 (line-by-line diff = 마커 블록 제외 0)
+  - 사용자 코드의 들여쓰기/공백/주석 모두 보존
+```
+
+### 7.4 마커 외부의 nerv 라인은 건드리지 않음
+
+```
+GIVEN: 사용자가 .zshrc 어딘가에 무관한 "nerv" 문자열 (예: 변수명, 별칭)을 가짐
+WHEN: nerv uninstall
+THEN: 그 라인은 보존. 마커 블록만 제거됨
+```
+
+### 7.5 데몬이 응답하지 않을 때
+
+```
+GIVEN: nervd 가 SIGSTOP 으로 멈춰 있는 상태
+WHEN: nerv uninstall
+THEN:
+  - SIGTERM 후 5초 타임아웃 → SIGKILL 전송
+  - 종료 코드 0
+  - stderr 에 "warning: daemon required SIGKILL" 1줄
+```
+
+### 7.6 권한 부족 (write protected file)
+
+```
+GIVEN: ~/.zshrc 가 chmod 444 로 읽기 전용
+WHEN: nerv uninstall
+THEN:
+  - exit code 1
+  - stderr: "error: cannot write ~/.zshrc — fix permissions and re-run"
+  - 다른 단계는 best effort 진행됨
+```
+
+### 7.7 `--keep-config`
+
+```
+GIVEN: ~/.config/nerv/config.toml 사용자 편집 존재
+WHEN: nerv uninstall --keep-config
+THEN:
+  - ~/.config/nerv/config.toml 보존
+  - 그 외 모든 흔적 §2 인벤토리대로 제거
+```
+
+### 7.8 `brew uninstall` 동등성
+
+```
+GIVEN: Happy path 7.1과 동일 상태
+WHEN: brew uninstall nerv 실행 (nerv uninstall 직접 호출 X)
+THEN: 7.1의 THEN 모두 만족
+```
+
+### 7.9 다중 마커 블록 정리
+
+```
+GIVEN: .zshrc 에 마커 블록이 2개 이상 (사용자가 nerv init 을 잘못 두 번 추가)
+WHEN: nerv uninstall
+THEN: 모든 마커 블록 제거 (개수 = 0)
+```
+
+### 7.10 zsh 외 셸이 기본일 때
+
+```
+GIVEN: chsh -s /bin/bash 후 .zshrc 에 마커 존재 (사용자가 셸 변경했지만 nerv 안 지움)
+WHEN: nerv uninstall
+THEN: 정상 동작 (zsh 가 현재 기본 셸인지와 무관하게 마커 제거)
+```
+
+---
+
+## 8. 비목표 (uninstall 이 *하지 않는* 것)
+
+- Homebrew tap 제거 (`brew untap nerv-sh/tap`) — 사용자가 명시적으로.
+- `~/.zshrc.nerv-backup-*` 백업 파일 정리 — 사용자가 검토 후 직접.
+- `oh-my-zsh` 의 `plugins=(... nerv)` 항목 자동 제거 — 매니저별 가이드(`docs/install-zsh.md`)에서 안내.
+- 사용자가 직접 만든 alias / 함수 중 `nerv` 명령에 의존하는 것의 식별.
+- 다른 사용자 계정의 흔적 (uninstall 은 현재 `$HOME` 만 처리).
+
+---
+
+## 9. 보안 고려
+
+- `rm -rf` 는 항상 검증된 절대 경로로만. `$HOME` 이 빈 문자열이면 즉시 abort.
+- 심볼릭 링크 따라가지 않음 (`--keep-config` 시에도 `~/.config/nerv/` 가 심링크면 따라가지 않고 심링크만 삭제).
+- `~/.zshrc.nerv-backup-*` 백업 파일 권한 = 원본과 동일 (`stat` 후 `chmod`).
+
+---
+
+## 10. 로깅
+
+uninstall 의 모든 단계는 `~/Library/Logs/nerv/uninstall-<timestamp>.log` 에 기록. `--quiet` 옵션 시 stdout 만 억제, 로그는 유지.
+
+uninstall 자체의 로그는 §4 step 5 ("로그 삭제")에서 제거되지 않는다 — 디버깅을 위해 *남긴다*. 사용자가 직접 정리하거나, 다음 nerv 설치 시 자동 정리.
+
+---
+
+*문서 v1.1 — PLAN.md v0.5 §5.4 인수 기준의 정밀 명세. v1.0 → v1.1 변경: §2 인벤토리에서 LaunchAgent 제거 (v1.0 비대상), §4 절차에서 LaunchAgent 단계 삭제, 단계 번호 9→8 재정렬. 변경 트리거: M0-1 PoC 결과로 데몬 IPC 구조 변경 시, LaunchAgent 자동 기동 도입 (PLAN v?.x) 시.*
