@@ -1,0 +1,222 @@
+# Nerv — llms.txt (Codebase Context)
+
+## PROJECT OVERVIEW
+
+**Nerv** is a single-binary inline shell autocomplete for macOS zsh, recreating Fig's core feature without login, telemetry, or AI. It uses the `withfig/autocomplete` spec repository (MIT) at build time to provide real-time, IDE-like autocomplete for 50+ CLIs.
+
+- **Status**: Pre-alpha (M0 spike phase). Scaffolding complete, stubs in place.
+- **License**: Apache-2.0. Bundled Fig specs are MIT.
+- **Target**: macOS (Apple Silicon + Intel), zsh 5.8+, iTerm2 / Terminal.app / tmux.
+
+### Tech Stack
+| Layer | Choice |
+|-------|--------|
+| Language | Rust 1.85+ (edition 2021) |
+| CLI | clap v4 (derive) |
+| Async / IPC | tokio (multi-thread) + Unix domain socket |
+| TUI/ANSI | crossterm (raw cursor, no alternate screen) |
+| Serde | serde + serde_json |
+| Errors | anyhow (app), thiserror (lib) |
+| Logging | tracing + tracing-subscriber (env-filter) |
+| Build-time transpile | swc_core (planned, not yet wired) |
+| CI | GitHub Actions (macOS-13 Intel + macOS-14 ARM) |
+| Distribution | Homebrew tap (`nerv-sh/homebrew-tap`) |
+
+---
+
+## FILE MANIFEST
+
+### Workspace Root
+
+| File | Purpose |
+|------|---------|
+| `Cargo.toml` | Workspace definition: 5 members, shared deps, release profile (LTO thin, strip symbols) |
+| `rust-toolchain.toml` | Pins Rust toolchain |
+| `PLAN.md` | Product plan v0.5 — scope, architecture, roadmap, CLI commands, risks |
+| `README.md` | Project overview, repo layout, install instructions |
+| `NOTICE` | Third-party license attribution (withfig/autocomplete MIT) |
+
+### `crates/nerv-engine/` — Core matching library
+
+| File | Key Types / Functions | Dependencies |
+|------|----------------------|--------------|
+| `src/lib.rs` | `Error` enum, `Result<T>` type alias. Re-exports: `Request`, `Response`, `Suggestion`, `SuggestionKind`, `Position`, `Token` | thiserror, serde_json |
+| `src/parser.rs` | `Token { text, start, end }`, `Position` enum (`SubcommandSlot`, `FlagSlot`, `ArgumentSlot`, `Unknown`), `parse(line: &str, cursor: usize) -> Option<(Vec<Token>, Position)>` **[STUB]** | — |
+| `src/ranker.rs` | `UsageCounter` (in-memory HashMap), `score(candidate: &str, prefix: &str, usage_count: u64) -> i64` (prefix-only, no fuzzy) | std::collections |
+| `src/spec.rs` | `Manifest`, `SpecMeta`, `Tier` (A/B/C), `LimitedArg`, `Spec`, `Subcommand`, `Option_`, `Argument` | serde |
+| `src/ipc.rs` | `Request` enum (`Complete`, `Ping`, `DoctorAutorun`), `Response` enum (`Suggestions`, `DynamicHint`, `Pong`, `Empty`, `Error`), `Suggestion`, `SuggestionKind` | serde |
+| `src/paths.rs` | `cache_dir()`, `log_dir()`, `config_dir()`, `socket_path()`, `pid_path()`, `daemon_log_path()` — authoritative paths per `uninstall-spec.md` | std::path |
+
+### `crates/nerv-cli/` — `nerv` binary
+
+| File | Key Types / Functions |
+|------|----------------------|
+| `src/main.rs` | `Cli` (clap Parser), `Command` enum (`Init`, `Doctor`, `Start`, `Stop`, `Spec`, `Uninstall`), `Shell` enum (`Zsh`). All command handlers are **stubs** except `init` (emits marker block via nerv-shell). |
+
+### `crates/nerv-daemon/` — `nervd` binary
+
+| File | Key Types / Functions |
+|------|----------------------|
+| `src/main.rs` | tokio multi-thread (2 workers), `UnixListener` on `nervd.sock`, PID file, SIGTERM/SIGINT graceful shutdown. Currently an echo server: Ping->Pong, Complete->Empty. |
+
+### `crates/nerv-shell/` — zsh init script library
+
+| File | Key Types / Functions |
+|------|----------------------|
+| `src/lib.rs` | `MARKER_START`, `MARKER_END` constants, `init_block(bin_path, version, installed_at) -> String`, `strip_blocks(content) -> String`, `count_blocks(content) -> usize`. Full implementation with 4 tests. |
+
+### `build/spec-transpile/` — Build tool (not published)
+
+| File | Key Types / Functions |
+|------|----------------------|
+| `src/main.rs` | `Args` (clap: --input, --output, --only), scans TS files in vendor dir. **STUB** — no actual transpilation yet (swc_core not wired). |
+
+### `shell-integrations/zsh/_nerv.zsh` — ZLE widget
+
+Stub ZLE widget (~54 lines). Defines `__nerv_complete` function, hooks into `zle-line-pre-redraw`. Guards against double-sourcing. No actual UDS communication yet (M0-1).
+
+### `vendor/withfig-autocomplete/` — Git subtree (MIT)
+
+Pinned at commit `aef52acf`. Contains ~1,484 TypeScript spec files for CLI autocomplete definitions. Used as build-time input only, no runtime dependency.
+
+---
+
+## SYSTEM ARCHITECTURE
+
+```
+User keystroke
+      |
+      v
+ zsh ZLE widget (_nerv.zsh)
+   - hooks zle-line-pre-redraw
+   - reads $LBUFFER, $CURSOR
+      |
+      | JSON-RPC over Unix domain socket
+      | (~/Library/Caches/nerv/nervd.sock)
+      v
+ nervd (nerv-daemon)
+   - tokio async server
+   - deserializes Request (Complete/Ping/DoctorAutorun)
+   - [future] parser.parse() -> Position
+   - [future] spec lookup + ranker.score()
+   - returns Response (Suggestions/DynamicHint/Pong/Empty)
+      |
+      v
+ ZLE widget renders inline ANSI popup
+   - no alternate screen
+   - raw cursor save/restore + line clearing
+   - Tab/Right = accept, Esc = close, ? = help
+```
+
+### Build-time pipeline (spec-transpile)
+
+```
+vendor/withfig-autocomplete/src/*.ts
+      |
+      | nerv-spec-build (build/spec-transpile)
+      | [future: swc_core parse + static extract]
+      v
+specs-prebuilt/
+  |- manifest.json   (Manifest: schema_version, specs[], build_date)
+  +- <name>.json     (Spec: subcommands, options, args)
+```
+
+### Path Inventory (uninstall contract)
+
+| Path | Purpose |
+|------|---------|
+| `~/Library/Caches/nerv/` | Socket, PID file |
+| `~/Library/Logs/nerv/` | Daemon log |
+| `~/.config/nerv/` | User config (TOML) |
+| `~/.zshrc` marker block | Shell integration (`# >>> nerv >>>` ... `# <<< nerv <<<`) |
+
+---
+
+## DEVELOPMENT GUIDELINES
+
+### Build & Test
+```bash
+cargo check                              # Type check
+cargo clippy --workspace -- -D warnings  # Lint (zero warnings)
+cargo fmt --all --check                  # Format check
+cargo test --workspace                   # Run all tests (8 unit tests)
+```
+
+### Code Conventions
+- Rust 2018 idioms enforced (`#![deny(rust_2018_idioms)]`)
+- `#![warn(missing_debug_implementations)]` on library crates
+- App-level errors: `anyhow::Result`
+- Library errors: `thiserror` derive
+- Logging: `tracing` macros (`info!`, `warn!`, `debug!`), env filter via `NERV_LOG`
+- No `directories` crate — paths resolved from `$HOME` directly (docs-driven)
+
+### Error Handling
+- 5 defined error states (docs/error-states.md): daemon not running, spec corruption, zsh < 5.8, ZLE widget conflict, spec version mismatch
+- Principle: "fail silently, show one fix line"
+
+### Testing
+- Unit tests: inline `#[cfg(test)]` modules
+- Future: `cargo nextest` + `expectrl` for zsh/tmux e2e scenarios
+
+### CI Pipeline
+- `rustfmt` check, `clippy -D warnings`, `cargo test` on macOS-13 (Intel) + macOS-14 (ARM)
+- Future: e2e job (M1), spec regression job
+
+---
+
+## DATA CONTRACTS
+
+### IPC Wire Format (JSON-RPC over UDS)
+
+**Request** (tagged by `method`):
+```json
+{"method":"complete","line":"git co","cursor":6}
+{"method":"ping"}
+{"method":"doctor_autorun"}
+```
+
+**Response** (tagged by `kind`):
+```json
+{"kind":"suggestions","0":[{"insertion":"commit","display":"commit","description":"Record changes","kind":"subcommand"}]}
+{"kind":"dynamic_hint","reason":"dynamic-branch-list","hint_command":"git branch --list","feedback_url":"..."}
+{"kind":"pong","version":"0.1.0"}
+{"kind":"empty","reason":"not-yet-implemented"}
+{"kind":"error","message":"invalid request: ..."}
+```
+
+### Spec JSON Schema (output of spec-transpile)
+
+- **manifest.json**: `{ schema_version: u32, nerv_version, withfig_commit, build_date, specs: SpecMeta[] }`
+- **SpecMeta**: `{ name, tier: "A"|"B"|"C", limited_args?: LimitedArg[], sha256 }`
+- **Spec**: `{ name, description?, subcommands: Subcommand[], options: Option_[] }`
+
+### Ranker Contract (v1.0)
+- Prefix-only matching: `score("commit", "co", usage) >= 0`, `score("checkout", "co", usage) < 0`
+- Score formula: `1_000_000 - remaining_chars + min(usage, 1000)`
+- Fuzzy matching is a v1.x non-goal
+
+---
+
+## INSIGHTS & RECOMMENDATIONS
+
+### Implementation Status
+- **Fully implemented**: nerv-shell (marker block CRUD), ranker (prefix scoring + usage counter), paths, IPC types, spec data model, CI
+- **Stubbed**: parser (returns Unknown), daemon (echo server), CLI commands (start/stop/uninstall/doctor), spec-transpile (no swc yet)
+- **Not started**: ZLE widget UDS communication, ANSI popup rendering, actual spec transpilation
+
+### Next Milestones (M0 Spike)
+1. M0-1: ZLE -> UDS -> ANSI PoC (p95 < 25ms target)
+2. M0-2: swc transpiler for git/docker/kubectl specs
+3. M0-3: Inline `?` help PoC
+
+### Architecture Strengths
+- Clean crate separation (engine as pure library, no async dependency)
+- Docs-first approach (5 acceptance criteria docs written before code)
+- Deterministic build pipeline design
+- Trace-zero uninstall as release-blocking criterion
+
+### Technical Debt / Risks
+- Parser is entirely stubbed — core functionality not yet proven
+- swc_core dependency not yet added (significant build time impact expected)
+- No actual spec transpilation — Tier A/B/C distribution unknown until M0-2
+- `interprocess` crate commented out in daemon (using raw tokio UDS for now)
