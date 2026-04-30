@@ -10,12 +10,12 @@
 
 | # | 파일 | 역할 |
 |---|------|------|
-| 1 | `PLAN.md` (v0.5) | 제품 정책 / 스코프 / 로드맵 — **모든 결정의 근거** |
+| 1 | `PLAN.md` (v0.5.1) | 제품 정책 / 스코프 / 로드맵 — **모든 결정의 근거** |
 | 2 | `docs/uninstall-spec.md` (v1.1) | `nerv uninstall` 인수 기준 (출시 차단 요건) |
 | 3 | `docs/error-states.md` (v1.1) | 5종 에러 UX + `nerv doctor` 자동 실행 |
 | 4 | `docs/terminal-compat.md` (v1.1) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist |
 | 5 | `docs/first-5-min.md` (v1.1) | 12+0.5단계 사용자 시나리오 |
-| 6 | `docs/spec-conversion-policy.md` (v1.1) | TS spec → JSON Tier A/B/C 정책 + fork 전략 |
+| 6 | `docs/spec-conversion-policy.md` (v1.2) | TS spec → JSON Tier A/B/C 정책 + fork 전략 + **§5.2.B upstream PR 흡수** |
 
 > **원칙**: *"글이 코드보다 먼저"*. 어떤 동작을 바꾸기 전에 위 문서 중 해당 절을 먼저 갱신하고 PR 에 그 변경을 함께 커밋하세요. 코드와 문서가 어긋난 PR 은 리뷰 거부 사유.
 
@@ -89,8 +89,9 @@ build/spec-transpile/                # withfig TS → JSON 빌더 (swc 도입은
 shell-integrations/zsh/_nerv.zsh     # ZLE widget 골격
 specs-prebuilt/                      # 빌드 산출 (커밋 X)
 vendor/withfig-autocomplete/         # subtree, MIT, pin = aef52acf…
+vendor-patches/{upstream,self}/      # cherry-pick 보관소 (M1 도입; spec-conversion-policy §5.2)
 docs/                                # 위 §2 5종
-.github/workflows/{ci,upstream-monitor}.yml
+.github/workflows/{ci,upstream-monitor,upstream-prs}.yml  # upstream-prs 는 M1
 ```
 
 ## 7. 작업 가이드라인
@@ -130,7 +131,7 @@ PLAN §10 에 명시된 차단 요건 4개를 *직접* 점검하기 전엔 다�
 - ❌ `directories` 크레이트로 `~/Library/Caches/<bundle-id>/` 만들기 — docs 가 `~/Library/Caches/nerv/` 만 인정.
 - ❌ `cargo fmt --all` 안 돌리고 PR — CI 가 `--check` 로 거부.
 - ❌ 새 의존성을 워크스페이스 deps 에 안 넣고 직접 추가 — 일관성 깨짐.
-- ❌ vendor/withfig-autocomplete/ 직접 편집 — 항상 upstream PR 먼저, 막히면 `vendor-patches/`.
+- ❌ vendor/withfig-autocomplete/ 직접 편집 — 항상 upstream PR 먼저, 막히면 `vendor-patches/self/`. upstream 의 제3자 PR 흡수는 `vendor-patches/upstream/` (`spec-conversion-policy.md` §5.2.B).
 - ❌ alternate screen / 24-bit color 사용 — terminal-compat §3 blacklist.
 - ❌ `nerv` CLI 에 명령 추가 — 5개로 고정 (PLAN §9 / GO 조건 ①).
 
@@ -148,5 +149,6 @@ PLAN §10 에 명시된 차단 요건 4개를 *직접* 점검하기 전엔 다�
 - 새 crate / 새 워크플로 추가 시 §6 갱신.
 - 새 불변식 발견 시 §4 행 추가.
 - 새 함정 만났을 때 §8 추가.
+- spec / docs 수가 변할 때 §2 표 갱신.
 
 — 끝. 작업 즐겁게.

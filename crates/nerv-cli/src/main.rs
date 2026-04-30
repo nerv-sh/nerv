@@ -10,9 +10,12 @@
 //! Intentionally absent in v1.0: `telemetry`, `update`, `spec install`,
 //! `spec update`, `spec dev`, `feedback`, `config`. Single command surface
 //! is part of the trust contract (PLAN.md §9 / §0 GO 조건 ①).
+//!
+//! Internal (hidden) commands:
+//! - `nerv _complete`    — IPC bridge for ZLE widget (M0-1 PoC)
 
 use clap::{Parser, Subcommand};
-use nerv_engine::paths;
+use nerv_engine::{paths, Response, Suggestion};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -61,6 +64,14 @@ enum Command {
         #[arg(long)]
         quiet: bool,
     },
+    /// Internal: IPC bridge for the ZLE widget. Not user-facing.
+    #[command(name = "_complete", hide = true)]
+    InternalComplete {
+        /// The input line (LBUFFER from zsh).
+        line: String,
+        /// Cursor byte offset within line.
+        cursor: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -89,6 +100,7 @@ fn main() -> anyhow::Result<()> {
             SpecCmd::List => cmd_spec_list(),
         },
         Command::Uninstall { keep_config, quiet } => cmd_uninstall(keep_config, quiet),
+        Command::InternalComplete { line, cursor } => cmd_internal_complete(&line, cursor),
     }
 }
 
@@ -104,13 +116,16 @@ fn init_tracing() {
 // ---------- command stubs (M0–M1) ----------
 
 fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
-    // M0-1 will produce the actual ZLE widget script. For now, emit
-    // the marker-wrapped block via nerv-shell to validate the contract.
     match shell {
         Shell::Zsh => {
             if shell_script {
-                // Inner script: the actual ZLE widget. Stub for now.
-                println!("# nerv zsh shell-script — populated in M0-1");
+                // Emit NERV_BIN so the widget knows where we are.
+                let bin = std::env::current_exe()?.to_string_lossy().into_owned();
+                println!("export NERV_BIN={bin:?}");
+                print!(
+                    "{}",
+                    include_str!("../../../shell-integrations/zsh/_nerv.zsh")
+                );
                 Ok(())
             } else {
                 let bin = std::env::current_exe()?.to_string_lossy().into_owned();
@@ -159,4 +174,48 @@ fn cmd_uninstall(keep_config: bool, quiet: bool) -> anyhow::Result<()> {
     // docs/uninstall-spec.md §4 — 8-step procedure, atomic .zshrc edits.
     let _ = (keep_config, quiet);
     anyhow::bail!("nerv uninstall: not yet implemented (M1 13–16주차)")
+}
+
+// ---------- internal: _complete (M0-1 IPC bridge) ----------
+
+fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let sock_path = paths::socket_path().ok_or_else(|| anyhow::anyhow!("HOME unset"))?;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+
+    rt.block_on(async {
+        let stream = UnixStream::connect(&sock_path).await?;
+        let (read_half, mut write_half) = stream.into_split();
+
+        let req = nerv_engine::Request::Complete {
+            line: line.to_string(),
+            cursor,
+        };
+        let mut json = serde_json::to_string(&req)?;
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await?;
+
+        let mut reader = BufReader::new(read_half);
+        let mut resp_line = String::new();
+        reader.read_line(&mut resp_line).await?;
+
+        let resp: Response = serde_json::from_str(resp_line.trim())?;
+        if let Response::Suggestions { items } = resp {
+            for s in &items {
+                print_suggestion(s);
+            }
+        }
+        // Any other response type → no output → no popup in zsh.
+        Ok(())
+    })
+}
+
+fn print_suggestion(s: &Suggestion) {
+    let desc = s.description.as_deref().unwrap_or("");
+    println!("{}\t{}\t{}", s.insertion, s.display, desc);
 }

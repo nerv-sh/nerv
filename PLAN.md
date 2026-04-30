@@ -284,7 +284,7 @@ nerv uninstall          # 깔끔한 제거
 
 > **기본 16주 채택** — CEO 권고대로 spec 30 축소가 아니라 일정 연장. *"상위 50개 지원"* 메시지를 보존해 마케팅 가치 유지.
 
-- **0–6주차**: 50개 spec 변환 파이프라인, ZLE 안정화, 인라인 `?`, 에러 상태 UX 5종.
+- **0–6주차**: 50개 spec 변환 파이프라인, ZLE 안정화, 인라인 `?`, 에러 상태 UX 5종, **upstream PR 흡수 인프라** (`upstream-prs.yml` + `vendor-patches/{upstream,self}/` + `AUTHORS.md` + `nerv-spec-build` 의 patch 적용 단계 + 첫 cherry-pick 1건 시연 — `spec-conversion-policy.md` §5.2.B / §10.B).
   - **6주차 중간 체크포인트** — 50개 중 80%+ 변환 / latency p95 < 25 ms / tmux+2터미널 회귀 / uninstall 흔적 0. **모두 통과 시만 진행**. 미달 시 spec 50→30 (최후 수단) 또는 추가 4주 연장.
 - **7–12주차**: 50개 spec의 1단계 플래그 `?` 도움말 100%, in-memory 사용 카운터로 prefix-match 가중, `nerv doctor` 자동 감지 5종, **zsh 플러그인 매니저 패키지** (`nerv-omz`, `nerv-zsh`) e2e.
   - **12주차 베타 체크포인트** — 내부 dogfooding 2주.
@@ -315,7 +315,7 @@ nerv uninstall          # 깔끔한 제거
 - v1.1: 동적 generator (`deno_core`).
 - v1.1: SQLite frecency 학습.
 - v1.1: `nerv spec list --changes` (manifest diff 명령).
-- v1.2: spec 50 → 200+ 점진 확장.
+- v1.2: spec 50 → 200+ 점진 확장 — 주력 공급원은 §5.2.B 의 upstream PR cherry-pick + 자체 spec 추가.
 - v1.x: **fuzzy matching** (prefix-only → fuzzy 옵션 도입).
 - v1.3: bash 지원.
 - v1.4: Linux.
@@ -398,4 +398,5 @@ carapace-bin / zsh-autocomplete: 아키텍처 상이로 정량 비교 의미 낮
 
 ---
 
-*문서 v0.5 — CEO v0.4 리뷰의 GO 조건 3건 + 제거 3건 + 추가 4건 + 정합성 3건 모두 반영. docs 5종도 v1.1 로 갱신 (error-states / first-5-min / spec-conversion-policy / terminal-compat / uninstall-spec). 본 문서로 구현 진입. 다음 갱신 트리거: M0 종료 (산출물 10번 — 문서 vs 구현 delta 점검), 6주차 / 12주차 체크포인트, 또는 핵심 비목표 변경.*
+*문서 v0.5.1 — v0.5 의 M1 0–6주차 산출물에 §5.2.B 활성화 (upstream PR 흡수 인프라) 추가, v1.2 의 200+ spec 공급원으로 cherry-pick 명시. spec-conversion-policy.md 도 v1.2 로 동반 갱신. 사용자 제안 ("upstream PR/issue 활용") 반영.*
+*v0.5 — CEO v0.4 리뷰의 GO 조건 3건 + 제거 3건 + 추가 4건 + 정합성 3건 모두 반영. docs 5종도 v1.1 로 갱신. 다음 갱신 트리거: M0 종료 (산출물 10번 — 문서 vs 구현 delta 점검), 6주차 / 12주차 체크포인트, 또는 핵심 비목표 변경.*
