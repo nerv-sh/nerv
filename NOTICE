@@ -10,6 +10,7 @@ or available at <https://www.apache.org/licenses/LICENSE-2.0>.
 
 This product includes software developed by Fig (now part of AWS):
     withfig/autocomplete   <https://github.com/withfig/autocomplete>
+    Copyright (c) 2021 Hercules Labs Inc. (Fig)
     Licensed under the MIT License.
 
 The bundled CLI specifications (vendored under `vendor/withfig-autocomplete/`)
@@ -17,6 +18,10 @@ remain under their original MIT license. Build artifacts derived from these
 specifications (under `specs-prebuilt/` in releases) preserve the same MIT
 attribution.
 
-The pinned upstream commit is recorded in `vendor/withfig-autocomplete/`
-metadata and in release notes. Fork policy is documented in
-`docs/spec-conversion-policy.md` §5.
+Pinned upstream commit (M0-9):
+    aef52acff84c45edde61ae610cc2c964802b9a38
+
+This pin is also recorded in the squash commit added by `git subtree add`,
+and is monitored every 2 weeks by `.github/workflows/upstream-monitor.yml`.
+Fork policy (3-month inactivity or archived → forward-only fork) is
+documented in `docs/spec-conversion-policy.md` §5.3.
