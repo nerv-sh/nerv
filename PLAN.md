@@ -387,13 +387,14 @@ carapace-bin / zsh-autocomplete: 아키텍처 상이로 정량 비교 의미 낮
 
 ## 15. 다음 액션 (착수 직후 1–2주)
 
-1. ✅ GitHub org `nerv-sh` 확보. **다음**: Homebrew tap 레포 `nerv-sh/homebrew-tap` 생성.
+1. ✅ GitHub org `nerv-sh` 확보.
 2. ✅ Apple 개발자 프로그램 가입.
 3. ✅ **5종 인수 기준 문서 완료 (v1.1)** — `docs/uninstall-spec.md` (§5.4) + `docs/error-states.md` (§5.5) + `docs/terminal-compat.md` (§11) + `docs/first-5-min.md` (§5.3 / M0-7) + `docs/spec-conversion-policy.md` (§5.7 / M0-9).
-4. `cargo new --workspace nerv` + 폴더 구조 스캐폴딩.
-5. M0-9 `withfig/autocomplete` subtree vendor + 버전 핀 commit.
-6. M0-1 (zsh ZLE → UDS → ANSI) 30줄 PoC + latency 측정.
-7. M0-2 트랜스파일러 진입점 + git/docker/kubectl 3종 스파이크.
+4. ✅ **cargo workspace + 5 crates 스캐폴딩** — `cargo check`/`clippy -D warnings`/`fmt --check`/`test` 모두 통과 (8 단위 테스트).
+5. ✅ **M0-9 — `withfig/autocomplete` subtree pin** = `aef52acff84c45edde61ae610cc2c964802b9a38` (1,484 TS spec, ~102 MB, MIT). NOTICE 갱신 + `.github/workflows/upstream-monitor.yml` (cron 매 2주, 90일 부재/archived 시 `fork:trigger` 이슈 자동 생성).
+6. **다음 — Homebrew tap 레포** `nerv-sh/homebrew-tap` 생성 (formula 는 v1.0 출시 임박 시 작성).
+7. M0-1 (zsh ZLE → UDS → ANSI) 30줄 PoC + latency 측정.
+8. M0-2 트랜스파일러 진입점 + git/docker/kubectl 3종 스파이크.
 
 ---
 

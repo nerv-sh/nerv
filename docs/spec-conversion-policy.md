@@ -192,9 +192,18 @@ GitHub Actions 매트릭스:
 
 ### 5.1 Subtree 기준선
 
-- `vendor/withfig-autocomplete/` 는 git subtree (또는 submodule). subtree 권장 — 단일 클론으로 빌드 가능.
-- 초기 commit hash 핀은 **M0-9 산출물** 로 결정. (M0 끝에서 가장 최근 안정 commit 채택.)
+- `vendor/withfig-autocomplete/` 는 **git subtree** (단일 클론으로 빌드 가능).
+- **현재 핀 (M0-9 결과)**: `aef52acff84c45edde61ae610cc2c964802b9a38`
+  - vendor 크기: ~102 MB (1,484 TS spec)
+  - 라이선스: MIT (Hercules Labs Inc., Fig)
+  - subtree 추가 명령:
+    ```
+    git subtree add --prefix=vendor/withfig-autocomplete \
+        https://github.com/withfig/autocomplete.git \
+        aef52acff84c45edde61ae610cc2c964802b9a38 --squash
+    ```
 - 핀 변경은 별도 PR (`subtree update: <date> <commit>`) — 매 변경 시 §4.3 회귀 검증 필수.
+- 모니터링: `.github/workflows/upstream-monitor.yml` 가 매 2주 (1·15일) 자동 점검.
 
 ### 5.2 자체 PR / 커뮤니티 패치
 

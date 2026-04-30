@@ -1,0 +1,123 @@
+name: upstream-monitor
+
+# Watch withfig/autocomplete for staleness and archival.
+# Spec contract: docs/spec-conversion-policy.md §5.3
+#
+# Triggers a `fork:trigger` issue when EITHER:
+#   - upstream is archived, OR
+#   - upstream's main HEAD has not advanced for >= 90 days.
+#
+# Runs every 2 weeks (1st and 15th at 00:00 UTC) and on manual dispatch.
+
+on:
+  schedule:
+    - cron: '0 0 1,15 * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+env:
+  UPSTREAM_OWNER: withfig
+  UPSTREAM_REPO: autocomplete
+  STALE_DAYS: 90  # spec-conversion-policy.md §5.3
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect upstream
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          repo_json=$(gh api "repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}")
+          archived=$(echo "$repo_json" | jq -r '.archived')
+
+          # Last commit date on default branch.
+          default_branch=$(echo "$repo_json" | jq -r '.default_branch')
+          last_commit=$(gh api \
+            "repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/${default_branch}" \
+            | jq -r '.commit.committer.date')
+          last_sha=$(gh api \
+            "repos/${UPSTREAM_OWNER}/${UPSTREAM_REPO}/commits/${default_branch}" \
+            | jq -r '.sha')
+
+          # Days since last commit.
+          last_epoch=$(date -d "$last_commit" +%s)
+          now_epoch=$(date -u +%s)
+          age_days=$(( (now_epoch - last_epoch) / 86400 ))
+
+          echo "archived=$archived"   >> "$GITHUB_OUTPUT"
+          echo "age_days=$age_days"   >> "$GITHUB_OUTPUT"
+          echo "last_commit=$last_commit" >> "$GITHUB_OUTPUT"
+          echo "last_sha=$last_sha"   >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Upstream status — withfig/autocomplete"
+            echo ""
+            echo "- archived: \`$archived\`"
+            echo "- last commit: \`$last_commit\` (${age_days} days ago)"
+            echo "- last SHA: \`$last_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Decide trigger
+        id: decide
+        run: |
+          archived='${{ steps.upstream.outputs.archived }}'
+          age_days='${{ steps.upstream.outputs.age_days }}'
+          trigger=false
+          reason=""
+          if [ "$archived" = "true" ]; then
+            trigger=true
+            reason="upstream is archived"
+          elif [ "$age_days" -ge "$STALE_DAYS" ]; then
+            trigger=true
+            reason="upstream has had no new commits in ${age_days} days (threshold: ${STALE_DAYS})"
+          fi
+          echo "trigger=$trigger" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason"   >> "$GITHUB_OUTPUT"
+
+      - name: Open fork-trigger issue if needed
+        if: steps.decide.outputs.trigger == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # De-duplicate: only open if no existing open issue with the same label.
+          existing=$(gh issue list \
+            --state open \
+            --label "fork:trigger" \
+            --json number \
+            --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "existing fork:trigger issue is already open — skipping" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          gh issue create \
+            --title "fork: trigger — withfig/autocomplete inactivity" \
+            --label "fork:trigger" \
+            --body "$(cat <<EOF
+          The upstream \`withfig/autocomplete\` repository has triggered the
+          fork policy (see \`docs/spec-conversion-policy.md\` §5.3).
+
+          - **Reason**: ${{ steps.decide.outputs.reason }}
+          - **Last upstream commit**: ${{ steps.upstream.outputs.last_commit }}
+          - **Last upstream SHA**: \`${{ steps.upstream.outputs.last_sha }}\`
+          - **Currently pinned (M0-9)**: \`aef52acff84c45edde61ae610cc2c964802b9a38\`
+
+          Action items:
+          1. Confirm finding — manually inspect the upstream repository.
+          2. Decide: forward-only fork to \`nerv-sh/autocomplete-specs\`,
+             or extend the deadline if upstream activity has resumed.
+          3. If forking, follow \`docs/spec-conversion-policy.md\` §5.3 steps 1–5
+             and update this repo's \`vendor/\` subtree + \`NOTICE\`.
+
+          This issue was opened automatically by the \`upstream-monitor\` workflow.
+          EOF
+          )"
