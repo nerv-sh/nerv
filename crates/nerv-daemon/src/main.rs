@@ -12,7 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{paths, Request, Response};
+use nerv_engine::{paths, Request, Response, Suggestion, SuggestionKind};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
@@ -22,8 +22,13 @@ async fn main() -> anyhow::Result<()> {
     let cache_dir = paths::cache_dir().context("cannot resolve nerv cache dir ($HOME unset?)")?;
     tokio::fs::create_dir_all(&cache_dir).await?;
 
-    let sock_path = paths::socket_path().expect("HOME present (just checked)");
-    let pid_path = paths::pid_path().expect("HOME present (just checked)");
+    // Allow override via env for testing (e2e tests use a temp socket).
+    let sock_path = std::env::var_os("NERV_SOCK")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| paths::socket_path().expect("HOME present (just checked)"));
+    let pid_path = std::env::var_os("NERV_PID")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| paths::pid_path().expect("HOME present (just checked)"));
 
     write_pid_file(&pid_path).await?;
 
@@ -77,9 +82,31 @@ async fn handle_connection(stream: tokio::net::UnixStream) {
             Ok(Request::Ping) => Response::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
-            Ok(Request::Complete { .. }) => Response::Empty {
-                reason: Some("not-yet-implemented".to_string()),
-            },
+            Ok(Request::Complete { line: _, cursor: _ }) => {
+                // M0-1 stub: hardcoded suggestions for any input.
+                // Real matching (spec lookup + ranker) arrives in M0-2 / M1.
+                let suggestions = vec![
+                    Suggestion {
+                        insertion: "commit".into(),
+                        display: "commit".into(),
+                        description: Some("Record changes to the repository".into()),
+                        kind: SuggestionKind::Subcommand,
+                    },
+                    Suggestion {
+                        insertion: "clone".into(),
+                        display: "clone".into(),
+                        description: Some("Clone a repository into a new directory".into()),
+                        kind: SuggestionKind::Subcommand,
+                    },
+                    Suggestion {
+                        insertion: "checkout".into(),
+                        display: "checkout".into(),
+                        description: Some("Switch branches or restore files".into()),
+                        kind: SuggestionKind::Subcommand,
+                    },
+                ];
+                Response::Suggestions { items: suggestions }
+            }
             Ok(Request::DoctorAutorun) => Response::Empty {
                 reason: Some("doctor-autorun-stub".to_string()),
             },
@@ -90,6 +117,7 @@ async fn handle_connection(stream: tokio::net::UnixStream) {
         if let Ok(s) = serde_json::to_string(&resp) {
             if write_half.write_all(s.as_bytes()).await.is_err()
                 || write_half.write_all(b"\n").await.is_err()
+                || write_half.flush().await.is_err()
             {
                 break;
             }

@@ -23,3 +23,9 @@ tracing-subscriber = { workspace = true }
 nerv-engine = { workspace = true }
 # `interprocess` will return for cross-platform UDS/named pipe abstraction
 # in M1; v1.0 macOS-only PoC uses tokio::net::UnixListener directly.
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "process"] }
+serde_json = { workspace = true }
+nerv-engine = { workspace = true }

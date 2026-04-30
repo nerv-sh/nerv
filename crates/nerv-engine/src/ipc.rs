@@ -26,7 +26,7 @@ pub enum Request {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
     /// Normal completion result.
-    Suggestions(Vec<Suggestion>),
+    Suggestions { items: Vec<Suggestion> },
     /// Dynamic generator hint — see PLAN.md §5.1 & first-5-min.md.
     DynamicHint {
         /// Short reason (e.g., "dynamic-branch-list").

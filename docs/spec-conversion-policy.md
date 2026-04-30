@@ -205,11 +205,53 @@ GitHub Actions 매트릭스:
 - 핀 변경은 별도 PR (`subtree update: <date> <commit>`) — 매 변경 시 §4.3 회귀 검증 필수.
 - 모니터링: `.github/workflows/upstream-monitor.yml` 가 매 2주 (1·15일) 자동 점검.
 
-### 5.2 자체 PR / 커뮤니티 패치
+### 5.2 패치 통합 정책
+
+#### 5.2.A — 자체 spec 개선 (Nerv 측 발의)
 
 - 자체 spec 개선이나 버그 수정은 *upstream 우선* — `withfig/autocomplete` 에 PR 후 머지 시 subtree pull.
-- upstream 머지가 지연되거나 차단되면 `vendor-patches/<name>.patch` 로 별도 디렉터리에 보관, 빌드 시 적용.
+- upstream 머지가 지연되거나 차단되면 `vendor-patches/self/<name>.patch` 로 보관, 빌드 시 적용.
 - patch 보관 기준: PR 링크 동봉 + 6개월 이내 upstream 결판 시한.
+
+#### 5.2.B — Upstream 커뮤니티 PR 흡수 ★ 신설 (v1.2)
+
+> **배경**: upstream 의 commit 활동은 둔화됐지만 **issue / PR 은 계속 유입** 됨. Fig 사용자들이 새 CLI 플래그·도구 spec 을 PR 로 올리지만 머지가 사실상 정체. 이 콘텐츠는 MIT 이므로 Nerv 가 cherry-pick 합법. 1,484 → 200+ 점진 확장 (`v1.2` 로드맵) 의 가장 싼 노동력 풀.
+
+**모니터링** (자동, 저비용):
+
+- 신규 워크플로 `.github/workflows/upstream-prs.yml` — `upstream-monitor` 와 동일 cron (매 2주, 1·15일).
+- `withfig/autocomplete` 의 open PR 중 다음 조건 만족하는 것 디지스트:
+  1. `manifest.json` 의 50개 spec 풀 (또는 §3.2 대체 큐) 의 파일을 변경
+  2. 30일 이상 머지 / 거부 답변 없음 (정체 신호)
+  3. CI 가 있다면 green
+- 결과를 단일 추적 이슈 `tracking: upstream-prs` 에 *갱신* (이슈 N개 양산 X). 신규 후보 / 자취 감춘 후보 / cherry-pick 완료 모두 표 형식.
+
+**Cherry-pick 게이트** (수동 인간 판단):
+
+- 추적 이슈에서 후보 PR 검토.
+- 합격 기준: (a) 우리가 ship 하는 spec 의 변경, (b) `nerv-spec-build` 회귀 테스트 통과, (c) 라이선스 호환 자명 (MIT 통째 vendor 의 일부).
+- 방법: `git format-patch -1 <upstream-pr-commit>` → `vendor-patches/upstream/upstream-pr-<num>.patch` 로 저장. **subtree 자체는 건드리지 않음** (M0-9 핀 보존 원칙).
+- 빌드 적용: `nerv-spec-build` 가 transpile 직전 `vendor-patches/upstream/*.patch` 차례로 적용 (실패 시 해당 patch 만 skip + 빌드 로그 경고).
+
+**라이선스 / 출처**:
+
+- 패치 파일 첫 줄 `From: <원작자>` 가 `git format-patch` 기본 동작으로 보존.
+- `vendor-patches/AUTHORS.md` 에 *PR 번호 / 원작자 / 적용 일자 / 영향 spec* 누적 기록.
+- NOTICE 갱신 불필요 (MIT 통째 vendor 의 부분 — 이미 포함).
+- upstream 이 추후 머지하면: 다음 subtree pull 시 patch 제거 + AUTHORS.md 에 *"merged upstream"* 표기.
+
+**Cadence**:
+
+- M1 0–6주차: 워크플로 활성화 + 첫 cherry-pick 1건 시연 (M1 산출물).
+- M1 6–16주차: 매 2주 디지스트 → 1시간 검토 / 사이클.
+- v1.0 이후: 월 1회.
+- 시간 부담 ≥ 가치 발생 시 즉시 일시 중단 가능 — *옵션 정책*, 차단 요건 아님.
+
+**비목표** (이 정책이 *하지 않는* 것):
+
+- upstream 의 closed/머지된 PR 회수 — 이미 vendor pin 갱신으로 흡수됨.
+- 후보 PR 의 자동 cherry-pick — 항상 수동 게이트.
+- upstream PR 작성자에게 직접 컨택 — 정책 외 (커뮤니티 매너 영역).
 
 ### 5.3 Upstream Archived 시 fork 트리거
 
@@ -271,7 +313,7 @@ Vendor commit: <pinned sha>
 
 ## 8. 사용자 시점 정합성
 
-본 문서의 정책이 사용자에게 노출되는 5개 지점:
+본 문서의 정책이 사용자에게 노출되는 6개 지점:
 
 | 지점 | 정책 항목 |
 |------|----------|
@@ -280,6 +322,7 @@ Vendor commit: <pinned sha>
 | §5.1 동적 힌트 메시지 (PLAN.md, error-states.md) | §2 Tier B |
 | `nerv doctor` 의 "specs" 섹션 (full / limited / disabled 카운트) | §3.3 |
 | 릴리즈 노트의 spec 변경 항목 | §7.3 |
+| `vendor-patches/AUTHORS.md` 의 흡수 PR 출처 표기 | §5.2.B |
 
 ---
 
@@ -295,13 +338,21 @@ Vendor commit: <pinned sha>
 
 ## 10. M0-9 산출물 체크리스트
 
-- [ ] `vendor/withfig-autocomplete/` subtree 생성 + 핀 commit 결정
-- [ ] NOTICE 파일 작성
+- [x] `vendor/withfig-autocomplete/` subtree 생성 + 핀 commit (`aef52acff8…`)
+- [x] NOTICE 파일 작성 + pin SHA 명시
 - [ ] `crates/build/spec-transpile/` 골격 + classifier 함수 시그니처
 - [ ] `manifest.json` 스키마 v2 정의
-- [ ] git/docker/kubectl 3종 변환 결과로 Tier 분포 외삽 보고
-- [ ] upstream 모니터링 GitHub Action workflow
+- [ ] git/docker/kubectl 3종 변환 결과로 Tier 분포 외삽 보고 (M0-2)
+- [x] upstream 모니터링 GitHub Action workflow (`upstream-monitor.yml`)
 - [ ] 본 문서 (현 파일) 의 §3.2 대체 큐 20개 검토 / 확정
+
+## 10.B M1 0–6주차 산출물 체크리스트 (§5.2.B 활성화)
+
+- [ ] `.github/workflows/upstream-prs.yml` — 매 2주 open PR 디지스트
+- [ ] `vendor-patches/upstream/` 디렉터리 + `vendor-patches/self/` 디렉터리 분리
+- [ ] `vendor-patches/AUTHORS.md` 양식 정의 + 첫 entry
+- [ ] `nerv-spec-build` 의 transpile 직전 `vendor-patches/upstream/*.patch` 적용 단계
+- [ ] *첫 cherry-pick 1건* — 50개 spec 풀에 영향 주는 upstream PR 1개 흡수 시연 (정책 정합성 검증)
 
 ---
 
@@ -314,4 +365,6 @@ Vendor commit: <pinned sha>
 
 ---
 
-*문서 v1.1 — PLAN.md v0.5 §5.7 + M0-9 의 정밀 명세. v1.0 → v1.1 변경: §5.3 fork 트리거 6개월 → 3개월 단축 + 모니터링 주기 30일 → 2주 (CEO v0.4 리뷰), §7.3 `nerv spec list --changes` 명시적 v1.1+ 이연. 본 정책이 v1.0 의 spec 호환성 약속의 권위 있는 기준.*
+*문서 v1.2 — PLAN.md v0.5 §5.7 + M0-9 의 정밀 명세.*
+*v1.0 → v1.1: §5.3 fork 트리거 6개월 → 3개월 단축 + 모니터링 주기 30일 → 2주 (CEO v0.4 리뷰), §7.3 `nerv spec list --changes` v1.1+ 이연.*
+*v1.1 → v1.2: §5.1 실제 pin (`aef52acff8…`) 기록, §5.2 를 5.2.A (자체 PR) + **5.2.B (upstream 커뮤니티 PR 흡수)** 로 분할 — `upstream-prs.yml` + `vendor-patches/{upstream,self}/` + `AUTHORS.md`. M1 0–6주차 산출물 체크리스트 §10.B 신설. 사용자 제안 (upstream issue/PR 활용) 반영.*
