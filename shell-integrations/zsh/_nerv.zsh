@@ -16,6 +16,7 @@ typeset -gi __NERV_SELECTED=1
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
 typeset -gi __NERV_WIDTH=46
+typeset -gi __NERV_PASTING=0
 
 __nerv_show_popup() {
   local -a items=("$@")
@@ -95,10 +96,12 @@ __nerv_show_popup() {
 
 __nerv_hide_popup() {
   (( ! __NERV_ACTIVE )) && return
+  # Clear raw ANSI remnants, then let ZLE clean up status lines
+  printf '%s' $'\e7\e[B\e[G\e[J\e8'
   __NERV_ACTIVE=0
   __NERV_SELECTED=1
   __NERV_ITEMS=()
-  zle -R ""  # ZLE clears the status lines and fixes cursor
+  zle -R ""
 }
 
 __nerv_insert_selected() {
@@ -111,11 +114,13 @@ __nerv_insert_selected() {
   else
     LBUFFER="$prefix $insertion "
   fi
+  # Clear raw ANSI popup first
+  printf '%s' $'\e7\e[B\e[G\e[J\e8'
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_ACTIVE=0
   __NERV_SELECTED=1
   __NERV_ITEMS=()
-  zle -R ""  # clear popup, ZLE redraws with new LBUFFER
+  zle -R ""
   return 0
 }
 
@@ -123,6 +128,7 @@ __nerv_insert_selected() {
 # Core widget
 # ---------------------------------------------------------------------------
 __nerv_complete() {
+  (( __NERV_PASTING )) && return
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=1
@@ -217,3 +223,12 @@ bindkey $'\eOA' __nerv_select_up
 __nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; }
 zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
+
+# Bracketed paste: suppress completions during paste
+__nerv_bracketed_paste() {
+  __NERV_PASTING=1
+  zle .bracketed-paste "$@"
+  __NERV_PASTING=0
+  __NERV_PREV_LBUFFER="$LBUFFER"
+}
+zle -N bracketed-paste __nerv_bracketed_paste
