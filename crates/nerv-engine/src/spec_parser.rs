@@ -380,7 +380,92 @@ pub(crate) fn get_initial_state(root: &Spec) -> ParserState {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunks 4-5 wire the real implementation)
+// Token shape classification (chunk 4) — pure string predicates over
+// the *source text* of a token, no spec involvement. Chunk 5's state
+// machine combines these with [`find_subcommand`] / [`find_option`]
+// to pick the right transition.
+// ---------------------------------------------------------------------------
+
+/// Categorize a token by its surface form. Spec lookup happens later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) enum TokenShape {
+    /// `--` separator — disables option parsing for the rest of the line.
+    DoubleDash,
+    /// `--name` or `--name=value` long option. `value` is `Some` when
+    /// the `=` form was used.
+    LongOption { name: String, value: Option<String> },
+    /// `-x` short option, or `-xvf` chain. `chars` lists each flag char.
+    ShortOption { chars: Vec<char> },
+    /// Anything else — subcommand candidate / arg value / numeric literal.
+    Word,
+    /// Empty token (cursor sitting right after whitespace).
+    Empty,
+}
+
+/// Classify a token's surface form. Cheap — no spec lookup, just
+/// shape inspection. Inputs come from the shell_parser's tokenized
+/// spans (already quote-stripped by [`crate::shell_parser`]).
+#[allow(dead_code)]
+pub(crate) fn classify_token_shape(text: &str) -> TokenShape {
+    if text.is_empty() {
+        return TokenShape::Empty;
+    }
+    if text == "--" {
+        return TokenShape::DoubleDash;
+    }
+    // Long option: starts with `--` (but `--` alone is already handled).
+    if let Some(rest) = text.strip_prefix("--") {
+        let (name, value) = match rest.find('=') {
+            Some(eq) => (
+                format!("--{}", &rest[..eq]),
+                Some(rest[eq + 1..].to_string()),
+            ),
+            None => (format!("--{rest}"), None),
+        };
+        return TokenShape::LongOption { name, value };
+    }
+    // Short option: starts with `-` followed by at least one non-`-`
+    // char. `-` alone is a literal word (e.g. stdin marker).
+    if let Some(rest) = text.strip_prefix('-') {
+        if rest.is_empty() {
+            return TokenShape::Word;
+        }
+        // `-x=value` shape — treat as long-style for binding.
+        if let Some(eq) = rest.find('=') {
+            let name = format!("-{}", &rest[..eq]);
+            let value = rest[eq + 1..].to_string();
+            return TokenShape::LongOption {
+                name,
+                value: Some(value),
+            };
+        }
+        // All-alphanumeric run → chained shorts (`-xvf`). Reject if
+        // it contains a digit-only run like `-9` (that's a numeric
+        // arg) — but only when the whole thing parses as a number.
+        if rest.chars().all(|c| c.is_ascii_digit()) {
+            return TokenShape::Word;
+        }
+        return TokenShape::ShortOption {
+            chars: rest.chars().collect(),
+        };
+    }
+    TokenShape::Word
+}
+
+/// `true` when `text` *looks like* an option name (long or short) —
+/// used by chunk 5 to decide whether to consult [`find_option`] vs
+/// [`find_subcommand`].
+#[allow(dead_code)]
+pub(crate) fn looks_like_option(text: &str) -> bool {
+    matches!(
+        classify_token_shape(text),
+        TokenShape::LongOption { .. } | TokenShape::ShortOption { .. } | TokenShape::DoubleDash
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Entry point (chunk 5 wires the real implementation)
 // ---------------------------------------------------------------------------
 
 /// Match the shell-parser tokens for the command at the cursor against
@@ -699,6 +784,114 @@ mod tests {
         assert_eq!(args.total, 3);
         assert_eq!(args.idx, 0);
         assert!(args.last_is_variadic);
+    }
+
+    // ---- chunk 4: token shape classifier -----------------------------
+
+    #[test]
+    fn classify_empty_token() {
+        assert_eq!(classify_token_shape(""), TokenShape::Empty);
+    }
+
+    #[test]
+    fn classify_double_dash_separator() {
+        assert_eq!(classify_token_shape("--"), TokenShape::DoubleDash);
+    }
+
+    #[test]
+    fn classify_long_option_bare() {
+        assert_eq!(
+            classify_token_shape("--verbose"),
+            TokenShape::LongOption {
+                name: "--verbose".into(),
+                value: None,
+            }
+        );
+    }
+
+    #[test]
+    fn classify_long_option_with_equals() {
+        assert_eq!(
+            classify_token_shape("--message=hello"),
+            TokenShape::LongOption {
+                name: "--message".into(),
+                value: Some("hello".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_long_option_empty_value_after_equals() {
+        assert_eq!(
+            classify_token_shape("--foo="),
+            TokenShape::LongOption {
+                name: "--foo".into(),
+                value: Some(String::new()),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_short_option_single() {
+        assert_eq!(
+            classify_token_shape("-v"),
+            TokenShape::ShortOption { chars: vec!['v'] }
+        );
+    }
+
+    #[test]
+    fn classify_short_option_chain() {
+        assert_eq!(
+            classify_token_shape("-xvf"),
+            TokenShape::ShortOption {
+                chars: vec!['x', 'v', 'f'],
+            }
+        );
+    }
+
+    #[test]
+    fn classify_short_option_with_equals_is_long_shape() {
+        assert_eq!(
+            classify_token_shape("-m=msg"),
+            TokenShape::LongOption {
+                name: "-m".into(),
+                value: Some("msg".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn classify_dash_alone_is_word() {
+        assert_eq!(classify_token_shape("-"), TokenShape::Word);
+    }
+
+    #[test]
+    fn classify_numeric_dash_is_word() {
+        assert_eq!(classify_token_shape("-1"), TokenShape::Word);
+        assert_eq!(classify_token_shape("-42"), TokenShape::Word);
+    }
+
+    #[test]
+    fn classify_plain_word() {
+        assert_eq!(classify_token_shape("status"), TokenShape::Word);
+        assert_eq!(classify_token_shape("file.txt"), TokenShape::Word);
+    }
+
+    #[test]
+    fn looks_like_option_matches_all_option_shapes() {
+        assert!(looks_like_option("--foo"));
+        assert!(looks_like_option("-x"));
+        assert!(looks_like_option("-xvf"));
+        assert!(looks_like_option("--"));
+        assert!(looks_like_option("-m=value"));
+    }
+
+    #[test]
+    fn looks_like_option_rejects_non_options() {
+        assert!(!looks_like_option("status"));
+        assert!(!looks_like_option("-"));
+        assert!(!looks_like_option("-1"));
+        assert!(!looks_like_option(""));
     }
 
     #[test]
