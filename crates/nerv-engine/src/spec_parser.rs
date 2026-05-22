@@ -207,7 +207,73 @@ pub struct ParserResult {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunks 2-5 wire the real implementation)
+// Static helpers (chunk 2) — pure spec-tree queries used by the state
+// machine in chunks 3-5. No state, no allocations beyond the obvious.
+//
+// `#[allow(dead_code)]` until chunks 3-5 wire the matching state machine
+// that consumes these helpers. Unit tests in `mod tests` exercise each.
+// ---------------------------------------------------------------------------
+
+/// Find a child subcommand by name or alias. `None` if no match.
+///
+/// Search order matches the TS `findSubcommand`: scan `subcommands` in
+/// declaration order, returning the first whose primary name or alias
+/// equals `needle`. Aliases shadow nothing — primary names always win
+/// because they're searched first per node.
+#[allow(dead_code)]
+pub(crate) fn find_subcommand<'a>(parent: &'a Subcommand, needle: &str) -> Option<&'a Subcommand> {
+    parent
+        .subcommands
+        .iter()
+        .find(|sc| sc.name == needle || sc.aliases.iter().any(|a| a == needle))
+}
+
+/// Find an option on `subcommand` whose `names` contains `needle`.
+///
+/// Mirrors TS `findOption`: linear scan, first match wins. The TS
+/// implementation also handles `-xvf`-style chained shorts elsewhere;
+/// that's the caller's job (chunk 5).
+#[allow(dead_code)]
+pub(crate) fn find_option<'a>(subcommand: &'a Subcommand, needle: &str) -> Option<&'a Opt> {
+    subcommand
+        .options
+        .iter()
+        .find(|o| o.names.iter().any(|n| n == needle))
+}
+
+/// Two options are "equal" iff they share at least one name. This is
+/// the TS `optionsAreEqual` rule — used by `count_equal_options` to
+/// enforce `is_repeatable`.
+#[allow(dead_code)]
+pub(crate) fn options_are_equal(a: &Opt, b: &Opt) -> bool {
+    a.names.iter().any(|n| b.names.iter().any(|m| m == n))
+}
+
+/// Count how many times `opt` (or an alias of it) already appears in
+/// `seen`. The state machine uses this to reject a second `--foo`
+/// when `opt.is_repeatable == false`.
+#[allow(dead_code)]
+pub(crate) fn count_equal_options(opt: &Opt, seen: &[Opt]) -> usize {
+    seen.iter().filter(|s| options_are_equal(s, opt)).count()
+}
+
+/// `true` when the option *may* be parsed again at this point — either
+/// it's repeatable, or it has never been seen.
+#[allow(dead_code)]
+pub(crate) fn can_consume_option(opt: &Opt, seen: &[Opt]) -> bool {
+    opt.is_repeatable || count_equal_options(opt, seen) == 0
+}
+
+/// `true` when the argument is required and not variadic — used by
+/// chunk 5 to decide whether the cursor must stay in `Arg` context
+/// (vs falling through to the next positional / option).
+#[allow(dead_code)]
+pub(crate) fn is_mandatory_or_variadic(arg: &Arg) -> bool {
+    !arg.is_optional || arg.is_variadic
+}
+
+// ---------------------------------------------------------------------------
+// Entry point (chunks 3-5 wire the real implementation)
 // ---------------------------------------------------------------------------
 
 /// Match the shell-parser tokens for the command at the cursor against
@@ -330,5 +396,139 @@ mod tests {
         // Sanity check: enum variants compare by value, not identity.
         assert_ne!(TemplateKind::Filepaths, TemplateKind::Folders);
         assert_ne!(TemplateKind::History, TemplateKind::Help);
+    }
+
+    // ---- chunk 2: static helpers --------------------------------------
+
+    fn opt(names: &[&str]) -> Opt {
+        Opt {
+            names: names.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn repeatable_opt(names: &[&str]) -> Opt {
+        Opt {
+            names: names.iter().map(|s| (*s).to_string()).collect(),
+            is_repeatable: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn find_subcommand_matches_primary_name() {
+        let g = git_spec();
+        let s = find_subcommand(&g, "status").unwrap();
+        assert_eq!(s.name, "status");
+    }
+
+    #[test]
+    fn find_subcommand_matches_alias() {
+        let mut g = git_spec();
+        g.subcommands[0].aliases = vec!["st".into()];
+        let s = find_subcommand(&g, "st").unwrap();
+        assert_eq!(s.name, "status");
+    }
+
+    #[test]
+    fn find_subcommand_returns_none_for_unknown() {
+        let g = git_spec();
+        assert!(find_subcommand(&g, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_subcommand_primary_wins_over_later_alias() {
+        // Two subcommands; second has an alias equal to first's name.
+        // The first is returned because the scan is in order.
+        let g = Subcommand {
+            name: "root".into(),
+            subcommands: vec![
+                Subcommand {
+                    name: "a".into(),
+                    ..Default::default()
+                },
+                Subcommand {
+                    name: "b".into(),
+                    aliases: vec!["a".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(find_subcommand(&g, "a").unwrap().name, "a");
+    }
+
+    #[test]
+    fn find_option_matches_any_name() {
+        let g = git_spec();
+        let commit = &g.subcommands[1];
+        assert!(find_option(commit, "-m").is_some());
+        assert!(find_option(commit, "--message").is_some());
+        assert!(find_option(commit, "--nope").is_none());
+    }
+
+    #[test]
+    fn options_are_equal_shares_a_name() {
+        let a = opt(&["-v", "--verbose"]);
+        let b = opt(&["--verbose"]);
+        let c = opt(&["-q"]);
+        assert!(options_are_equal(&a, &b));
+        assert!(!options_are_equal(&a, &c));
+    }
+
+    #[test]
+    fn count_equal_options_counts_repetitions() {
+        let v = opt(&["-v"]);
+        let seen = vec![opt(&["-v"]), opt(&["-q"]), opt(&["-v", "--verbose"])];
+        assert_eq!(count_equal_options(&v, &seen), 2);
+    }
+
+    #[test]
+    fn can_consume_option_blocks_non_repeatable_second_use() {
+        let v = opt(&["-v"]);
+        let seen = vec![opt(&["-v"])];
+        assert!(!can_consume_option(&v, &seen));
+    }
+
+    #[test]
+    fn can_consume_option_allows_repeatable() {
+        let v = repeatable_opt(&["-v"]);
+        let seen = vec![opt(&["-v"]); 3];
+        assert!(can_consume_option(&v, &seen));
+    }
+
+    #[test]
+    fn can_consume_option_allows_unseen() {
+        let v = opt(&["-v"]);
+        assert!(can_consume_option(&v, &[]));
+    }
+
+    #[test]
+    fn is_mandatory_or_variadic_classification() {
+        let required = Arg {
+            is_optional: false,
+            is_variadic: false,
+            ..Default::default()
+        };
+        let optional = Arg {
+            is_optional: true,
+            is_variadic: false,
+            ..Default::default()
+        };
+        let variadic_optional = Arg {
+            is_optional: true,
+            is_variadic: true,
+            ..Default::default()
+        };
+        let variadic_required = Arg {
+            is_optional: false,
+            is_variadic: true,
+            ..Default::default()
+        };
+
+        assert!(is_mandatory_or_variadic(&required));
+        assert!(!is_mandatory_or_variadic(&optional));
+        assert!(is_mandatory_or_variadic(&variadic_optional));
+        assert!(is_mandatory_or_variadic(&variadic_required));
     }
 }
