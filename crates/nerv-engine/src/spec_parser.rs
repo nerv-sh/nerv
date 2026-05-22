@@ -28,6 +28,7 @@
 //! annotations + cursor context. Chunks 6-7 add candidate emission
 //! and end-to-end spec-fixture regression.
 
+use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 // ---------------------------------------------------------------------------
@@ -43,7 +44,8 @@ pub type Spec = Subcommand;
 /// Layout mirrors the `@fig/autocomplete-types` `Subcommand` shape:
 /// name + zero or more options + zero or more positional args +
 /// zero or more nested subcommands.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Subcommand {
     /// Primary name. (Aliases live in [`Self::aliases`].)
     pub name: String,
@@ -67,7 +69,8 @@ pub struct Subcommand {
 
 /// A long / short option flag, possibly with one or more attached
 /// argument(s).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Opt {
     /// All names that select this option (e.g. `["-h", "--help"]`).
     pub names: Vec<String>,
@@ -89,7 +92,8 @@ pub struct Opt {
 }
 
 /// A positional or option-bound argument.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Arg {
     /// Display name (e.g. `<file>`, `<branch>`, `<image>`).
     pub name: Option<String>,
@@ -111,7 +115,8 @@ pub struct Arg {
 }
 
 /// Filepath-style template suggestion source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TemplateKind {
     /// Any file path.
     Filepaths,
@@ -126,7 +131,8 @@ pub enum TemplateKind {
 /// Marker for a dynamic-generator entry. M0-5 records the shape so
 /// downstream UX can show the §5.1 dynamic-hint (PRD v0.6 §5.7);
 /// M1 + `rquickjs` opt-in runs the script / closure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Generator {
     /// `generator.template` — runs `script` and parses each line
     /// of stdout as a candidate. Static when `script` is a constant
