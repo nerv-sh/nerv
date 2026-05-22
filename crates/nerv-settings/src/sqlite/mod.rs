@@ -5,7 +5,7 @@ use std::path::{
 };
 use std::sync::LazyLock;
 
-use fig_util::directories::fig_data_dir;
+use nerv_util::directories::fig_data_dir;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::types::FromSql;

@@ -1,10 +1,10 @@
-use alacritty_terminal::event::{
+use nerv_term::event::{
     Event,
     EventListener,
 };
-use alacritty_terminal::term::ShellState;
-use fig_proto::remote::Hostbound;
-use fig_proto::remote_hooks::{
+use nerv_term::term::ShellState;
+use nerv_proto::remote::Hostbound;
+use nerv_proto::remote_hooks::{
     hook_to_message,
     new_postexec_hook,
     new_preexec_hook,
@@ -46,7 +46,7 @@ impl EventHandler {
             socket_sender,
             history_sender,
             main_loop_sender,
-            csi_u_enabled: fig_settings::settings::get_bool_or("qterm.csi-u.enabled", false),
+            csi_u_enabled: nerv_settings::settings::get_bool_or("qterm.csi-u.enabled", false),
         }
     }
 }
@@ -139,7 +139,7 @@ impl EventListener for EventHandler {
     }
 
     fn log_level_event(&self, level: Option<String>) {
-        if let Err(err) = fig_log::set_log_level(level.unwrap_or_else(|| LevelFilter::INFO.to_string())) {
+        if let Err(err) = nerv_log::set_log_level(level.unwrap_or_else(|| LevelFilter::INFO.to_string())) {
             error!(%err, "Failed to set log level");
         }
     }

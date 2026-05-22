@@ -3,7 +3,7 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use cfg_if::cfg_if;
-use fig_os_shim::{
+use nerv_os::{
     EnvProvider,
     FsProvider,
     PlatformProvider,
@@ -256,7 +256,7 @@ pub async fn bundle_metadata_json<Ctx: FsProvider + EnvProvider + PlatformProvid
     ctx: &Ctx,
 ) -> Result<Option<String>, Error> {
     match (ctx.platform().os(), &manifest().variant) {
-        (fig_os_shim::Os::Linux, Variant::Full) => {
+        (nerv_os::Os::Linux, Variant::Full) => {
             let metadata_path = bundle_metadata_path(ctx)?;
             debug!("Reading metadata at path: {:?}", &metadata_path);
             Ok(Some(ctx.fs().read_to_string(bundle_metadata_path(ctx)?).await?))

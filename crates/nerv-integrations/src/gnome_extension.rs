@@ -9,7 +9,7 @@ use dbus::gnome_shell::{
     ShellExtensions,
     get_extension_status,
 };
-use fig_os_shim::{
+use nerv_os::{
     EnvProvider,
     FsProvider,
     SysInfoProvider,

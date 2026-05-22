@@ -65,7 +65,7 @@ impl ProcessInfo {
     /// # Examples
     ///
     /// ```no_run
-    /// use fig_os_shim::ProcessInfo;
+    /// use nerv_os::ProcessInfo;
     ///
     /// // Creates a slice with the following process hierarchy:
     /// // q <- bash <- wezterm

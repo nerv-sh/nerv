@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 /// # Examples
 ///
 /// ```rust
-/// # use fig_test_utils::server::*;
+/// # use nerv_test_utils::server::*;
 /// # async fn run() -> Result<(), reqwest::Error> {
 /// // Hosting a local server that responds to GET requests for "/my-file" with the
 /// // body "some text".

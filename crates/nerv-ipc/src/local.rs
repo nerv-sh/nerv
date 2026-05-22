@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use fig_proto::local::{
+use nerv_proto::local::{
     self,
     BundleMetadataCommand,
     BundleMetadataResponse,
@@ -28,7 +28,7 @@ use fig_proto::local::{
     devtools_command,
     dump_state_command,
 };
-use fig_util::directories;
+use nerv_util::directories;
 
 use crate::{
     BufferedUnixStream,

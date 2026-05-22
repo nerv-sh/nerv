@@ -3,7 +3,7 @@ use std::io::BufRead;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use fig_util::macos::BUNDLE_CONTENTS_RESOURCE_PATH;
+use nerv_util::macos::BUNDLE_CONTENTS_RESOURCE_PATH;
 use macos_utils::url::path_for_application;
 use tokio::process::Command;
 use tracing::error;
@@ -126,7 +126,7 @@ pub struct VSCodeIntegration {
 
 impl VSCodeIntegration {
     async fn update_settings(&self) -> Result<()> {
-        let settings_path = fig_util::directories::home_dir()?
+        let settings_path = nerv_util::directories::home_dir()?
             .join("Library/Application Support")
             .join(self.variant.application_support_folder_name)
             .join("User/settings.json");
@@ -155,7 +155,7 @@ impl VSCodeIntegration {
     }
 
     fn extensions_dir(&self) -> Result<PathBuf> {
-        Ok(fig_util::directories::home_dir()?
+        Ok(nerv_util::directories::home_dir()?
             .join(self.variant.config_folder_name)
             .join("extensions"))
     }

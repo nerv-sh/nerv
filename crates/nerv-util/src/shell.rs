@@ -6,7 +6,7 @@ use std::path::{
 use std::str::FromStr;
 
 use clap::ValueEnum;
-use fig_os_shim::Env;
+use nerv_os::Env;
 use regex::Regex;
 use serde::{
     Deserialize,

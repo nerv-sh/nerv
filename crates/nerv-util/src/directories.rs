@@ -3,7 +3,7 @@ use std::fmt::Display;
 use std::path::PathBuf;
 
 use camino::Utf8PathBuf;
-use fig_os_shim::{
+use nerv_os::{
     Context,
     EnvProvider,
     FsProvider,
@@ -354,7 +354,7 @@ pub fn remote_socket_path() -> Result<PathBuf> {
     // Normal implementation for non-test code
     // TODO(grant): This is only enabled on Linux for now to prevent public dist
     if is_remote() && !in_cloudshell() && cfg!(target_os = "linux") {
-        if let Some(parent_socket) = fig_os_shim::Env::new().get_os(Q_PARENT) {
+        if let Some(parent_socket) = nerv_os::Env::new().get_os(Q_PARENT) {
             Ok(PathBuf::from(parent_socket))
         } else {
             Err(DirectoryError::QParentNotSet)
@@ -403,8 +403,8 @@ pub fn resources_path() -> Result<PathBuf> {
 pub fn resources_path_ctx<Ctx: EnvProvider + PlatformProvider>(ctx: &Ctx) -> Result<PathBuf> {
     let os = ctx.platform().os();
     match os {
-        fig_os_shim::Os::Mac => Ok(crate::app_bundle_path().join(crate::macos::BUNDLE_CONTENTS_RESOURCE_PATH)),
-        fig_os_shim::Os::Linux => {
+        nerv_os::Os::Mac => Ok(crate::app_bundle_path().join(crate::macos::BUNDLE_CONTENTS_RESOURCE_PATH)),
+        nerv_os::Os::Linux => {
             if ctx.env().in_appimage() {
                 Ok(ctx
                     .env()
@@ -414,7 +414,7 @@ pub fn resources_path_ctx<Ctx: EnvProvider + PlatformProvider>(ctx: &Ctx) -> Res
                 Ok(format!("/usr/share/{}", PACKAGE_NAME).into())
             }
         },
-        fig_os_shim::Os::Windows => Ok(fig_data_dir()?.join("resources")),
+        nerv_os::Os::Windows => Ok(fig_data_dir()?.join("resources")),
         _ => Err(DirectoryError::UnsupportedOs(os)),
     }
 }

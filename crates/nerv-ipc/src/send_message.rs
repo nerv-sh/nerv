@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use fig_proto::FigProtobufEncodable;
+use nerv_proto::FigProtobufEncodable;
 use tokio::io::{
     AsyncWrite,
     AsyncWriteExt,
@@ -27,7 +27,7 @@ where
     where
         M: FigProtobufEncodable,
     {
-        let encoded_message = match message.encode_fig_protobuf() {
+        let encoded_message = match message.encode_nerv_protobuf() {
             Ok(encoded_message) => encoded_message,
             Err(err) => {
                 error!(%err, "Failed to encode message");

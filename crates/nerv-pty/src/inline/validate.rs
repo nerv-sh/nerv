@@ -8,7 +8,7 @@ pub(super) fn validate(command: &str) -> bool {
                 .ok()
                 .and_then(|s| s.to_str().map(ToOwned::to_owned))
         },
-        || fig_util::directories::home_dir_utf8().ok(),
+        || nerv_util::directories::home_dir_utf8().ok(),
         |key| std::env::var(key).map(Some),
     )
 }

@@ -8,7 +8,7 @@ use std::path::{
     PathBuf,
 };
 
-use fig_util::CLI_BINARY_NAME;
+use nerv_util::CLI_BINARY_NAME;
 use owo_colors::OwoColorize as _;
 use thiserror::Error;
 
@@ -28,7 +28,7 @@ pub enum Error {
     #[error("IO Error: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Dir(#[from] fig_util::directories::DirectoryError),
+    Dir(#[from] nerv_util::directories::DirectoryError),
     #[error("Regex Error: {0}")]
     Regex(#[from] regex::Error),
     #[error(transparent)]

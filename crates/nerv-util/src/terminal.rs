@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::sync::OnceLock;
 
-use fig_os_shim::Context;
+use nerv_os::Context;
 use serde::{
     Deserialize,
     Serialize,
@@ -252,8 +252,8 @@ impl Terminal {
         };
 
         let terminals = match ctx.platform().os() {
-            fig_os_shim::Os::Mac => MACOS_TERMINALS,
-            fig_os_shim::Os::Linux => LINUX_TERMINALS,
+            nerv_os::Os::Mac => MACOS_TERMINALS,
+            nerv_os::Os::Linux => LINUX_TERMINALS,
             _ => return None,
         };
         Self::from_process_info(ctx, &terminals.to_vec())
@@ -797,8 +797,8 @@ impl IntelliJVariant {
 mod tests {
     use std::sync::Arc;
 
-    use fig_os_shim::process_info::TestExe;
-    use fig_os_shim::{
+    use nerv_os::process_info::TestExe;
+    use nerv_os::{
         Os,
         ProcessInfo,
     };

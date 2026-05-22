@@ -7,9 +7,9 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use fig_util::PRODUCT_NAME;
-use fig_util::consts::CLI_BINARY_NAME;
-use fig_util::directories::{
+use nerv_util::PRODUCT_NAME;
+use nerv_util::consts::CLI_BINARY_NAME;
+use nerv_util::directories::{
     self,
     fig_data_dir_utf8,
     home_dir,
@@ -157,7 +157,7 @@ impl Integration for SshIntegration {
         }
 
         let mut contents = if self.path.exists() {
-            backup_file(&self.path, fig_util::directories::utc_backup_dir().ok())?;
+            backup_file(&self.path, nerv_util::directories::utc_backup_dir().ok())?;
             self.uninstall_ssh_config().await?;
             std::fs::read_to_string(&self.path)?
         } else {

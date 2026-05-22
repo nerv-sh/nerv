@@ -2,8 +2,8 @@ use std::sync::LazyLock;
 
 use anyhow::Result;
 use dashmap::DashMap;
-use fig_proto::figterm::Action;
-use fig_settings::keybindings::{
+use nerv_proto::figterm::Action;
+use nerv_settings::keybindings::{
     KeyBinding,
     KeyBindings,
 };
@@ -21,7 +21,7 @@ const GLOBAL_ACTIONS: &[&str] = &["toggleAutocomplete", "showAutocomplete"];
 const IGNORE_ACTION: &str = "ignore";
 
 static ONLY_SHOW_ON_TAB: LazyLock<bool> =
-    LazyLock::new(|| fig_settings::settings::get_bool_or("autocomplete.onlyShowOnTab", false));
+    LazyLock::new(|| nerv_settings::settings::get_bool_or("autocomplete.onlyShowOnTab", false));
 
 pub fn key_from_text(text: impl AsRef<str>) -> Option<KeyEvent> {
     let text = text.as_ref();

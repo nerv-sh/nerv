@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use fig_proto::prost::Message;
-use fig_proto::{
+use nerv_proto::prost::Message;
+use nerv_proto::{
     FigProtobufEncodable,
     ReflectMessage,
 };

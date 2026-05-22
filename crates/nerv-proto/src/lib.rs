@@ -251,11 +251,11 @@ impl std::ops::Deref for FigMessage {
 /// A trait for types that can be converted to a FigProtobuf
 pub trait FigProtobufEncodable: Debug + Send + Sync {
     /// Encodes a protobuf message into a fig message
-    fn encode_fig_protobuf(&self) -> Result<Bytes, FigMessageEncodeError>;
+    fn encode_nerv_protobuf(&self) -> Result<Bytes, FigMessageEncodeError>;
 }
 
 impl<T: Message> FigProtobufEncodable for T {
-    fn encode_fig_protobuf(&self) -> Result<Bytes, FigMessageEncodeError> {
+    fn encode_nerv_protobuf(&self) -> Result<Bytes, FigMessageEncodeError> {
         FigMessage::encode(FigMessageType::Protobuf, self.encode_to_vec().into())
     }
 }
@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn test_to_fig_pbuf() {
         let message = test_message();
-        assert_eq!(&message.encode_fig_protobuf().unwrap()[..10], b"\x1b@fig-pbuf");
+        assert_eq!(&message.encode_nerv_protobuf().unwrap()[..10], b"\x1b@fig-pbuf");
     }
 
     #[test]

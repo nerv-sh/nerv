@@ -23,7 +23,7 @@ pub use error::{
     Result,
 };
 use fd_lock::RwLock as FileRwLock;
-use fig_util::directories;
+use nerv_util::directories;
 use parking_lot::{
     MappedRwLockReadGuard,
     MappedRwLockWriteGuard,
