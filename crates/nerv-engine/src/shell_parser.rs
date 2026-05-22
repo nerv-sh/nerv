@@ -23,6 +23,13 @@
 //! Status: M0-4 in progress. Public types and the `parse` entry point
 //! are stable; the implementation lands in subsequent chunks.
 
+// Helpers, literal parsers, and dispatchers are wired up progressively
+// across M0-4 chunks 3b–3f; the early ones go un-called until later
+// chunks land. Lift the dead-code lint module-wide so each in-progress
+// chunk compiles cleanly without a forest of per-fn `#[allow]`s. To
+// remove once chunk 3f wires `parse()` into the full pipeline.
+#![allow(dead_code)]
+
 use std::ops::Range;
 
 /// Statement-level operators recognised by the tokenizer.
@@ -185,7 +192,6 @@ impl Node {
 
 /// Return the byte index of the first non-whitespace character at or
 /// after `from`. Returns `None` if only whitespace remains until EOF.
-#[allow(dead_code)] // used by chunks 3c-3f + #[test] mod
 pub(crate) fn next_word_idx(input: &str, from: usize) -> Option<usize> {
     if from >= input.len() {
         return None;
@@ -200,7 +206,6 @@ pub(crate) fn next_word_idx(input: &str, from: usize) -> Option<usize> {
 ///
 /// Greedy: two-byte operators (`&&`, `||`, `&;`, `|&`) take priority
 /// over their one-byte prefixes (`&`, `|`).
-#[allow(dead_code)] // used by chunks 3c-3f + #[test] mod
 pub(crate) fn parse_operator(input: &str, at: usize) -> Option<Operator> {
     let bytes = input.as_bytes();
     let first = *bytes.get(at)?;
@@ -235,7 +240,6 @@ pub(crate) fn parse_operator(input: &str, at: usize) -> Option<Operator> {
 /// - `Word`: process the word-form backslash escape (skip `\`,
 ///   take next char literally).
 /// - All other kinds: `text` returned unchanged.
-#[allow(dead_code)] // used by chunks 3c-3f + #[test] mod
 pub(crate) fn compute_inner_text(
     kind: NodeKind,
     text: &str,
@@ -299,7 +303,245 @@ pub(crate) fn compute_inner_text(
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunks 3c–3f land progressively)
+// Literal parsers (chunk 3c)
+// ---------------------------------------------------------------------------
+
+/// Construct a literal-style `Node` and derive its `inner_text`.
+fn build_literal_node(
+    input: &str,
+    start: usize,
+    end: usize,
+    kind: NodeKind,
+    children: Vec<Node>,
+    complete: bool,
+) -> Node {
+    let span = start..end;
+    let text = input[span.clone()].to_string();
+    let inner_text = compute_inner_text(kind, &text, complete, &children);
+    Node {
+        kind,
+        span,
+        text,
+        inner_text,
+        complete,
+        children,
+        operator: None,
+    }
+}
+
+/// Generic delimited-literal parser used by the five flavours below.
+///
+/// - `String` and `Expansion` may contain nested `$...` / `` `...` ``
+///   children; for the others (`RawString`, `AnsiCString`,
+///   `ArithmeticExpansion`) the body is a flat byte sequence.
+/// - Backslash escapes consume the following byte, except inside
+///   `RawString` where the backslash is literal.
+/// - Returns a `complete: false` node when EOF arrives before the
+///   closing delimiter is seen.
+fn parse_delimited_literal(
+    input: &str,
+    start: usize,
+    kind: NodeKind,
+    open: &str,
+    close: &str,
+) -> Node {
+    let body_start = start + open.len();
+    let can_have_children = matches!(kind, NodeKind::String | NodeKind::Expansion);
+    let in_string = matches!(kind, NodeKind::String);
+    let close_bytes = close.as_bytes();
+
+    let mut children: Vec<Node> = Vec::new();
+    let mut i = body_start;
+    let bytes = input.as_bytes();
+
+    while i < input.len() {
+        // Nested expansion / command-substitution child inside String / Expansion.
+        if can_have_children {
+            let terminators = [close.chars().next().unwrap_or('\0')];
+            if let Some(child) = child_at_idx(input, i, in_string, &terminators) {
+                i = child.span.end;
+                children.push(child);
+                continue;
+            }
+        }
+
+        // Backslash escape — skip both bytes, except in raw strings.
+        if bytes[i] == b'\\' && !matches!(kind, NodeKind::RawString) && i + 1 < input.len() {
+            i += 2;
+            continue;
+        }
+
+        // Closing delimiter?
+        if i + close_bytes.len() <= input.len() && &bytes[i..i + close_bytes.len()] == close_bytes {
+            return build_literal_node(input, start, i + close_bytes.len(), kind, children, true);
+        }
+
+        // Advance one char (handle UTF-8 multibyte boundaries).
+        if bytes[i].is_ascii() {
+            i += 1;
+        } else {
+            let ch = input[i..].chars().next().expect("non-empty input");
+            i += ch.len_utf8();
+        }
+    }
+
+    build_literal_node(input, start, input.len(), kind, children, false)
+}
+
+/// Parse `"..."` — double-quoted string with embedded expansions.
+fn parse_string(input: &str, at: usize) -> Node {
+    parse_delimited_literal(input, at, NodeKind::String, "\"", "\"")
+}
+
+/// Parse `'...'` — single-quoted raw string, no escape processing.
+fn parse_raw_string(input: &str, at: usize) -> Node {
+    parse_delimited_literal(input, at, NodeKind::RawString, "'", "'")
+}
+
+/// Parse `${...}` — parameter expansion with possible inner expansions.
+fn parse_expansion(input: &str, at: usize) -> Node {
+    parse_delimited_literal(input, at, NodeKind::Expansion, "${", "}")
+}
+
+/// Parse `$'...'` — ANSI-C quoted string. Escape sequences inside are
+/// preserved verbatim by this parser; downstream callers may interpret.
+fn parse_ansi_c(input: &str, at: usize) -> Node {
+    parse_delimited_literal(input, at, NodeKind::AnsiCString, "$'", "'")
+}
+
+/// Parse `$((...))` — arithmetic expansion.
+fn parse_arithmetic(input: &str, at: usize) -> Node {
+    parse_delimited_literal(input, at, NodeKind::ArithmeticExpansion, "$((", "))")
+}
+
+/// Parse `$(...)` or `` `...` ``.
+///
+/// Chunk 3c implementation is a *shallow* skip-to-terminator — the
+/// substitution body is not recursively parsed yet. Chunk 3f will swap
+/// this for a call into `parse_statements` so the inner command tree
+/// is built.
+fn parse_command_substitution(input: &str, at: usize, term: char) -> Node {
+    let body_start = at
+        + if input.as_bytes().get(at) == Some(&b'`') {
+            1
+        } else {
+            2
+        };
+    let term_byte = term as u8;
+    let bytes = input.as_bytes();
+    let mut i = body_start;
+    while i < input.len() {
+        if bytes[i] == term_byte {
+            return build_literal_node(
+                input,
+                at,
+                i + 1,
+                NodeKind::CommandSubstitution,
+                Vec::new(),
+                true,
+            );
+        }
+        i += 1;
+    }
+    build_literal_node(
+        input,
+        at,
+        input.len(),
+        NodeKind::CommandSubstitution,
+        Vec::new(),
+        false,
+    )
+}
+
+/// Parse `$VAR` (`SimpleExpansion`) or a one-byte special expansion
+/// (`SpecialExpansion`): `$@`, `$*`, `$?`, `$-`, `$$`, `$0`, `$_`.
+///
+/// Returns `None` if the `$` stands alone (no name follows — caller
+/// treats it as a literal `$` byte).
+fn parse_simple_expansion(input: &str, at: usize, extra_terminators: &[char]) -> Option<Node> {
+    let bytes = input.as_bytes();
+    debug_assert_eq!(bytes.get(at), Some(&b'$'));
+    let next = *bytes.get(at + 1)?;
+
+    // Single-byte special expansions.
+    if matches!(next, b'*' | b'@' | b'?' | b'-' | b'$' | b'0' | b'_') {
+        return Some(build_literal_node(
+            input,
+            at,
+            at + 2,
+            NodeKind::SpecialExpansion,
+            Vec::new(),
+            true,
+        ));
+    }
+
+    // Simple expansion: read a name until whitespace / `$` / `\` / one
+    // of `extra_terminators`.
+    let stop: Vec<u8> = ['\t', ' ', '\n', '$', '\\']
+        .iter()
+        .chain(extra_terminators.iter())
+        .map(|c| *c as u8)
+        .collect();
+
+    let mut i = at + 1;
+    while i < input.len() {
+        if stop.contains(&bytes[i]) {
+            if i == at + 1 {
+                return None;
+            }
+            return Some(build_literal_node(
+                input,
+                at,
+                i,
+                NodeKind::SimpleExpansion,
+                Vec::new(),
+                true,
+            ));
+        }
+        i += 1;
+    }
+    if i == at + 1 {
+        return None;
+    }
+    Some(build_literal_node(
+        input,
+        at,
+        i,
+        NodeKind::SimpleExpansion,
+        Vec::new(),
+        true,
+    ))
+}
+
+/// Try to recognise a literal at byte index `at`.
+///
+/// Returns `None` if no literal kind begins at this position (the
+/// caller then advances by one byte as a `Word` character).
+fn child_at_idx(input: &str, at: usize, in_string: bool, terminators: &[char]) -> Option<Node> {
+    let bytes = input.as_bytes();
+    let c0 = *bytes.get(at)?;
+    let c1 = bytes.get(at + 1).copied();
+    let c2 = bytes.get(at + 2).copied();
+    match c0 {
+        b'$' => match c1 {
+            Some(b'(') => Some(if c2 == Some(b'(') {
+                parse_arithmetic(input, at)
+            } else {
+                parse_command_substitution(input, at, ')')
+            }),
+            Some(b'{') => Some(parse_expansion(input, at)),
+            Some(b'\'') if !in_string => Some(parse_ansi_c(input, at)),
+            _ => parse_simple_expansion(input, at, terminators),
+        },
+        b'`' => Some(parse_command_substitution(input, at, '`')),
+        b'\'' if !in_string => Some(parse_raw_string(input, at)),
+        b'"' if !in_string => Some(parse_string(input, at)),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point (chunks 3d–3f land progressively)
 // ---------------------------------------------------------------------------
 
 /// Parse a shell command-line string into a `Program`-rooted node tree.
@@ -514,5 +756,182 @@ mod tests {
     fn compute_inner_text_unknown_kind_returns_text() {
         let s = compute_inner_text(NodeKind::Command, "git status", true, &[]);
         assert_eq!(s, "git status");
+    }
+
+    // -- parse_string / parse_raw_string -----------------------------------
+
+    #[test]
+    fn parse_raw_string_complete_pair() {
+        let n = parse_raw_string("'hello'", 0);
+        assert_eq!(n.kind, NodeKind::RawString);
+        assert_eq!(n.span, 0..7);
+        assert!(n.complete);
+        assert_eq!(n.inner_text, "hello");
+    }
+
+    #[test]
+    fn parse_raw_string_unterminated() {
+        let n = parse_raw_string("'hello", 0);
+        assert!(!n.complete);
+        assert_eq!(n.span, 0..6);
+        assert_eq!(n.inner_text, "hello");
+    }
+
+    #[test]
+    fn parse_string_escapes_inner_quote() {
+        let n = parse_string("\"a\\\"b\"", 0);
+        assert!(n.complete);
+        assert_eq!(n.inner_text, "a\"b");
+    }
+
+    #[test]
+    fn parse_string_with_simple_expansion_child() {
+        let n = parse_string("\"$HOME\"", 0);
+        assert_eq!(n.kind, NodeKind::String);
+        assert!(n.complete);
+        assert_eq!(n.children.len(), 1);
+        assert_eq!(n.children[0].kind, NodeKind::SimpleExpansion);
+        assert_eq!(n.children[0].text, "$HOME");
+    }
+
+    #[test]
+    fn parse_raw_string_no_escape_inside() {
+        // Single quote terminates at the first ' regardless of preceding \.
+        let n = parse_raw_string("'a\\'b'", 0);
+        assert!(n.complete);
+        assert_eq!(n.inner_text, "a\\");
+    }
+
+    // -- parse_expansion / parse_ansi_c / parse_arithmetic -----------------
+
+    #[test]
+    fn parse_expansion_complete() {
+        let n = parse_expansion("${HOME}", 0);
+        assert_eq!(n.kind, NodeKind::Expansion);
+        assert!(n.complete);
+        assert_eq!(n.span, 0..7);
+    }
+
+    #[test]
+    fn parse_expansion_unterminated() {
+        let n = parse_expansion("${HOME", 0);
+        assert!(!n.complete);
+    }
+
+    #[test]
+    fn parse_ansi_c_strips_dollar_quote() {
+        let n = parse_ansi_c("$'abc'", 0);
+        assert_eq!(n.kind, NodeKind::AnsiCString);
+        assert!(n.complete);
+        assert_eq!(n.inner_text, "abc");
+    }
+
+    #[test]
+    fn parse_arithmetic_double_paren() {
+        let n = parse_arithmetic("$((1+2))", 0);
+        assert_eq!(n.kind, NodeKind::ArithmeticExpansion);
+        assert!(n.complete);
+        assert_eq!(n.text, "$((1+2))");
+    }
+
+    // -- parse_simple_expansion --------------------------------------------
+
+    #[test]
+    fn parse_simple_expansion_variable_name() {
+        let n = parse_simple_expansion("$FOO", 0, &[]).expect("some");
+        assert_eq!(n.kind, NodeKind::SimpleExpansion);
+        assert_eq!(n.text, "$FOO");
+        assert_eq!(n.span, 0..4);
+    }
+
+    #[test]
+    fn parse_simple_expansion_stops_at_whitespace() {
+        let n = parse_simple_expansion("$FOO bar", 0, &[]).expect("some");
+        assert_eq!(n.span, 0..4);
+    }
+
+    #[test]
+    fn parse_simple_expansion_special_chars() {
+        for (input, _expected_text) in [
+            ("$@", "$@"),
+            ("$*", "$*"),
+            ("$?", "$?"),
+            ("$-", "$-"),
+            ("$$", "$$"),
+            ("$0", "$0"),
+            ("$_", "$_"),
+        ] {
+            let n = parse_simple_expansion(input, 0, &[]).expect("some");
+            assert_eq!(n.kind, NodeKind::SpecialExpansion);
+            assert_eq!(n.span, 0..2, "wrong span for {input:?}");
+        }
+    }
+
+    #[test]
+    fn parse_simple_expansion_bare_dollar_returns_none() {
+        // `$` at EOF (no following char) — literal `$`, caller falls back.
+        assert!(parse_simple_expansion("$", 0, &[]).is_none());
+    }
+
+    #[test]
+    fn parse_simple_expansion_stops_at_extra_terminator() {
+        // E.g., when used inside a "..." string, `"` is a terminator.
+        let n = parse_simple_expansion("$FOO\"", 0, &['"']).expect("some");
+        assert_eq!(n.span, 0..4);
+    }
+
+    // -- parse_command_substitution (chunk 3c stub) ------------------------
+
+    #[test]
+    fn parse_command_substitution_dollar_paren_complete() {
+        let n = parse_command_substitution("$(ls)", 0, ')');
+        assert_eq!(n.kind, NodeKind::CommandSubstitution);
+        assert!(n.complete);
+        assert_eq!(n.span, 0..5);
+    }
+
+    #[test]
+    fn parse_command_substitution_backtick_complete() {
+        let n = parse_command_substitution("`pwd`", 0, '`');
+        assert!(n.complete);
+        assert_eq!(n.span, 0..5);
+    }
+
+    #[test]
+    fn parse_command_substitution_unterminated() {
+        let n = parse_command_substitution("$(ls", 0, ')');
+        assert!(!n.complete);
+        assert_eq!(n.span, 0..4);
+    }
+
+    // -- child_at_idx dispatcher -------------------------------------------
+
+    #[test]
+    fn child_at_idx_recognises_double_quote_outside_string() {
+        let n = child_at_idx("\"x\"", 0, false, &[]).expect("some");
+        assert_eq!(n.kind, NodeKind::String);
+    }
+
+    #[test]
+    fn child_at_idx_skips_double_quote_inside_string() {
+        // We're already inside a "...", so `"` should not start another String.
+        assert!(child_at_idx("\"x\"", 0, true, &[]).is_none());
+    }
+
+    #[test]
+    fn child_at_idx_dispatches_arithmetic_over_command_sub() {
+        let n = child_at_idx("$((1))", 0, false, &[]).expect("some");
+        assert_eq!(n.kind, NodeKind::ArithmeticExpansion);
+    }
+
+    #[test]
+    fn child_at_idx_dispatches_command_sub_dollar_paren() {
+        let n = child_at_idx("$(ls)", 0, false, &[]).expect("some");
+        assert_eq!(n.kind, NodeKind::CommandSubstitution);
+    }
+
+    #[test]
+    fn child_at_idx_returns_none_on_plain_letter() {
+        assert!(child_at_idx("abc", 0, false, &[]).is_none());
     }
 }
