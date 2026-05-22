@@ -22,9 +22,11 @@
 //! [`Generator::Script`] markers but does not invoke them — Tier B
 //! callers fall back to the §5.1 dynamic-hint UX.
 //!
-//! Status: M0-5 chunk 1 — public types + entry-point stub. Chunks
-//! 2-7 land the matching logic, state machine, candidate generation,
-//! and regression scenarios.
+//! Status: M0-5 chunks 1-5 complete — public types, static helpers,
+//! state machine, token shape classifier, and matcher are wired.
+//! `parse_arguments` walks tokens left-to-right and emits per-token
+//! annotations + cursor context. Chunks 6-7 add candidate emission
+//! and end-to-end spec-fixture regression.
 
 use std::ops::Range;
 
@@ -220,7 +222,6 @@ pub struct ParserResult {
 /// declaration order, returning the first whose primary name or alias
 /// equals `needle`. Aliases shadow nothing — primary names always win
 /// because they're searched first per node.
-#[allow(dead_code)]
 pub(crate) fn find_subcommand<'a>(parent: &'a Subcommand, needle: &str) -> Option<&'a Subcommand> {
     parent
         .subcommands
@@ -233,7 +234,6 @@ pub(crate) fn find_subcommand<'a>(parent: &'a Subcommand, needle: &str) -> Optio
 /// Mirrors TS `findOption`: linear scan, first match wins. The TS
 /// implementation also handles `-xvf`-style chained shorts elsewhere;
 /// that's the caller's job (chunk 5).
-#[allow(dead_code)]
 pub(crate) fn find_option<'a>(subcommand: &'a Subcommand, needle: &str) -> Option<&'a Opt> {
     subcommand
         .options
@@ -244,7 +244,6 @@ pub(crate) fn find_option<'a>(subcommand: &'a Subcommand, needle: &str) -> Optio
 /// Two options are "equal" iff they share at least one name. This is
 /// the TS `optionsAreEqual` rule — used by `count_equal_options` to
 /// enforce `is_repeatable`.
-#[allow(dead_code)]
 pub(crate) fn options_are_equal(a: &Opt, b: &Opt) -> bool {
     a.names.iter().any(|n| b.names.iter().any(|m| m == n))
 }
@@ -252,24 +251,14 @@ pub(crate) fn options_are_equal(a: &Opt, b: &Opt) -> bool {
 /// Count how many times `opt` (or an alias of it) already appears in
 /// `seen`. The state machine uses this to reject a second `--foo`
 /// when `opt.is_repeatable == false`.
-#[allow(dead_code)]
 pub(crate) fn count_equal_options(opt: &Opt, seen: &[Opt]) -> usize {
     seen.iter().filter(|s| options_are_equal(s, opt)).count()
 }
 
 /// `true` when the option *may* be parsed again at this point — either
 /// it's repeatable, or it has never been seen.
-#[allow(dead_code)]
 pub(crate) fn can_consume_option(opt: &Opt, seen: &[Opt]) -> bool {
     opt.is_repeatable || count_equal_options(opt, seen) == 0
-}
-
-/// `true` when the argument is required and not variadic — used by
-/// chunk 5 to decide whether the cursor must stay in `Arg` context
-/// (vs falling through to the next positional / option).
-#[allow(dead_code)]
-pub(crate) fn is_mandatory_or_variadic(arg: &Arg) -> bool {
-    !arg.is_optional || arg.is_variadic
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +274,6 @@ pub(crate) fn is_mandatory_or_variadic(arg: &Arg) -> bool {
 /// expected next; clamped to the variadic slot once `args.len()`
 /// runs out and the last arg is variadic.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct ArgState {
     /// Index of the next arg to consume. `args.len()` once exhausted
     /// for non-variadic specs; pinned to `args.len()-1` for variadic.
@@ -302,7 +290,6 @@ pub(crate) struct ArgState {
 /// Snapshot of "where the matcher is" between two tokens. The state
 /// machine in chunk 5 consumes one token per step and mutates a clone.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub(crate) struct ParserState {
     /// Chain of subcommand names walked so far, root included.
     pub subcommand_path: Vec<String>,
@@ -321,7 +308,6 @@ pub(crate) struct ParserState {
     pub past_double_dash: bool,
 }
 
-#[allow(dead_code)]
 impl ArgState {
     /// Build an `ArgState` for `args` if it has at least one entry.
     pub(crate) fn new(args: &[Arg]) -> Option<Self> {
@@ -349,18 +335,6 @@ impl ArgState {
             self.idx += 1;
         }
     }
-
-    /// Currently-expected arg index, clamped to `total - 1`.
-    /// Returns `None` when the cursor is past the end (non-variadic).
-    pub(crate) fn current(&self) -> Option<usize> {
-        if self.idx < self.total {
-            Some(self.idx)
-        } else if self.last_is_variadic {
-            Some(self.total - 1)
-        } else {
-            None
-        }
-    }
 }
 
 /// Build the initial parser state for a root spec.
@@ -368,7 +342,6 @@ impl ArgState {
 /// `subcommand_path` carries the root spec's `name`; the args cursor
 /// is initialized to the root's positional args (if any). No options
 /// have been seen.
-#[allow(dead_code)]
 pub(crate) fn get_initial_state(root: &Spec) -> ParserState {
     ParserState {
         subcommand_path: vec![root.name.clone()],
@@ -388,7 +361,6 @@ pub(crate) fn get_initial_state(root: &Spec) -> ParserState {
 
 /// Categorize a token by its surface form. Spec lookup happens later.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum TokenShape {
     /// `--` separator — disables option parsing for the rest of the line.
     DoubleDash,
@@ -406,7 +378,6 @@ pub(crate) enum TokenShape {
 /// Classify a token's surface form. Cheap — no spec lookup, just
 /// shape inspection. Inputs come from the shell_parser's tokenized
 /// spans (already quote-stripped by [`crate::shell_parser`]).
-#[allow(dead_code)]
 pub(crate) fn classify_token_shape(text: &str) -> TokenShape {
     if text.is_empty() {
         return TokenShape::Empty;
@@ -453,19 +424,176 @@ pub(crate) fn classify_token_shape(text: &str) -> TokenShape {
     TokenShape::Word
 }
 
-/// `true` when `text` *looks like* an option name (long or short) —
-/// used by chunk 5 to decide whether to consult [`find_option`] vs
-/// [`find_subcommand`].
-#[allow(dead_code)]
-pub(crate) fn looks_like_option(text: &str) -> bool {
-    matches!(
-        classify_token_shape(text),
-        TokenShape::LongOption { .. } | TokenShape::ShortOption { .. } | TokenShape::DoubleDash
-    )
+// ---------------------------------------------------------------------------
+// State machine (chunk 5) — consume tokens left-to-right, mutating
+// `ParserState`, emitting one `TokenKind` per token.
+// ---------------------------------------------------------------------------
+
+/// Walk `path` through `root` to find the spec the matcher is currently
+/// sitting inside. `path[0]` is the root's own name and is skipped.
+/// Returns `None` if any segment fails to resolve (shouldn't happen
+/// since the matcher only pushes names it just found via `find_subcommand`).
+fn current_subcommand<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand> {
+    let mut node = root;
+    for name in path.iter().skip(1) {
+        node = find_subcommand(node, name)?;
+    }
+    Some(node)
+}
+
+/// Consume one token, mutating `state` and returning the kind we
+/// just bound this token to.
+fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
+    if state.option_args.is_some() {
+        if let Some(args) = state.option_args.as_mut() {
+            args.advance();
+            if !args.has_more() {
+                state.option_args = None;
+            }
+        }
+        return TokenKind::OptionArg;
+    }
+
+    if state.past_double_dash {
+        if let Some(args) = state.subcommand_args.as_mut() {
+            args.advance();
+            if !args.has_more() {
+                state.subcommand_args = None;
+            }
+        }
+        return TokenKind::SubcommandArg;
+    }
+
+    let shape = classify_token_shape(text);
+
+    match shape {
+        TokenShape::DoubleDash => {
+            state.past_double_dash = true;
+            TokenKind::DoubleDash
+        }
+        TokenShape::Empty => TokenKind::Unknown,
+        TokenShape::LongOption { name, value } => {
+            let Some(node) = current_subcommand(root, &state.subcommand_path) else {
+                return TokenKind::Unknown;
+            };
+            let Some(opt) = find_option(node, &name) else {
+                return TokenKind::Unknown;
+            };
+            if !can_consume_option(opt, &state.consumed_options) {
+                return TokenKind::Unknown;
+            }
+            state.consumed_options.push(opt.clone());
+            let mut arg_state = ArgState::new(&opt.args);
+            if value.is_some() {
+                if let Some(args) = arg_state.as_mut() {
+                    args.advance();
+                    if !args.has_more() {
+                        arg_state = None;
+                    }
+                }
+            }
+            state.option_args = arg_state;
+            TokenKind::OptionName
+        }
+        TokenShape::ShortOption { chars } => {
+            let Some(node) = current_subcommand(root, &state.subcommand_path) else {
+                return TokenKind::Unknown;
+            };
+            // Single short → normal option; chain (≥2) → ChainedOption.
+            if chars.len() == 1 {
+                let lookup = format!("-{}", chars[0]);
+                let Some(opt) = find_option(node, &lookup) else {
+                    return TokenKind::Unknown;
+                };
+                if !can_consume_option(opt, &state.consumed_options) {
+                    return TokenKind::Unknown;
+                }
+                state.consumed_options.push(opt.clone());
+                state.option_args = ArgState::new(&opt.args);
+                return TokenKind::OptionName;
+            }
+            // Chained: each char must resolve to a flag-only (no args)
+            // option. If any binding fails or a flag would take args,
+            // mark Unknown — TS reference treats those as opaque.
+            for c in &chars {
+                let lookup = format!("-{c}");
+                let Some(opt) = find_option(node, &lookup) else {
+                    return TokenKind::Unknown;
+                };
+                if !opt.args.is_empty() {
+                    return TokenKind::Unknown;
+                }
+                if !can_consume_option(opt, &state.consumed_options) {
+                    return TokenKind::Unknown;
+                }
+                state.consumed_options.push(opt.clone());
+            }
+            TokenKind::ChainedOption
+        }
+        TokenShape::Word => {
+            let Some(node) = current_subcommand(root, &state.subcommand_path) else {
+                return TokenKind::Unknown;
+            };
+            // Subcommand match is only legal at the start of a position
+            // where no positional arg has been consumed yet *and* the
+            // current spec doesn't require `--` first.
+            let no_positionals_consumed = state.subcommand_args.as_ref().is_none_or(|s| s.idx == 0);
+            if no_positionals_consumed && !node.requires_double_dash {
+                if let Some(sub) = find_subcommand(node, text) {
+                    state.subcommand_path.push(sub.name.clone());
+                    state.consumed_options.clear();
+                    state.subcommand_args = ArgState::new(&sub.args);
+                    state.option_args = None;
+                    return TokenKind::Subcommand;
+                }
+            }
+            if let Some(args) = state.subcommand_args.as_mut() {
+                if args.has_more() {
+                    args.advance();
+                    if !args.has_more() {
+                        state.subcommand_args = None;
+                    }
+                    return TokenKind::SubcommandArg;
+                }
+            }
+            TokenKind::Unknown
+        }
+    }
+}
+
+/// Decide what the cursor "is on" given the final state.
+fn compute_cursor_context(
+    root: &Spec,
+    state: &ParserState,
+    _last_token_text: Option<&str>,
+) -> CursorContext {
+    if state.past_double_dash {
+        return if state.subcommand_args.as_ref().is_some_and(|a| a.has_more()) {
+            CursorContext::Arg
+        } else {
+            CursorContext::Done
+        };
+    }
+    if state.option_args.as_ref().is_some_and(|a| a.has_more()) {
+        return CursorContext::Arg;
+    }
+    if state.subcommand_args.as_ref().is_some_and(|a| a.has_more()) {
+        return CursorContext::Arg;
+    }
+    let Some(node) = current_subcommand(root, &state.subcommand_path) else {
+        return CursorContext::Done;
+    };
+    if !node.subcommands.is_empty() {
+        CursorContext::Subcommand
+    } else if !node.options.is_empty() {
+        CursorContext::OptionName
+    } else {
+        CursorContext::Done
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunk 5 wires the real implementation)
+// Entry point
 // ---------------------------------------------------------------------------
 
 /// Match the shell-parser tokens for the command at the cursor against
@@ -479,12 +607,46 @@ pub(crate) fn looks_like_option(text: &str) -> bool {
 /// `cursor` is a byte offset into the original input line; the result's
 /// `cursor_context` reflects what the parser thinks is expected at
 /// that position.
-///
-/// Chunk 1 returns an empty result so downstream callers can integrate
-/// against the public API; chunks 2–5 wire the matching state machine.
 pub fn parse_arguments(spec: &Spec, tokens: &[Annotation], cursor: usize) -> ParserResult {
-    let _ = (spec, tokens, cursor);
-    ParserResult::default()
+    let mut state = get_initial_state(spec);
+    let mut annotations = Vec::with_capacity(tokens.len());
+
+    // The first token is the binary name itself — already consumed by
+    // get_initial_state; emit it as Subcommand and skip the state step.
+    let mut iter = tokens.iter();
+    if let Some(first) = iter.next() {
+        annotations.push(Annotation {
+            span: first.span.clone(),
+            text: first.text.clone(),
+            kind: TokenKind::Subcommand,
+        });
+    }
+
+    let mut last_consumed_text: Option<String> = None;
+
+    for tok in iter {
+        // Cursor sits inside or before this token → stop consuming so
+        // the partially-typed token doesn't lock the matcher into a
+        // wrong context.
+        if tok.span.start >= cursor {
+            break;
+        }
+        let kind = step(&mut state, &tok.text, spec);
+        last_consumed_text = Some(tok.text.clone());
+        annotations.push(Annotation {
+            span: tok.span.clone(),
+            text: tok.text.clone(),
+            kind,
+        });
+    }
+
+    let cursor_context = compute_cursor_context(spec, &state, last_consumed_text.as_deref());
+
+    ParserResult {
+        annotations,
+        cursor_context,
+        subcommand_path: state.subcommand_path,
+    }
 }
 
 #[cfg(test)]
@@ -565,10 +727,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_arguments_stub_returns_default() {
+    fn parse_arguments_empty_tokens_returns_root_context() {
         let s = git_spec();
         let r = parse_arguments(&s, &[], 0);
-        assert_eq!(r, ParserResult::default());
+        assert!(r.annotations.is_empty());
+        assert_eq!(r.subcommand_path, vec!["git".to_string()]);
+        // git has subcommands → next position is a subcommand.
+        assert_eq!(r.cursor_context, CursorContext::Subcommand);
     }
 
     #[test]
@@ -731,12 +896,12 @@ mod tests {
     #[test]
     fn arg_state_advance_walks_then_stops_non_variadic() {
         let mut s = ArgState::new(&[req_arg(), req_arg()]).unwrap();
-        assert_eq!(s.current(), Some(0));
+        assert_eq!(s.idx, 0);
         s.advance();
-        assert_eq!(s.current(), Some(1));
+        assert_eq!(s.idx, 1);
         assert!(s.has_more());
         s.advance();
-        assert_eq!(s.current(), None);
+        assert_eq!(s.idx, 2);
         assert!(!s.has_more());
     }
 
@@ -747,18 +912,16 @@ mod tests {
         s.advance(); // saturates at 1
         s.advance(); // still saturated
         assert_eq!(s.idx, 1);
-        assert_eq!(s.current(), Some(1));
         assert!(s.has_more());
     }
 
     #[test]
     fn arg_state_single_variadic_stays_at_zero() {
         let mut s = ArgState::new(&[variadic_arg()]).unwrap();
-        assert_eq!(s.current(), Some(0));
         s.advance();
         s.advance();
         assert_eq!(s.idx, 0);
-        assert_eq!(s.current(), Some(0));
+        assert!(s.has_more());
     }
 
     #[test]
@@ -877,49 +1040,227 @@ mod tests {
         assert_eq!(classify_token_shape("file.txt"), TokenShape::Word);
     }
 
-    #[test]
-    fn looks_like_option_matches_all_option_shapes() {
-        assert!(looks_like_option("--foo"));
-        assert!(looks_like_option("-x"));
-        assert!(looks_like_option("-xvf"));
-        assert!(looks_like_option("--"));
-        assert!(looks_like_option("-m=value"));
+    // ---- chunk 5: parse_arguments end-to-end -------------------------
+
+    fn ann(text: &str, start: usize) -> Annotation {
+        Annotation {
+            span: start..start + text.len(),
+            text: text.to_string(),
+            kind: TokenKind::Unknown,
+        }
+    }
+
+    /// Tokenize a space-separated input line into [`Annotation`] tokens,
+    /// for test convenience. Real callers get tokens from `shell_parser`.
+    fn tokenize(line: &str) -> Vec<Annotation> {
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        for word in line.split(' ') {
+            if !word.is_empty() {
+                out.push(ann(word, start));
+            }
+            start += word.len() + 1; // +1 for the space
+        }
+        out
     }
 
     #[test]
-    fn looks_like_option_rejects_non_options() {
-        assert!(!looks_like_option("status"));
-        assert!(!looks_like_option("-"));
-        assert!(!looks_like_option("-1"));
-        assert!(!looks_like_option(""));
+    fn parse_walks_subcommand() {
+        let s = git_spec();
+        let toks = tokenize("git status");
+        let r = parse_arguments(&s, &toks, 999);
+        assert_eq!(r.subcommand_path, vec!["git", "status"]);
+        assert_eq!(r.annotations.len(), 2);
+        assert_eq!(r.annotations[0].kind, TokenKind::Subcommand);
+        assert_eq!(r.annotations[1].kind, TokenKind::Subcommand);
+        // `status` has no subcommands / options / args → Done.
+        assert_eq!(r.cursor_context, CursorContext::Done);
     }
 
     #[test]
-    fn is_mandatory_or_variadic_classification() {
-        let required = Arg {
-            is_optional: false,
-            is_variadic: false,
-            ..Default::default()
-        };
-        let optional = Arg {
-            is_optional: true,
-            is_variadic: false,
-            ..Default::default()
-        };
-        let variadic_optional = Arg {
-            is_optional: true,
-            is_variadic: true,
-            ..Default::default()
-        };
-        let variadic_required = Arg {
-            is_optional: false,
-            is_variadic: true,
-            ..Default::default()
-        };
+    fn parse_long_option_with_separate_arg() {
+        let s = git_spec();
+        let toks = tokenize("git commit --message hello");
+        let r = parse_arguments(&s, &toks, 999);
+        assert_eq!(r.annotations[0].kind, TokenKind::Subcommand); // git
+        assert_eq!(r.annotations[1].kind, TokenKind::Subcommand); // commit
+        assert_eq!(r.annotations[2].kind, TokenKind::OptionName); // --message
+        assert_eq!(r.annotations[3].kind, TokenKind::OptionArg); // hello
+    }
 
-        assert!(is_mandatory_or_variadic(&required));
-        assert!(!is_mandatory_or_variadic(&optional));
-        assert!(is_mandatory_or_variadic(&variadic_optional));
-        assert!(is_mandatory_or_variadic(&variadic_required));
+    #[test]
+    fn parse_long_option_with_equals_value() {
+        let s = git_spec();
+        let toks = tokenize("git commit --message=hello");
+        let r = parse_arguments(&s, &toks, 999);
+        assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+    }
+
+    #[test]
+    fn parse_short_option() {
+        let s = git_spec();
+        let toks = tokenize("git commit -m hello");
+        let r = parse_arguments(&s, &toks, 999);
+        assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+        assert_eq!(r.annotations[3].kind, TokenKind::OptionArg);
+    }
+
+    #[test]
+    fn parse_unknown_subcommand_falls_through() {
+        let s = git_spec();
+        let toks = tokenize("git nonexistent");
+        let r = parse_arguments(&s, &toks, 999);
+        // `git` has no positional args, so "nonexistent" can't bind
+        // as either subcommand or arg → Unknown.
+        assert_eq!(r.annotations[1].kind, TokenKind::Unknown);
+        assert_eq!(r.subcommand_path, vec!["git"]);
+    }
+
+    #[test]
+    fn parse_double_dash_disables_option_matching() {
+        let spec = Subcommand {
+            name: "rm".into(),
+            options: vec![Opt {
+                names: vec!["-f".into()],
+                ..Default::default()
+            }],
+            args: vec![Arg {
+                name: Some("file".into()),
+                is_variadic: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("rm -- -f");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.annotations[1].kind, TokenKind::DoubleDash);
+        // After --, `-f` is a literal arg, not an option flag.
+        assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg);
+    }
+
+    #[test]
+    fn parse_repeatable_option_allowed_twice() {
+        let spec = Subcommand {
+            name: "x".into(),
+            options: vec![Opt {
+                names: vec!["-v".into()],
+                is_repeatable: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("x -v -v");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.annotations[1].kind, TokenKind::OptionName);
+        assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+    }
+
+    #[test]
+    fn parse_non_repeatable_option_second_use_unknown() {
+        let spec = Subcommand {
+            name: "x".into(),
+            options: vec![Opt {
+                names: vec!["-v".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("x -v -v");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.annotations[1].kind, TokenKind::OptionName);
+        assert_eq!(r.annotations[2].kind, TokenKind::Unknown);
+    }
+
+    #[test]
+    fn parse_chained_short_options() {
+        let spec = Subcommand {
+            name: "x".into(),
+            options: vec![
+                Opt {
+                    names: vec!["-x".into()],
+                    ..Default::default()
+                },
+                Opt {
+                    names: vec!["-v".into()],
+                    ..Default::default()
+                },
+                Opt {
+                    names: vec!["-f".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let toks = tokenize("x -xvf");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.annotations[1].kind, TokenKind::ChainedOption);
+    }
+
+    #[test]
+    fn parse_positional_arg_consumed() {
+        let spec = Subcommand {
+            name: "echo".into(),
+            args: vec![Arg {
+                name: Some("msg".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("echo hello");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.annotations[1].kind, TokenKind::SubcommandArg);
+        assert_eq!(r.cursor_context, CursorContext::Done);
+    }
+
+    #[test]
+    fn parse_variadic_arg_keeps_accepting() {
+        let spec = Subcommand {
+            name: "cat".into(),
+            args: vec![Arg {
+                name: Some("files".into()),
+                is_variadic: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("cat a b c");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.annotations[1].kind, TokenKind::SubcommandArg);
+        assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg);
+        assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg);
+        assert_eq!(r.cursor_context, CursorContext::Arg);
+    }
+
+    #[test]
+    fn parse_cursor_inside_token_does_not_consume_partial() {
+        let s = git_spec();
+        // "git sta" with cursor at byte 6 (start of "sta")
+        let toks = tokenize("git sta");
+        let r = parse_arguments(&s, &toks, 4);
+        // Only `git` consumed; "sta" left for completion.
+        assert_eq!(r.annotations.len(), 1);
+        assert_eq!(r.subcommand_path, vec!["git"]);
+        assert_eq!(r.cursor_context, CursorContext::Subcommand);
+    }
+
+    #[test]
+    fn parse_cursor_after_subcommand_expects_subcommand_args_or_options() {
+        let s = git_spec();
+        let toks = tokenize("git commit");
+        let r = parse_arguments(&s, &toks, 999);
+        assert_eq!(r.subcommand_path, vec!["git", "commit"]);
+        // commit has options but no subcommands → OptionName.
+        assert_eq!(r.cursor_context, CursorContext::OptionName);
+    }
+
+    #[test]
+    fn parse_first_token_emitted_even_with_zero_cursor() {
+        let s = git_spec();
+        let toks = tokenize("git");
+        let r = parse_arguments(&s, &toks, 0);
+        // Even at cursor 0, the binary-name token is preserved so
+        // downstream can render it.
+        assert_eq!(r.annotations.len(), 1);
+        assert_eq!(r.annotations[0].kind, TokenKind::Subcommand);
     }
 }
