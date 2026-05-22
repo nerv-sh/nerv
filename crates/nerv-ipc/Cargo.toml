@@ -1,5 +1,5 @@
 [package]
-name = "fig_ipc"
+name = "nerv-ipc"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
@@ -15,8 +15,8 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 cfg-if.workspace = true
-fig_proto.workspace = true
-fig_util.workspace = true
+nerv-proto.workspace = true
+nerv-util.workspace = true
 flate2.workspace = true
 pin-project-lite = "0.2.12"
 rand.workspace = true

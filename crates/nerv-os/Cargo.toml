@@ -1,5 +1,5 @@
 [package]
-name = "fig_os_shim"
+name = "nerv-os"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true

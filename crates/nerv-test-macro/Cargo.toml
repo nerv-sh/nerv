@@ -1,5 +1,5 @@
 [package]
-name = "fig_test_macro"
+name = "nerv-test-macro"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true

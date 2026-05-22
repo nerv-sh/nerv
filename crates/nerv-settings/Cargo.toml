@@ -1,5 +1,5 @@
 [package]
-name = "fig_settings"
+name = "nerv-settings"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 fd-lock = "4.0.4"
-fig_util.workspace = true
+nerv-util.workspace = true
 parking_lot.workspace = true
 r2d2.workspace = true
 r2d2_sqlite.workspace = true
