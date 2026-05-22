@@ -1,0 +1,6 @@
+# Alacritty terminal-state regression fixtures (44 MB of grid.json snapshots).
+# Out of scope for nerv-sh: we consume nerv-term as a screen-state library,
+# not as an alacritty regression target. Re-fetch from upstream if needed:
+#   git clone https://github.com/aws/amazon-q-developer-cli-autocomplete.git
+#   cp -r .../crates/alacritty_terminal/tests/ref crates/nerv-term/tests/
+tests/ref/
