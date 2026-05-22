@@ -5,14 +5,8 @@ use std::sync::OnceLock;
 
 use cfg_if::cfg_if;
 use nerv_os::Env;
-use serde::{
-    Deserialize,
-    Serialize,
-};
-use sha2::{
-    Digest,
-    Sha256,
-};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::Error;
 use crate::manifest::is_minimal;
@@ -122,7 +116,7 @@ Please upgrade to Windows 11 or wait for a fix while we work this issue out."
                 }
 
                 v
-            },
+            }
             other => vec![format!("{other}")],
         }
     }
@@ -139,7 +133,7 @@ impl std::fmt::Display for OSVersion {
             } => {
                 let patch = patch.unwrap_or(0);
                 write!(f, "macOS {major}.{minor}.{patch} ({build})")
-            },
+            }
             OSVersion::Linux {
                 kernel_version,
                 os_release,
@@ -328,7 +322,8 @@ fn raw_system_id() -> Result<String, Error> {
     use winreg::RegKey;
     use winreg::enums::HKEY_LOCAL_MACHINE;
 
-    let rkey = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(r"SOFTWARE\Microsoft\Cryptography")?;
+    let rkey =
+        RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(r"SOFTWARE\Microsoft\Cryptography")?;
     let id: String = rkey.get_value("MachineGuid")?;
 
     Ok(id)

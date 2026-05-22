@@ -2,10 +2,7 @@ use std::io::Read;
 
 use flate2::Compression;
 use prost::Message;
-use rand::{
-    Rng,
-    RngCore,
-};
+use rand::{Rng, RngCore};
 use thiserror::Error;
 
 pub use crate::proto::mux::*;
@@ -30,7 +27,10 @@ pub struct PacketOptions {
     pub gzip: bool,
 }
 
-pub fn message_to_packet<M: Message>(message: M, options: &PacketOptions) -> Result<Packet, MuxError> {
+pub fn message_to_packet<M: Message>(
+    message: M,
+    options: &PacketOptions,
+) -> Result<Packet, MuxError> {
     let mut inner = message.encode_to_vec();
 
     let mut rng = rand::rng();
@@ -65,7 +65,9 @@ pub fn packet_to_message<M: Message + Default>(packet: Packet) -> Result<M, MuxE
     }
 
     let compression = match packet.compression() {
-        packet::Compression::Unknown => return Err(MuxError::UnknownCompression(packet.compression)),
+        packet::Compression::Unknown => {
+            return Err(MuxError::UnknownCompression(packet.compression));
+        }
         packet::Compression::None => false,
         packet::Compression::Gzip => true,
     };

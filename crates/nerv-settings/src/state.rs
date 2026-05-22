@@ -1,14 +1,8 @@
 use serde::de::DeserializeOwned;
-use serde_json::{
-    Map,
-    Value,
-};
+use serde_json::{Map, Value};
 
 use crate::Result;
-use crate::sqlite::{
-    Db,
-    database,
-};
+use crate::sqlite::{Db, database};
 
 #[derive(Debug, Clone, Default)]
 pub struct State(inner::Inner);
@@ -75,7 +69,10 @@ impl State {
     }
 
     pub fn get_bool(&self, key: impl AsRef<str>) -> Result<Option<bool>> {
-        Ok(self.database()?.get_state_value(key)?.and_then(|value| value.as_bool()))
+        Ok(self
+            .database()?
+            .get_state_value(key)?
+            .and_then(|value| value.as_bool()))
     }
 
     pub fn get_bool_or(&self, key: impl AsRef<str>, default: bool) -> bool {
@@ -83,18 +80,27 @@ impl State {
     }
 
     pub fn get_string(&self, key: impl AsRef<str>) -> Result<Option<String>> {
-        Ok(self.database()?.get_state_value(key)?.and_then(|value| match value {
-            Value::String(s) => Some(s),
-            _ => None,
-        }))
+        Ok(self
+            .database()?
+            .get_state_value(key)?
+            .and_then(|value| match value {
+                Value::String(s) => Some(s),
+                _ => None,
+            }))
     }
 
     pub fn get_string_or(&self, key: impl AsRef<str>, default: impl Into<String>) -> String {
-        self.get_string(key).ok().flatten().unwrap_or_else(|| default.into())
+        self.get_string(key)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| default.into())
     }
 
     pub fn get_int(&self, key: impl AsRef<str>) -> Result<Option<i64>> {
-        Ok(self.database()?.get_state_value(key)?.and_then(|value| value.as_i64()))
+        Ok(self
+            .database()?
+            .get_state_value(key)?
+            .and_then(|value| value.as_i64()))
     }
 
     pub fn get_int_or(&self, key: impl AsRef<str>, default: i64) -> i64 {
@@ -164,10 +170,7 @@ pub fn get_int_or(key: impl AsRef<str>, default: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Result,
-        State,
-    };
+    use super::{Result, State};
 
     /// General read/write state test
     #[test]

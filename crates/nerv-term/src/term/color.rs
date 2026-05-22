@@ -1,25 +1,9 @@
-use std::fmt::{
-    self,
-    Display,
-    Formatter,
-};
-use std::ops::{
-    Add,
-    Index,
-    IndexMut,
-    Mul,
-};
+use std::fmt::{self, Display, Formatter};
+use std::ops::{Add, Index, IndexMut, Mul};
 use std::str::FromStr;
 
-use serde::de::{
-    Error as _,
-    Visitor,
-};
-use serde::{
-    Deserialize,
-    Deserializer,
-    Serialize,
-};
+use serde::de::{Error as _, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_yaml::Value;
 use tracing::trace;
 
@@ -178,7 +162,7 @@ impl FromStr for Rgb {
                 color >>= 8;
                 let r = color as u8;
                 Ok(Rgb { r, g, b })
-            },
+            }
             Err(_) => Err(()),
         }
     }
@@ -234,13 +218,17 @@ impl<'de> Deserialize<'de> for CellRgb {
                     _ => (),
                 }
 
-                Rgb::from_str(value)
-                    .map(CellRgb::Rgb)
-                    .map_err(|_err| E::custom(format!("failed to parse color {value}; expected {EXPECTING}")))
+                Rgb::from_str(value).map(CellRgb::Rgb).map_err(|_err| {
+                    E::custom(format!(
+                        "failed to parse color {value}; expected {EXPECTING}"
+                    ))
+                })
             }
         }
 
-        deserializer.deserialize_str(CellRgbVisitor).map_err(D::Error::custom)
+        deserializer
+            .deserialize_str(CellRgbVisitor)
+            .map_err(D::Error::custom)
     }
 }
 

@@ -1,33 +1,17 @@
-use std::sync::{
-    Arc,
-    Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 use serde::de::DeserializeOwned;
-use serde_json::{
-    Map,
-    Value,
-};
+use serde_json::{Map, Value};
 
-use crate::{
-    JsonStore,
-    OldSettings,
-    Result,
-};
+use crate::{JsonStore, OldSettings, Result};
 
 #[derive(Debug, Clone, Default)]
 pub struct Settings(inner::Inner);
 
 mod inner {
-    use std::sync::{
-        Arc,
-        Mutex,
-    };
+    use std::sync::{Arc, Mutex};
 
-    use serde_json::{
-        Map,
-        Value,
-    };
+    use serde_json::{Map, Value};
 
     #[derive(Debug, Clone, Default)]
     pub enum Inner {
@@ -48,22 +32,29 @@ impl Settings {
 
     pub fn from_slice(slice: &[(&str, Value)]) -> Self {
         Self(inner::Inner::Fake(Arc::new(Mutex::new(
-            slice.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect(),
+            slice
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), v.clone()))
+                .collect(),
         ))))
     }
 
-    pub fn set_value(&self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Result<()> {
+    pub fn set_value(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Result<()> {
         match &self.0 {
             inner::Inner::Real => {
                 let mut settings = OldSettings::load()?;
                 settings.set(key, value);
                 settings.save_to_file()?;
                 Ok(())
-            },
+            }
             inner::Inner::Fake(map) => {
                 map.lock()?.insert(key.into(), value.into());
                 Ok(())
-            },
+            }
         }
     }
 
@@ -74,11 +65,11 @@ impl Settings {
                 settings.remove(key);
                 settings.save_to_file()?;
                 Ok(())
-            },
+            }
             inner::Inner::Fake(map) => {
                 map.lock()?.remove(key.as_ref());
                 Ok(())
-            },
+            }
         }
     }
 
@@ -98,21 +89,25 @@ impl Settings {
                     Some(value) => Ok(Some(serde_json::from_value(value.clone())?)),
                     None => Ok(None),
                 }
-            },
+            }
             inner::Inner::Fake(map) => {
                 let value = map.lock()?.get(key.as_ref()).cloned();
                 match value {
                     Some(value) => Ok(Some(serde_json::from_value(value)?)),
                     None => Ok(None),
                 }
-            },
+            }
         }
     }
 
     pub fn get_bool(&self, key: impl AsRef<str>) -> Result<Option<bool>> {
         match &self.0 {
             inner::Inner::Real => Ok(OldSettings::load()?.get_bool(key.as_ref())),
-            inner::Inner::Fake(map) => Ok(map.lock()?.get(key.as_ref()).cloned().and_then(|v| v.as_bool())),
+            inner::Inner::Fake(map) => Ok(map
+                .lock()?
+                .get(key.as_ref())
+                .cloned()
+                .and_then(|v| v.as_bool())),
         }
     }
 
@@ -142,7 +137,11 @@ impl Settings {
     pub fn get_int(&self, key: impl AsRef<str>) -> Result<Option<i64>> {
         match &self.0 {
             inner::Inner::Real => Ok(OldSettings::load()?.get_int(key.as_ref())),
-            inner::Inner::Fake(map) => Ok(map.lock()?.get(key.as_ref()).cloned().and_then(|v| v.as_i64())),
+            inner::Inner::Fake(map) => Ok(map
+                .lock()?
+                .get(key.as_ref())
+                .cloned()
+                .and_then(|v| v.as_i64())),
         }
     }
 
@@ -211,10 +210,7 @@ pub fn get_int_or(key: impl AsRef<str>, default: i64) -> i64 {
 
 #[cfg(test)]
 mod test {
-    use super::{
-        Result,
-        Settings,
-    };
+    use super::{Result, Settings};
 
     /// General read/write settings test
     #[test]

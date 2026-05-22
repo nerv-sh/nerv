@@ -2,19 +2,12 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use tokio::fs::{
-    self,
-    File,
-};
+use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tracing::debug;
 
 use crate::Integration;
-use crate::error::{
-    Error,
-    ErrorExt,
-    Result,
-};
+use crate::error::{Error, ErrorExt, Result};
 
 #[derive(Debug, Clone)]
 pub struct FileIntegration {
@@ -34,26 +27,26 @@ impl Integration for FileIntegration {
         // Check for parent folder permissions issues
         #[cfg(unix)]
         {
-            use nix::unistd::{
-                AccessFlags,
-                access,
-            };
+            use nix::unistd::{AccessFlags, access};
 
             let mut path = self.path.as_path();
             let mut res = Ok(());
             loop {
                 if let Some(parent) = path.parent() {
-                    match access(parent, AccessFlags::R_OK | AccessFlags::W_OK | AccessFlags::X_OK) {
+                    match access(
+                        parent,
+                        AccessFlags::R_OK | AccessFlags::W_OK | AccessFlags::X_OK,
+                    ) {
                         Ok(_) => {
                             break;
-                        },
+                        }
                         Err(err) => {
                             res = Err(Error::PermissionDenied {
                                 path: parent.into(),
                                 inner: err.into(),
                             });
                             path = parent;
-                        },
+                        }
                     }
                 }
             }
@@ -64,7 +57,7 @@ impl Integration for FileIntegration {
             Ok(contents) => contents,
             Err(Error::Io(err)) if err.kind() == ErrorKind::NotFound => {
                 return Err(Error::FileDoesNotExist(self.path.clone().into()));
-            },
+            }
             Err(err) => return Err(err),
         };
         if current_contents.ne(&self.contents) {
@@ -85,7 +78,9 @@ impl Integration for FileIntegration {
             .ok_or_else(|| Error::Custom("Could not get integration file directory".into()))?;
 
         if !parent_dir.is_dir() {
-            fs::create_dir_all(&parent_dir).await.with_path(parent_dir)?;
+            fs::create_dir_all(&parent_dir)
+                .await
+                .with_path(parent_dir)?;
         }
 
         let mut options = File::options();
@@ -130,7 +125,10 @@ mod tests {
         };
 
         assert_eq!(
-            format!("File Integration @ {}/integration.txt", tempdir.path().display()),
+            format!(
+                "File Integration @ {}/integration.txt",
+                tempdir.path().display()
+            ),
             integration.describe()
         );
 

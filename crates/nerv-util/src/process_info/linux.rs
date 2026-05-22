@@ -5,10 +5,7 @@ pub trait LinuxExt {
     fn cmdline(&self) -> Option<String>;
 }
 
-use super::{
-    Pid,
-    PidExt,
-};
+use super::{Pid, PidExt};
 
 impl PidExt for Pid {
     fn current() -> Self {
@@ -28,7 +25,9 @@ impl PidExt for Pid {
     }
 
     fn exe(&self) -> Option<PathBuf> {
-        std::path::PathBuf::from(format!("/proc/{self}/exe")).read_link().ok()
+        std::path::PathBuf::from(format!("/proc/{self}/exe"))
+            .read_link()
+            .ok()
     }
 }
 

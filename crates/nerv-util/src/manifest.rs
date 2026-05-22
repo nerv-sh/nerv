@@ -3,20 +3,9 @@ use std::str::FromStr;
 use std::sync::OnceLock;
 
 use cfg_if::cfg_if;
-use nerv_os::{
-    EnvProvider,
-    FsProvider,
-    PlatformProvider,
-};
-use serde::{
-    Deserialize,
-    Deserializer,
-    Serialize,
-};
-use strum::{
-    Display,
-    EnumString,
-};
+use nerv_os::{EnvProvider, FsProvider, PlatformProvider};
+use serde::{Deserialize, Deserializer, Serialize};
+use strum::{Display, EnumString};
 use tracing::debug;
 
 use crate::Error;
@@ -158,7 +147,9 @@ pub enum FileType {
     Other(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, EnumString, Deserialize, Serialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, EnumString, Deserialize, Serialize,
+)]
 #[serde(rename_all = "camelCase")]
 #[strum(serialize_all = "camelCase")]
 pub enum Channel {
@@ -170,7 +161,12 @@ pub enum Channel {
 
 impl Channel {
     pub fn all() -> &'static [Self] {
-        &[Channel::Stable, Channel::Beta, Channel::Qa, Channel::Nightly]
+        &[
+            Channel::Stable,
+            Channel::Beta,
+            Channel::Qa,
+            Channel::Nightly,
+        ]
     }
 
     pub fn id(&self) -> &'static str {
@@ -225,7 +221,9 @@ pub fn manifest() -> &'static Manifest {
     CACHED.get_or_init(|| Manifest {
         managed_by: ManagedBy::None,
         target_triple: match TARGET_TRIPLE {
-            Some(target) => TargetTriple::from_str(target).expect("parsing target triple should not fail"),
+            Some(target) => {
+                TargetTriple::from_str(target).expect("parsing target triple should not fail")
+            }
             _ => TargetTriple::from_system(),
         },
         variant: match VARIANT.map(|s| s.to_ascii_lowercase()).as_deref() {
@@ -259,8 +257,10 @@ pub async fn bundle_metadata_json<Ctx: FsProvider + EnvProvider + PlatformProvid
         (nerv_os::Os::Linux, Variant::Full) => {
             let metadata_path = bundle_metadata_path(ctx)?;
             debug!("Reading metadata at path: {:?}", &metadata_path);
-            Ok(Some(ctx.fs().read_to_string(bundle_metadata_path(ctx)?).await?))
-        },
+            Ok(Some(
+                ctx.fs().read_to_string(bundle_metadata_path(ctx)?).await?,
+            ))
+        }
         _ => Ok(None),
     }
 }
@@ -313,10 +313,7 @@ pub fn version() -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{
-        from_str,
-        to_string,
-    };
+    use serde_json::{from_str, to_string};
 
     use super::*;
 

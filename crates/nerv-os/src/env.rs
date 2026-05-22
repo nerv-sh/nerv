@@ -1,18 +1,9 @@
 use std::collections::HashMap;
-use std::env::{
-    self,
-    VarError,
-};
-use std::ffi::{
-    OsStr,
-    OsString,
-};
+use std::env::{self, VarError};
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 use crate::Shim;
 #[derive(Debug, Clone, Default)]
@@ -21,10 +12,7 @@ pub struct Env(inner::Inner);
 mod inner {
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::{
-        Arc,
-        Mutex,
-    };
+    use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, Default)]
     pub(super) enum Inner {
@@ -57,13 +45,18 @@ impl Env {
     }
 
     pub fn new_fake() -> Self {
-        Self(inner::Inner::Fake(Arc::new(Mutex::new(inner::Fake::default()))))
+        Self(inner::Inner::Fake(Arc::new(Mutex::new(
+            inner::Fake::default(),
+        ))))
     }
 
     /// Create a fake process environment from a slice of tuples.
     pub fn from_slice(vars: &[(&str, &str)]) -> Self {
         use inner::Inner;
-        let map: HashMap<_, _> = vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        let map: HashMap<_, _> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
         Self(Inner::Fake(Arc::new(Mutex::new(inner::Fake {
             vars: map,
             ..Default::default()
@@ -111,10 +104,17 @@ impl Env {
                 Inner::Real => std::env::set_var(key, value),
                 Inner::Fake(fake) => {
                     fake.lock().unwrap().vars.insert(
-                        key.as_ref().to_str().expect("key must be valid str").to_string(),
-                        value.as_ref().to_str().expect("key must be valid str").to_string(),
+                        key.as_ref()
+                            .to_str()
+                            .expect("key must be valid str")
+                            .to_string(),
+                        value
+                            .as_ref()
+                            .to_str()
+                            .expect("key must be valid str")
+                            .to_string(),
                     );
-                },
+                }
             }
         }
     }
@@ -148,7 +148,9 @@ impl Env {
     }
 
     pub fn in_ssh(&self) -> bool {
-        self.get("SSH_CLIENT").is_ok() || self.get("SSH_CONNECTION").is_ok() || self.get("SSH_TTY").is_ok()
+        self.get("SSH_CLIENT").is_ok()
+            || self.get("SSH_CONNECTION").is_ok()
+            || self.get("SSH_TTY").is_ok()
     }
 
     pub fn in_codespaces(&self) -> bool {
@@ -184,7 +186,8 @@ impl Env {
     }
 
     pub fn amazon_q_chat_shell(&self) -> String {
-        self.get("AMAZON_Q_CHAT_SHELL").unwrap_or_else(|_| "bash".to_string())
+        self.get("AMAZON_Q_CHAT_SHELL")
+            .unwrap_or_else(|_| "bash".to_string())
     }
 
     pub fn q_cli_client_application(&self) -> Result<String, VarError> {
@@ -212,7 +215,8 @@ impl Env {
     }
 
     pub fn q_inline_shell_completion_cache_enabled(&self) -> bool {
-        self.get_os("Q_INLINE_SHELL_COMPLETION_CACHE_DISABLE").is_none()
+        self.get_os("Q_INLINE_SHELL_COMPLETION_CACHE_DISABLE")
+            .is_none()
     }
 
     pub fn q_inline_shell_completion_history_count(&self) -> Result<String, VarError> {

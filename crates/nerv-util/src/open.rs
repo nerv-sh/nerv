@@ -9,18 +9,18 @@ pub enum Error {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs)]
 fn open_macos(url_str: impl AsRef<str>) -> Result<(), Error> {
-    use objc2::ClassType;
-    use objc2_foundation::{
-        NSString,
-        NSURL,
-    };
-
-    let url_nsstring = NSString::from_str(url_str.as_ref());
-    let nsurl = unsafe { NSURL::initWithString(NSURL::alloc(), &url_nsstring) }.ok_or(Error::Failed)?;
-    let res = unsafe { objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&nsurl) };
-    res.then_some(()).ok_or(Error::Failed)
+    // Upstream used objc2 NSWorkspace; PLAN.md v0.6 §0.2 strips objc2*
+    // and macos-utils, so we shell out to the standard macOS `open`
+    // tool instead. Equivalent for URL launching.
+    let status = std::process::Command::new("open")
+        .arg(url_str.as_ref())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::Failed)
+    }
 }
 
 #[cfg(target_os = "windows")]

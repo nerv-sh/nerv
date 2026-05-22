@@ -9,19 +9,16 @@ use tracing::level_filters::LevelFilter;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::filter::Directive;
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::{
-    EnvFilter,
-    Registry,
-    fmt,
-};
+use tracing_subscriber::{EnvFilter, Registry, fmt};
 
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 const DEFAULT_FILTER: LevelFilter = LevelFilter::ERROR;
 
 static Q_LOG_LEVEL_GLOBAL: Mutex<Option<String>> = Mutex::new(None);
 static MAX_LEVEL: Mutex<Option<LevelFilter>> = Mutex::new(None);
-static ENV_FILTER_RELOADABLE_HANDLE: Mutex<Option<tracing_subscriber::reload::Handle<EnvFilter, Registry>>> =
-    Mutex::new(None);
+static ENV_FILTER_RELOADABLE_HANDLE: Mutex<
+    Option<tracing_subscriber::reload::Handle<EnvFilter, Registry>>,
+> = Mutex::new(None);
 
 // A logging error
 #[derive(Debug, Error)]
@@ -64,8 +61,12 @@ pub struct LogGuard {
 #[inline]
 pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, Error> {
     let filter_layer = create_filter_layer();
-    let (reloadable_filter_layer, reloadable_handle) = tracing_subscriber::reload::Layer::new(filter_layer);
-    ENV_FILTER_RELOADABLE_HANDLE.lock().unwrap().replace(reloadable_handle);
+    let (reloadable_filter_layer, reloadable_handle) =
+        tracing_subscriber::reload::Layer::new(filter_layer);
+    ENV_FILTER_RELOADABLE_HANDLE
+        .lock()
+        .unwrap()
+        .replace(reloadable_handle);
     let mut mcp_path = None;
 
     // First we construct the file logging layer if a file name was provided.
@@ -108,17 +109,21 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
             }
 
             let (non_blocking, guard) = tracing_appender::non_blocking(file);
-            let file_layer = fmt::layer().with_line_number(true).with_writer(non_blocking);
+            let file_layer = fmt::layer()
+                .with_line_number(true)
+                .with_writer(non_blocking);
 
             (Some(file_layer), Some(guard))
-        },
+        }
         None => (None, None),
     };
 
     // If we log to stdout, we need to add this layer to our logger.
     let (stdout_layer, _stdout_guard) = if args.log_to_stdout {
         let (non_blocking, guard) = tracing_appender::non_blocking(std::io::stdout());
-        let stdout_layer = fmt::layer().with_line_number(true).with_writer(non_blocking);
+        let stdout_layer = fmt::layer()
+            .with_line_number(true)
+            .with_writer(non_blocking);
         (Some(stdout_layer), Some(guard))
     } else {
         (None, None)
@@ -191,11 +196,15 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
 ///
 /// Returns a string identifying the current log level.
 pub fn get_log_level() -> String {
-    Q_LOG_LEVEL_GLOBAL.lock().unwrap().clone().unwrap_or_else(|| {
-        nerv_os::Env::new()
-            .q_log_level()
-            .unwrap_or_else(|_| DEFAULT_FILTER.to_string())
-    })
+    Q_LOG_LEVEL_GLOBAL
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| {
+            nerv_os::Env::new()
+                .q_log_level()
+                .unwrap_or_else(|_| DEFAULT_FILTER.to_string())
+        })
 }
 
 /// Set the log level to the given level.
@@ -235,7 +244,7 @@ pub fn get_log_level_max() -> LevelFilter {
             let filter_layer = create_filter_layer();
             *MAX_LEVEL.lock().unwrap() = filter_layer.max_level_hint();
             filter_layer.max_level_hint().unwrap_or(DEFAULT_FILTER)
-        },
+        }
     }
 }
 
@@ -261,12 +270,7 @@ mod tests {
     use std::fs::read_to_string;
     use std::time::Duration;
 
-    use tracing::{
-        debug,
-        error,
-        trace,
-        warn,
-    };
+    use tracing::{debug, error, trace, warn};
 
     use super::*;
 

@@ -1,29 +1,13 @@
-use std::fs::{
-    self,
-    File,
-};
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
 use nerv_term::ansi::Processor;
-use nerv_term::event::{
-    Event,
-    EventListener,
-};
-use nerv_term::grid::{
-    Dimensions,
-    Grid,
-};
-use nerv_term::index::{
-    Column,
-    Line,
-};
+use nerv_term::event::{Event, EventListener};
+use nerv_term::grid::{Dimensions, Grid};
+use nerv_term::index::{Column, Line};
 use nerv_term::term::cell::Cell;
-use nerv_term::term::{
-    ShellState,
-    SizeInfo,
-    Term,
-};
+use nerv_term::term::{ShellState, SizeInfo, Term};
 use serde::Deserialize;
 
 macro_rules! ref_tests {
@@ -91,7 +75,10 @@ where
     P: AsRef<Path>,
 {
     let mut res = Vec::new();
-    File::open(path.as_ref()).unwrap().read_to_end(&mut res).unwrap();
+    File::open(path.as_ref())
+        .unwrap()
+        .read_to_end(&mut res)
+        .unwrap();
 
     res
 }

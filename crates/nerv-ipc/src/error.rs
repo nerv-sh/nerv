@@ -75,8 +75,22 @@ mod tests {
 
     #[test]
     fn is_disconnect() {
-        assert!(!RecvError::Decode(nerv_proto::FigMessageDecodeError::NameNotValid("test".to_string())).is_disconnect());
-        assert!(RecvError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "error")).is_disconnect());
-        assert!(!RecvError::Io(std::io::Error::new(std::io::ErrorKind::WouldBlock, "error")).is_disconnect());
+        assert!(
+            !RecvError::Decode(nerv_proto::FigMessageDecodeError::NameNotValid(
+                "test".to_string()
+            ))
+            .is_disconnect()
+        );
+        assert!(
+            RecvError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "error"
+            ))
+            .is_disconnect()
+        );
+        assert!(
+            !RecvError::Io(std::io::Error::new(std::io::ErrorKind::WouldBlock, "error"))
+                .is_disconnect()
+        );
     }
 }

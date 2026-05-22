@@ -11,16 +11,10 @@ pub mod consts;
 pub mod launchd_plist;
 
 use std::cmp::Ordering;
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::{Path, PathBuf};
 
 pub use consts::*;
-pub use open::{
-    open_url,
-    open_url_async,
-};
+pub use open::{open_url, open_url_async};
 pub use process_info::get_parent_process_exe;
 use rand::Rng;
 pub use shell::Shell;
@@ -126,7 +120,8 @@ fn app_bundle_path_opt() -> Option<PathBuf> {
 
 #[must_use]
 pub fn app_bundle_path() -> PathBuf {
-    app_bundle_path_opt().unwrap_or_else(|| Path::new(consts::system_paths::APPLICATIONS_DIR).join(APP_BUNDLE_NAME))
+    app_bundle_path_opt()
+        .unwrap_or_else(|| Path::new(consts::system_paths::APPLICATIONS_DIR).join(APP_BUNDLE_NAME))
 }
 
 pub fn partitioned_compare(lhs: &str, rhs: &str, by: char) -> Ordering {
@@ -162,7 +157,10 @@ mod tests {
     #[test]
     fn test_partitioned_compare() {
         assert_eq!(partitioned_compare("1.2.3", "1.2.3", '.'), Ordering::Equal);
-        assert_eq!(partitioned_compare("1.2.3", "1.2.2", '.'), Ordering::Greater);
+        assert_eq!(
+            partitioned_compare("1.2.3", "1.2.2", '.'),
+            Ordering::Greater
+        );
         assert_eq!(partitioned_compare("4-a-b", "4-a-c", '-'), Ordering::Less);
         assert_eq!(partitioned_compare("0?0?0", "0?0", '?'), Ordering::Greater);
     }

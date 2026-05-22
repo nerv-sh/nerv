@@ -3,33 +3,16 @@ use std::fmt::Display;
 use std::path::PathBuf;
 
 use camino::Utf8PathBuf;
-use nerv_os::{
-    Context,
-    EnvProvider,
-    FsProvider,
-    Os,
-    PlatformProvider,
-    Shim,
-};
+use nerv_os::{Context, EnvProvider, FsProvider, Os, PlatformProvider, Shim};
 use thiserror::Error;
 use time::OffsetDateTime;
 
 #[cfg(unix)]
 use crate::RUNTIME_DIR_NAME;
-use crate::env_var::{
-    Q_BUNDLE_METADATA_PATH,
-    Q_PARENT,
-};
+use crate::env_var::{Q_BUNDLE_METADATA_PATH, Q_PARENT};
 use crate::linux::PACKAGE_NAME;
-use crate::system_info::{
-    in_cloudshell,
-    is_remote,
-};
-use crate::{
-    BACKUP_DIR_NAME,
-    DATA_DIR_NAME,
-    TAURI_PRODUCT_NAME,
-};
+use crate::system_info::{in_cloudshell, is_remote};
+use crate::{BACKUP_DIR_NAME, DATA_DIR_NAME, TAURI_PRODUCT_NAME};
 
 macro_rules! utf8_dir {
     ($name:ident, $($arg:ident: $type:ty),*) => {
@@ -158,7 +141,9 @@ pub fn fig_data_dir_ctx(fs: &impl FsProvider) -> Result<PathBuf> {
 /// - Linux: `$XDG_DATA_HOME` or `$HOME/.local/share`
 /// - MacOS: `$HOME/Library/Application Support`
 /// - Windows: `%LOCALAPPDATA%`
-pub fn local_data_dir<Ctx: FsProvider + EnvProvider + PlatformProvider>(ctx: &Ctx) -> Result<PathBuf> {
+pub fn local_data_dir<Ctx: FsProvider + EnvProvider + PlatformProvider>(
+    ctx: &Ctx,
+) -> Result<PathBuf> {
     let env = ctx.env();
     match ctx.platform().os() {
         Os::Linux => {
@@ -166,14 +151,14 @@ pub fn local_data_dir<Ctx: FsProvider + EnvProvider + PlatformProvider>(ctx: &Ct
                 return Ok(path.into());
             }
             Ok(home_dir_ctx(ctx)?.join(".local/share"))
-        },
+        }
         Os::Mac => Ok(home_dir_ctx(ctx)?.join("Library/Application Support")),
         Os::Windows => {
             if let Some(path) = env.get_os("LOCALAPPDATA") {
                 return Ok(path.into());
             }
             Ok(home_dir_ctx(ctx)?.join("AppData").join("Local"))
-        },
+        }
         os => Err(DirectoryError::UnsupportedOs(os)),
     }
 }
@@ -194,9 +179,21 @@ pub fn cache_dir() -> Result<PathBuf> {
 /// See: <https://man7.org/linux/man-pages/man3/confstr.3.html>
 #[cfg(target_os = "macos")]
 fn macos_tempdir() -> Result<PathBuf> {
-    let len = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, std::ptr::null::<i8>().cast_mut(), 0) };
+    let len = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            std::ptr::null::<i8>().cast_mut(),
+            0,
+        )
+    };
     let mut buf: Vec<u8> = vec![0; len];
-    unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+    unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
     let c_string = std::ffi::CString::from_vec_with_nul(buf)?;
     let str = c_string.into_string()?;
     Ok(PathBuf::from(str))
@@ -332,7 +329,10 @@ pub fn chat_global_context_path<Ctx: FsProvider + EnvProvider>(ctx: &Ctx) -> Res
 
 /// The directory to the directory containing config for the `/context` feature in `q chat`.
 pub fn chat_profiles_dir<Ctx: FsProvider + EnvProvider>(ctx: &Ctx) -> Result<PathBuf> {
-    Ok(home_dir_ctx(ctx)?.join(".aws").join("amazonq").join("profiles"))
+    Ok(home_dir_ctx(ctx)?
+        .join(".aws")
+        .join("amazonq")
+        .join("profiles"))
 }
 
 /// The desktop app socket path
@@ -403,7 +403,9 @@ pub fn resources_path() -> Result<PathBuf> {
 pub fn resources_path_ctx<Ctx: EnvProvider + PlatformProvider>(ctx: &Ctx) -> Result<PathBuf> {
     let os = ctx.platform().os();
     match os {
-        nerv_os::Os::Mac => Ok(crate::app_bundle_path().join(crate::macos::BUNDLE_CONTENTS_RESOURCE_PATH)),
+        nerv_os::Os::Mac => {
+            Ok(crate::app_bundle_path().join(crate::macos::BUNDLE_CONTENTS_RESOURCE_PATH))
+        }
         nerv_os::Os::Linux => {
             if ctx.env().in_appimage() {
                 Ok(ctx
@@ -413,7 +415,7 @@ pub fn resources_path_ctx<Ctx: EnvProvider + PlatformProvider>(ctx: &Ctx) -> Res
             } else {
                 Ok(format!("/usr/share/{}", PACKAGE_NAME).into())
             }
-        },
+        }
         nerv_os::Os::Windows => Ok(fig_data_dir()?.join("resources")),
         _ => Err(DirectoryError::UnsupportedOs(os)),
     }
@@ -443,7 +445,9 @@ pub fn bundle_metadata_path<Ctx: EnvProvider + PlatformProvider>(ctx: &Ctx) -> R
     if let Some(path) = ctx.env().get_os(Q_BUNDLE_METADATA_PATH) {
         return Ok(path.into());
     }
-    Ok(resources_path_ctx(ctx)?.join("bundle-metadata").join("metadata.json"))
+    Ok(resources_path_ctx(ctx)?
+        .join("bundle-metadata")
+        .join("metadata.json"))
 }
 
 /// The path to the fig settings file
@@ -508,7 +512,10 @@ pub fn appimage_desktop_entry_path<Ctx: EnvProvider>(ctx: &Ctx) -> Result<PathBu
     if !ctx.env().in_appimage() {
         return Err(DirectoryError::NotAppImage);
     }
-    Ok(ctx.env().current_dir()?.join("share/applications/q-desktop.desktop"))
+    Ok(ctx
+        .env()
+        .current_dir()?
+        .join("share/applications/q-desktop.desktop"))
 }
 
 /// The path to the icon bundled with the AppImage to be used for the desktop entry file.
@@ -525,7 +532,9 @@ pub fn appimage_desktop_entry_icon_path<Ctx: EnvProvider>(ctx: &Ctx) -> Result<P
 }
 
 /// The path to the data directory auto-created by the Linux windowing application.
-pub fn local_webview_data_dir<Ctx: FsProvider + EnvProvider + PlatformProvider>(ctx: &Ctx) -> Result<PathBuf> {
+pub fn local_webview_data_dir<Ctx: FsProvider + EnvProvider + PlatformProvider>(
+    ctx: &Ctx,
+) -> Result<PathBuf> {
     let os = ctx.platform().os();
     if os != Os::Linux {
         return Err(DirectoryError::UnsupportedOs(os));
@@ -585,25 +594,45 @@ mod tests {
     fn test_socket_paths() {
         #[cfg(unix)]
         assert_eq!(
-            host_sockets_dir().unwrap().file_name().unwrap().to_str().unwrap(),
+            host_sockets_dir()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
             format!("cwrun")
         );
 
         #[cfg(windows)]
         assert_eq!(
-            host_sockets_dir().unwrap().file_name().unwrap().to_str().unwrap(),
+            host_sockets_dir()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
             format!("sockets")
         );
 
         #[cfg(unix)]
         assert_eq!(
-            figterm_socket_path("").unwrap().parent().unwrap().file_name().unwrap(),
+            figterm_socket_path("")
+                .unwrap()
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "t"
         );
 
         #[cfg(windows)]
         assert_eq!(
-            figterm_socket_path("").unwrap().parent().unwrap().file_name().unwrap(),
+            figterm_socket_path("")
+                .unwrap()
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap(),
             "t"
         );
     }
@@ -664,7 +693,9 @@ mod tests {
         }
 
         if let Ok(xdg_runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
-            let xdg_runtime_dir = xdg_runtime_dir.strip_suffix('/').unwrap_or(&xdg_runtime_dir);
+            let xdg_runtime_dir = xdg_runtime_dir
+                .strip_suffix('/')
+                .unwrap_or(&xdg_runtime_dir);
             path = path.replace(xdg_runtime_dir, "$XDG_RUNTIME_DIR");
         }
 

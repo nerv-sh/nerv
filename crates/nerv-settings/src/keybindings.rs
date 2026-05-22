@@ -1,15 +1,8 @@
 use std::fmt::Display;
 
-use serde::{
-    Deserialize,
-    Serialize,
-};
+use serde::{Deserialize, Serialize};
 
-use crate::{
-    Error,
-    JsonStore,
-    OldSettings,
-};
+use crate::{Error, JsonStore, OldSettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -43,7 +36,8 @@ pub struct KeyBindings(pub Vec<KeyBinding>);
 impl KeyBindings {
     pub fn load_hardcoded() -> Self {
         let hardcoded_descriptions: Vec<KeyBindingDescription> =
-            serde_json::from_str(include_str!("actions.json")).expect("Unable to load hardcoded actions");
+            serde_json::from_str(include_str!("actions.json"))
+                .expect("Unable to load hardcoded actions");
 
         let key_bindings = hardcoded_descriptions
             .into_iter()

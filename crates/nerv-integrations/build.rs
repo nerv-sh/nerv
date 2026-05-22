@@ -38,8 +38,15 @@ fn main() {
     let cli_binary_name_upper = cli_binary_name_underscore.to_uppercase();
     inline_shell_completion = inline_shell_completion
         .replace("{{CLI_BINARY_NAME}}", CLI_BINARY_NAME)
-        .replace("{{CLI_BINARY_NAME_UNDERSCORE}}", &cli_binary_name_underscore)
+        .replace(
+            "{{CLI_BINARY_NAME_UNDERSCORE}}",
+            &cli_binary_name_underscore,
+        )
         .replace("{{CLI_BINARY_NAME_UPPER}}", &cli_binary_name_upper);
 
-    std::fs::write(out_dir.join("inline_shell_completion.zsh"), inline_shell_completion).unwrap();
+    std::fs::write(
+        out_dir.join("inline_shell_completion.zsh"),
+        inline_shell_completion,
+    )
+    .unwrap();
 }

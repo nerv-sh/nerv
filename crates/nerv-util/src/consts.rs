@@ -42,15 +42,17 @@ pub const OLD_PTY_BINARY_NAMES: &[&str] = &["cwterm"];
 pub const GITHUB_REPO_NAME: &str = "aws/amazon-q-developer-cli";
 
 pub mod url {
-    pub const USER_MANUAL: &str = "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line.html";
+    pub const USER_MANUAL: &str =
+        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line.html";
     pub const AUTOCOMPLETE_WIKI: &str =
         "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-autocomplete.html";
-    pub const AUTOCOMPLETE_SSH_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-autocomplete-ssh.html";
-    pub const CHAT_WIKI: &str = "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-chat.html";
+    pub const AUTOCOMPLETE_SSH_WIKI: &str = "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-autocomplete-ssh.html";
+    pub const CHAT_WIKI: &str =
+        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-chat.html";
     pub const TRANSLATE_WIKI: &str =
         "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-conversation.html";
-    pub const TELEMETRY_WIKI: &str = "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/opt-out-IDE.html";
+    pub const TELEMETRY_WIKI: &str =
+        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/opt-out-IDE.html";
 }
 
 /// Build time env vars
@@ -67,11 +69,13 @@ pub mod build {
     /// The datetime in rfc3339 format of the current build
     pub const DATETIME: Option<&str> = option_env!("AMAZON_Q_BUILD_DATETIME");
 
-    /// If `fish` tests should be skipped
-    pub const SKIP_FISH_TESTS: bool = option_env!("AMAZON_Q_BUILD_SKIP_FISH_TESTS").is_some();
+    /// If `fish` tests should be skipped — always true under v0.6 since
+    /// fish is a v2.0 target (PLAN.md §4 비목표 / v1 이후).
+    pub const SKIP_FISH_TESTS: bool = true;
 
     /// If `shellcheck` tests should be skipped
-    pub const SKIP_SHELLCHECK_TESTS: bool = option_env!("AMAZON_Q_BUILD_SKIP_SHELLCHECK_TESTS").is_some();
+    pub const SKIP_SHELLCHECK_TESTS: bool =
+        option_env!("AMAZON_Q_BUILD_SKIP_SHELLCHECK_TESTS").is_some();
 }
 
 /// macOS specific constants
@@ -172,7 +176,10 @@ mod tests {
 
         if let Some(build_datetime) = build::DATETIME {
             println!("build_datetime: {build_datetime}");
-            println!("{}", OffsetDateTime::parse(build_datetime, &Rfc3339).unwrap());
+            println!(
+                "{}",
+                OffsetDateTime::parse(build_datetime, &Rfc3339).unwrap()
+            );
         }
     }
 }

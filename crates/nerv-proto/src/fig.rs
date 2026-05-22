@@ -4,10 +4,7 @@ mod internal {
     use std::fmt::Display;
 
     use crate::proto::fig::result::Result as FigResultEnum;
-    use crate::proto::fig::{
-        NotificationType,
-        Result as FigResult,
-    };
+    use crate::proto::fig::{NotificationType, Result as FigResult};
 
     impl serde::Serialize for NotificationType {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -24,7 +21,9 @@ mod internal {
                 NotificationType::NotifyOnKeybindingPressed => "keybinding_pressed",
                 NotificationType::NotifyOnFocusChanged => "focus_change",
                 NotificationType::NotifyOnHistoryUpdated => "history_update",
-                NotificationType::NotifyOnApplicationUpdateAvailable => "application_update_available",
+                NotificationType::NotifyOnApplicationUpdateAvailable => {
+                    "application_update_available"
+                }
                 NotificationType::NotifyOnLocalStateChanged => "local_state_change",
                 NotificationType::NotifyOnEvent => "event",
                 NotificationType::NotifyOnAccessibilityChange => "accessibility_change",

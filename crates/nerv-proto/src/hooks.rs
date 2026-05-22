@@ -141,7 +141,11 @@ pub fn new_file_changed_hook(
     }))
 }
 
-pub fn new_callback_hook(handler_id: impl Into<String>, filepath: impl Into<String>, exit_code: i64) -> Hook {
+pub fn new_callback_hook(
+    handler_id: impl Into<String>,
+    filepath: impl Into<String>,
+    exit_code: i64,
+) -> Hook {
     hook_enum_to_hook(hook::Hook::Callback(CallbackHook {
         handler_id: handler_id.into(),
         filepath: filepath.into(),
@@ -161,7 +165,13 @@ pub fn new_intercepted_key_hook(
     }))
 }
 
-pub fn new_caret_position_hook(x: f64, y: f64, width: f64, height: f64, origin: caret_position_hook::Origin) -> Hook {
+pub fn new_caret_position_hook(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    origin: caret_position_hook::Origin,
+) -> Hook {
     hook_enum_to_hook(hook::Hook::CaretPosition(CaretPositionHook {
         x,
         y,
@@ -172,7 +182,9 @@ pub fn new_caret_position_hook(x: f64, y: f64, width: f64, height: f64, origin: 
 }
 
 pub fn new_clear_autocomplete_cache(clis: Vec<String>) -> Hook {
-    hook_enum_to_hook(hook::Hook::ClearAutocompleteCache(ClearAutocompleteCacheHook { clis }))
+    hook_enum_to_hook(hook::Hook::ClearAutocompleteCache(
+        ClearAutocompleteCacheHook { clis },
+    ))
 }
 
 #[cfg(test)]
@@ -192,10 +204,14 @@ mod tests {
         let _ = new_integration_ready_hook("identifier");
         let _ = new_hide_hook();
         let _ = new_event_hook("event_name", Some("payload".into()), vec!["app".into()]);
-        let _ = new_file_changed_hook(file_changed_hook::FileChanged::Settings, Some("filepath".into()));
+        let _ = new_file_changed_hook(
+            file_changed_hook::FileChanged::Settings,
+            Some("filepath".into()),
+        );
         let _ = new_callback_hook("handler_id", "filepath", 0);
         let _ = new_intercepted_key_hook(context, "action", "key");
-        let _ = new_caret_position_hook(0.0, 0.0, 0.0, 0.0, caret_position_hook::Origin::BottomLeft);
+        let _ =
+            new_caret_position_hook(0.0, 0.0, 0.0, 0.0, caret_position_hook::Origin::BottomLeft);
         let _ = new_clear_autocomplete_cache(vec!["cli".into()]);
     }
 }

@@ -1,27 +1,12 @@
 //! Grid resize and reflow.
 
-use std::cmp::{
-    Ordering,
-    max,
-    min,
-};
+use std::cmp::{Ordering, max, min};
 use std::mem;
 
 use crate::grid::row::Row;
-use crate::grid::{
-    Dimensions,
-    Grid,
-    GridCell,
-};
-use crate::index::{
-    Boundary,
-    Column,
-    Line,
-};
-use crate::term::cell::{
-    ResetDiscriminant,
-    ShellFlags,
-};
+use crate::grid::{Dimensions, Grid, GridCell};
+use crate::index::{Boundary, Column, Line};
+use crate::term::cell::{ResetDiscriminant, ShellFlags};
 
 impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
     /// Resize the grid's width and/or height.
@@ -116,7 +101,10 @@ impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
         // Check if a row needs to be wrapped.
         let should_reflow = |row: &Row<T>| -> bool {
             let len = Column(row.len());
-            reflow && len.0 > 0 && len < columns && row[len - 1].flags().contains(ShellFlags::WRAPLINE)
+            reflow
+                && len.0 > 0
+                && len < columns
+                && row[len - 1].flags().contains(ShellFlags::WRAPLINE)
         };
 
         self.columns = columns;
@@ -139,7 +127,7 @@ impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
                 _ => {
                     reversed.push(row);
                     continue;
-                },
+                }
             };
 
             // Remove wrap flag before appending additional cells.
@@ -169,7 +157,9 @@ impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
                 let mut cells = row.front_split_off(len - 1);
 
                 let mut spacer = T::default();
-                spacer.flags_mut().insert(ShellFlags::LEADING_WIDE_CHAR_SPACER);
+                spacer
+                    .flags_mut()
+                    .insert(ShellFlags::LEADING_WIDE_CHAR_SPACER);
                 cells.push(spacer);
 
                 cells
@@ -299,13 +289,19 @@ impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
                             new_raw.push(row);
                             break;
                         }
-                    },
+                    }
                 };
 
                 // Insert spacer if a wide char would be wrapped into the last column.
-                if row.len() >= columns && row[Column(columns - 1)].flags().contains(ShellFlags::WIDE_CHAR) {
+                if row.len() >= columns
+                    && row[Column(columns - 1)]
+                        .flags()
+                        .contains(ShellFlags::WIDE_CHAR)
+                {
                     let mut spacer = T::default();
-                    spacer.flags_mut().insert(ShellFlags::LEADING_WIDE_CHAR_SPACER);
+                    spacer
+                        .flags_mut()
+                        .insert(ShellFlags::LEADING_WIDE_CHAR_SPACER);
 
                     let wide_char = mem::replace(&mut row[Column(columns - 1)], spacer);
                     wrapped.insert(0, wide_char);
@@ -313,9 +309,15 @@ impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
 
                 // Remove wide char spacer before shrinking.
                 let len = wrapped.len();
-                if len > 0 && wrapped[len - 1].flags().contains(ShellFlags::LEADING_WIDE_CHAR_SPACER) {
+                if len > 0
+                    && wrapped[len - 1]
+                        .flags()
+                        .contains(ShellFlags::LEADING_WIDE_CHAR_SPACER)
+                {
                     if len == 1 {
-                        row[Column(columns - 1)].flags_mut().insert(ShellFlags::WRAPLINE);
+                        row[Column(columns - 1)]
+                            .flags_mut()
+                            .insert(ShellFlags::WRAPLINE);
                         new_raw.push(row);
                         break;
                     } else {
@@ -348,7 +350,9 @@ impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
                 } else {
                     // Reflow cursor if a line below it is deleted.
                     let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
-                    if (i == cursor_buffer_line && self.cursor.point.column < columns) || i < cursor_buffer_line {
+                    if (i == cursor_buffer_line && self.cursor.point.column < columns)
+                        || i < cursor_buffer_line
+                    {
                         self.cursor.point.line = max(self.cursor.point.line - 1, Line(0));
                     }
 

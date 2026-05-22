@@ -22,8 +22,14 @@ mod tests {
 
     #[test]
     fn test_window_from_str() {
-        assert_eq!("autocomplete".parse::<Window>().unwrap(), Window::DevtoolsAutocomplete);
-        assert_eq!("dashboard".parse::<Window>().unwrap(), Window::DevtoolsDashboard);
+        assert_eq!(
+            "autocomplete".parse::<Window>().unwrap(),
+            Window::DevtoolsAutocomplete
+        );
+        assert_eq!(
+            "dashboard".parse::<Window>().unwrap(),
+            Window::DevtoolsDashboard
+        );
         assert!("unknown".parse::<Window>().is_err());
     }
 }

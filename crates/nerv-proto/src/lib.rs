@@ -14,21 +14,11 @@ use std::mem::size_of;
 use std::num::TryFromIntError;
 use std::sync::LazyLock;
 
-use bytes::{
-    Buf,
-    Bytes,
-    BytesMut,
-};
+use bytes::{Buf, Bytes, BytesMut};
 pub use prost;
-use prost::{
-    DecodeError,
-    Message,
-};
+use prost::{DecodeError, Message};
 use prost_reflect::DescriptorPool;
-pub use prost_reflect::{
-    DynamicMessage,
-    ReflectMessage,
-};
+pub use prost_reflect::{DynamicMessage, ReflectMessage};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -39,7 +29,10 @@ pub mod remote {
 // This is not used explicitly, but it must be here for the derive
 // impls on the protos for dynamic message
 static DESCRIPTOR_POOL: LazyLock<DescriptorPool> = LazyLock::new(|| {
-    DescriptorPool::decode(include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin")).as_ref()).unwrap()
+    DescriptorPool::decode(
+        include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin")).as_ref(),
+    )
+    .unwrap()
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +121,10 @@ impl FigMessage {
     }
 
     pub fn message_pack(message_pack: impl Serialize) -> Result<Bytes, FigMessageEncodeError> {
-        FigMessage::encode(FigMessageType::MessagePack, rmp_serde::to_vec(&message_pack)?.into())
+        FigMessage::encode(
+            FigMessageType::MessagePack,
+            rmp_serde::to_vec(&message_pack)?.into(),
+        )
     }
 
     pub fn encode_buf(&self, dst: &mut BytesMut) -> Result<(), FigMessageEncodeError> {
@@ -138,7 +134,9 @@ impl FigMessage {
         let message_len: u64 = body.len().try_into()?;
         let message_len_be = message_len.to_be_bytes();
 
-        dst.reserve(b"\x1b@".len() + message_type.header().len() + message_len_be.len() + body.len());
+        dst.reserve(
+            b"\x1b@".len() + message_type.header().len() + message_len_be.len() + body.len(),
+        );
         dst.extend_from_slice(b"\x1b@");
         dst.extend_from_slice(message_type.header());
         dst.extend_from_slice(&message_len_be);
@@ -153,7 +151,10 @@ impl FigMessage {
         Ok(inner.freeze())
     }
 
-    pub fn encode(message_type: FigMessageType, body: Bytes) -> Result<Bytes, FigMessageEncodeError> {
+    pub fn encode(
+        message_type: FigMessageType,
+        body: Bytes,
+    ) -> Result<Bytes, FigMessageEncodeError> {
         let msg = Self {
             inner: Bytes::from(body.to_vec()),
             message_type,
@@ -214,10 +215,13 @@ impl FigMessage {
 
         let message_len = 10 + size_of::<u64>() + len;
 
-        Ok((message_len, FigMessage {
-            inner: Bytes::from(inner),
-            message_type,
-        }))
+        Ok((
+            message_len,
+            FigMessage {
+                inner: Bytes::from(inner),
+                message_type,
+            },
+        ))
     }
 
     pub fn decode<T>(self) -> Result<T, FigMessageDecodeError>
@@ -290,7 +294,10 @@ mod tests {
     #[test]
     fn test_to_fig_pbuf() {
         let message = test_message();
-        assert_eq!(&message.encode_nerv_protobuf().unwrap()[..10], b"\x1b@fig-pbuf");
+        assert_eq!(
+            &message.encode_nerv_protobuf().unwrap()[..10],
+            b"\x1b@fig-pbuf"
+        );
     }
 
     #[test]

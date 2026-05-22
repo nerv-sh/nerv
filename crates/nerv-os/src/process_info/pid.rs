@@ -1,34 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Weak;
-use std::{
-    fmt,
-    str,
-};
+use std::{fmt, str};
 
 use cfg_if::cfg_if;
 
 // Platform-specific implementations
 #[cfg(target_os = "linux")]
-use super::linux::{
-    cmdline,
-    current,
-    exe,
-    parent,
-};
+use super::linux::{cmdline, current, exe, parent};
 #[cfg(target_os = "macos")]
-use super::macos::{
-    cmdline,
-    current,
-    exe,
-    parent,
-};
+use super::macos::{cmdline, current, exe, parent};
 #[cfg(windows)]
-use super::windows::{
-    cmdline,
-    current,
-    exe,
-    parent,
-};
+use super::windows::{cmdline, current, exe, parent};
 use crate::Context;
 
 #[derive(Default, Debug, Clone)]
@@ -182,7 +164,12 @@ mod tests {
         let process_pid = Pid::current(Arc::downgrade(&ctx));
         let parent_pid = process_pid.parent().unwrap();
         let parent_exe = parent_pid.exe().unwrap();
-        let parent_name = parent_exe.file_name().unwrap().to_str().unwrap().to_lowercase();
+        let parent_name = parent_exe
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_lowercase();
 
         // On Windows, the parent process might be cargo.exe, or it could be another process
         // like runner.exe or pwsh.exe depending on how the test is run

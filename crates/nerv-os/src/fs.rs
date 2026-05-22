@@ -3,14 +3,8 @@ use std::fs::Permissions;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
-use std::path::{
-    Path,
-    PathBuf,
-};
-use std::sync::{
-    Arc,
-    Mutex,
-};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use tempfile::TempDir;
 use tokio::fs;
@@ -23,10 +17,7 @@ pub struct Fs(inner::Inner);
 mod inner {
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::{
-        Arc,
-        Mutex,
-    };
+    use std::sync::{Arc, Mutex};
 
     use tempfile::TempDir;
 
@@ -120,7 +111,7 @@ impl Fs {
                     return Err(io::Error::new(io::ErrorKind::NotFound, "not found"));
                 };
                 Ok(data.clone())
-            },
+            }
         }
     }
 
@@ -140,7 +131,7 @@ impl Fs {
                     Ok(string) => Ok(string),
                     Err(err) => Err(io::Error::new(io::ErrorKind::InvalidData, err)),
                 }
-            },
+            }
         }
     }
 
@@ -160,7 +151,7 @@ impl Fs {
                     Ok(string) => Ok(string),
                     Err(err) => Err(io::Error::new(io::ErrorKind::InvalidData, err)),
                 }
-            },
+            }
         }
     }
 
@@ -168,7 +159,11 @@ impl Fs {
     /// contents of `contents` to it.
     ///
     /// This is a proxy to [`tokio::fs::write`].
-    pub async fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    pub async fn write(
+        &self,
+        path: impl AsRef<Path>,
+        contents: impl AsRef<[u8]>,
+    ) -> io::Result<()> {
         use inner::Inner;
         match &self.0 {
             Inner::Real => fs::write(path, contents).await,
@@ -179,7 +174,7 @@ impl Fs {
                 };
                 lock.insert(path.as_ref().to_owned(), contents.as_ref().to_owned());
                 Ok(())
-            },
+            }
         }
     }
 
@@ -221,7 +216,9 @@ impl Fs {
         use inner::Inner;
         match &self.0 {
             Inner::Real => fs::rename(from, to).await,
-            Inner::Chroot(root) => fs::rename(append(root.path(), from), append(root.path(), to)).await,
+            Inner::Chroot(root) => {
+                fs::rename(append(root.path(), from), append(root.path(), to)).await
+            }
             Inner::Fake(_) => panic!("unimplemented"),
         }
     }
@@ -235,7 +232,9 @@ impl Fs {
         use inner::Inner;
         match &self.0 {
             Inner::Real => fs::copy(from, to).await,
-            Inner::Chroot(root) => fs::copy(append(root.path(), from), append(root.path(), to)).await,
+            Inner::Chroot(root) => {
+                fs::copy(append(root.path(), from), append(root.path(), to)).await
+            }
             Inner::Fake(_) => panic!("unimplemented"),
         }
     }
@@ -296,11 +295,17 @@ impl Fs {
     ///
     /// This is a proxy to [`tokio::fs::symlink`].
     #[cfg(unix)]
-    pub async fn symlink(&self, original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    pub async fn symlink(
+        &self,
+        original: impl AsRef<Path>,
+        link: impl AsRef<Path>,
+    ) -> io::Result<()> {
         use inner::Inner;
         match &self.0 {
             Inner::Real => fs::symlink(original, link).await,
-            Inner::Chroot(root) => fs::symlink(append(root.path(), original), append(root.path(), link)).await,
+            Inner::Chroot(root) => {
+                fs::symlink(append(root.path(), original), append(root.path(), link)).await
+            }
             Inner::Fake(_) => panic!("unimplemented"),
         }
     }
@@ -316,7 +321,11 @@ impl Fs {
     /// This is a proxy to [`tokio::fs::symlink_file`] or [`tokio::fs::symlink_dir`] on Windows,
     /// and [`tokio::fs::symlink`] on Unix.
     #[cfg(windows)]
-    pub async fn symlink(&self, original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    pub async fn symlink(
+        &self,
+        original: impl AsRef<Path>,
+        link: impl AsRef<Path>,
+    ) -> io::Result<()> {
         use inner::Inner;
 
         let original_path = original.as_ref();
@@ -337,7 +346,7 @@ impl Fs {
                 } else {
                     fs::symlink_file(original_path, link).await
                 }
-            },
+            }
             Inner::Chroot(root) => {
                 let original_path = append(root.path(), original_path);
                 let link_path = append(root.path(), link);
@@ -346,7 +355,7 @@ impl Fs {
                 } else {
                     fs::symlink_file(original_path, link_path).await
                 }
-            },
+            }
             Inner::Fake(_) => panic!("unimplemented"),
         }
     }
@@ -357,11 +366,17 @@ impl Fs {
     ///
     /// This is a proxy to [`std::os::unix::fs::symlink`].
     #[cfg(unix)]
-    pub fn symlink_sync(&self, original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    pub fn symlink_sync(
+        &self,
+        original: impl AsRef<Path>,
+        link: impl AsRef<Path>,
+    ) -> io::Result<()> {
         use inner::Inner;
         match &self.0 {
             Inner::Real => std::os::unix::fs::symlink(original, link),
-            Inner::Chroot(root) => std::os::unix::fs::symlink(append(root.path(), original), append(root.path(), link)),
+            Inner::Chroot(root) => {
+                std::os::unix::fs::symlink(append(root.path(), original), append(root.path(), link))
+            }
             Inner::Fake(_) => panic!("unimplemented"),
         }
     }
@@ -378,7 +393,11 @@ impl Fs {
     /// [`std::os::windows::fs::symlink_dir`] on Windows, and [`std::os::unix::fs::symlink`] on
     /// Unix.
     #[cfg(windows)]
-    pub fn symlink_sync(&self, original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
+    pub fn symlink_sync(
+        &self,
+        original: impl AsRef<Path>,
+        link: impl AsRef<Path>,
+    ) -> io::Result<()> {
         use inner::Inner;
 
         let original_path = original.as_ref();
@@ -399,7 +418,7 @@ impl Fs {
                 } else {
                     std::os::windows::fs::symlink_file(original_path, link)
                 }
-            },
+            }
             Inner::Chroot(root) => {
                 let original_path = append(root.path(), original_path);
                 let link_path = append(root.path(), link);
@@ -408,7 +427,7 @@ impl Fs {
                 } else {
                     std::os::windows::fs::symlink_file(original_path, link_path)
                 }
-            },
+            }
             Inner::Fake(_) => panic!("unimplemented"),
         }
     }
@@ -440,7 +459,10 @@ impl Fs {
         use inner::Inner;
         match &self.0 {
             Inner::Real => fs::read_link(path).await,
-            Inner::Chroot(root) => Ok(append(root.path(), fs::read_link(append(root.path(), path)).await?)),
+            Inner::Chroot(root) => Ok(append(
+                root.path(),
+                fs::read_link(append(root.path(), path)).await?,
+            )),
             Inner::Fake(_) => panic!("unimplemented"),
         }
     }
@@ -473,7 +495,11 @@ impl Fs {
     /// Changes the permissions found on a file or a directory.
     ///
     /// This is a proxy to [`tokio::fs::set_permissions`]
-    pub async fn set_permissions(&self, path: impl AsRef<Path>, perm: Permissions) -> Result<(), io::Error> {
+    pub async fn set_permissions(
+        &self,
+        path: impl AsRef<Path>,
+        perm: Permissions,
+    ) -> Result<(), io::Error> {
         use inner::Inner;
         match &self.0 {
             Inner::Real => fs::set_permissions(path, perm).await,
@@ -528,7 +554,8 @@ fn append(a: impl AsRef<Path>, b: impl AsRef<Path>) -> PathBuf {
     while b.starts_with(b"/") {
         b = b.strip_prefix(b"/").unwrap();
     }
-    PathBuf::from(OsString::from_vec(a.to_vec())).join(PathBuf::from(OsString::from_vec(b.to_vec())))
+    PathBuf::from(OsString::from_vec(a.to_vec()))
+        .join(PathBuf::from(OsString::from_vec(b.to_vec())))
 }
 
 #[cfg(windows)]
@@ -619,7 +646,9 @@ mod tests {
         let fs = Fs::from_slice(&[("/test", "test")]);
 
         fs.create_dir(dir.join("create_dir")).await.unwrap_err();
-        fs.create_dir_all(dir.join("create/dir/all")).await.unwrap_err();
+        fs.create_dir_all(dir.join("create/dir/all"))
+            .await
+            .unwrap_err();
         fs.write(dir.join("write"), b"write").await.unwrap();
         assert_eq!(fs.read(dir.join("write")).await.unwrap(), b"write");
         assert_eq!(fs.read_to_string(dir.join("write")).await.unwrap(), "write");
@@ -631,10 +660,15 @@ mod tests {
         let fs = Fs::new();
 
         fs.create_dir(dir.path().join("create_dir")).await.unwrap();
-        fs.create_dir_all(dir.path().join("create/dir/all")).await.unwrap();
+        fs.create_dir_all(dir.path().join("create/dir/all"))
+            .await
+            .unwrap();
         fs.write(dir.path().join("write"), b"write").await.unwrap();
         assert_eq!(fs.read(dir.path().join("write")).await.unwrap(), b"write");
-        assert_eq!(fs.read_to_string(dir.path().join("write")).await.unwrap(), "write");
+        assert_eq!(
+            fs.read_to_string(dir.path().join("write")).await.unwrap(),
+            "write"
+        );
     }
 
     #[test]
@@ -647,9 +681,17 @@ mod tests {
         #[cfg(unix)]
         {
             assert_append!("/abc/test", "/test", "/abc/test/test");
-            assert_append!("/tmp/.dir", "/tmp/.dir/home/myuser", "/tmp/.dir/home/myuser");
+            assert_append!(
+                "/tmp/.dir",
+                "/tmp/.dir/home/myuser",
+                "/tmp/.dir/home/myuser"
+            );
             assert_append!("/tmp/.dir", "/tmp/hello", "/tmp/.dir/tmp/hello");
-            assert_append!("/tmp/.dir", "/tmp/.dir/tmp/.dir/home/user", "/tmp/.dir/home/user");
+            assert_append!(
+                "/tmp/.dir",
+                "/tmp/.dir/tmp/.dir/home/user",
+                "/tmp/.dir/home/user"
+            );
         }
 
         #[cfg(windows)]
@@ -668,7 +710,11 @@ mod tests {
             );
 
             // Similar prefix handling
-            assert_append!("C:\\tmp\\.dir", "C:\\tmp\\hello", "C:\\tmp\\.dir\\tmp\\hello");
+            assert_append!(
+                "C:\\tmp\\.dir",
+                "C:\\tmp\\hello",
+                "C:\\tmp\\.dir\\tmp\\hello"
+            );
 
             // Multiple prefixes handling
             assert_append!(
@@ -785,14 +831,20 @@ mod tests {
 
         fs.symlink("/fake", "/fake_symlink").await.unwrap();
         fs.symlink_sync("/fake", "/fake_symlink_sync").unwrap();
-        assert_eq!(fs.read_to_string("/fake_symlink").await.unwrap(), "contents");
+        assert_eq!(
+            fs.read_to_string("/fake_symlink").await.unwrap(),
+            "contents"
+        );
         assert_eq!(
             fs.read_to_string(fs.read_link("/fake_symlink").await.unwrap())
                 .await
                 .unwrap(),
             "contents"
         );
-        assert_eq!(fs.read_to_string("/fake_symlink_sync").await.unwrap(), "contents");
+        assert_eq!(
+            fs.read_to_string("/fake_symlink_sync").await.unwrap(),
+            "contents"
+        );
         assert_eq!(fs.read_to_string_sync("/fake_symlink").unwrap(), "contents");
 
         // Checking symlink exist
@@ -850,7 +902,10 @@ mod tests {
         match fs.symlink(&file_path, &file_link_path).await {
             Ok(_) => {
                 // If we have permission to create symlinks, run the full test
-                assert_eq!(fs.read_to_string(&file_link_path).await.unwrap(), "test content");
+                assert_eq!(
+                    fs.read_to_string(&file_link_path).await.unwrap(),
+                    "test content"
+                );
 
                 // Test symlink to directory
                 let dir_link_path = dir.path().join("dir_link");
@@ -860,7 +915,10 @@ mod tests {
                 // Test symlink_sync to file
                 let file_link_sync_path = dir.path().join("file_link_sync");
                 fs.symlink_sync(&file_path, &file_link_sync_path).unwrap();
-                assert_eq!(fs.read_to_string(&file_link_sync_path).await.unwrap(), "test content");
+                assert_eq!(
+                    fs.read_to_string(&file_link_sync_path).await.unwrap(),
+                    "test content"
+                );
 
                 // Test symlink_sync to directory
                 let dir_link_sync_path = dir.path().join("dir_link_sync");
@@ -872,16 +930,21 @@ mod tests {
                 fs.remove_file(&file_link_sync_path).await.unwrap();
                 fs.remove_dir_all(&dir_link_path).await.unwrap();
                 fs.remove_dir_all(&dir_link_sync_path).await.unwrap();
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(1314) => {
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    || e.raw_os_error() == Some(1314) =>
+            {
                 // Error code 1314 is "A required privilege is not held by the client"
                 // Skip the test if we don't have permission to create symlinks
-                println!("Skipping test_unified_symlink_windows: requires admin privileges on Windows");
-            },
+                println!(
+                    "Skipping test_unified_symlink_windows: requires admin privileges on Windows"
+                );
+            }
             Err(e) => {
                 // For other errors, fail the test
                 panic!("Unexpected error creating symlink: {}", e);
-            },
+            }
         }
     }
 }

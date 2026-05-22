@@ -1,21 +1,11 @@
 mod pid;
 
 use std::path::PathBuf;
-use std::sync::{
-    Arc,
-    Weak,
-};
+use std::sync::{Arc, Weak};
 
-pub use pid::{
-    FakePid,
-    Pid,
-    RawPid,
-};
+pub use pid::{FakePid, Pid, RawPid};
 
-use crate::{
-    Context,
-    Shim,
-};
+use crate::{Context, Shim};
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -132,7 +122,7 @@ pub fn get_parent_process_exe(ctx: &Arc<Context>) -> Option<PathBuf> {
         pid = *pid.parent()?;
         match pid.exe() {
             // We ignore toolbox-exec since we never want to know if that is the parent process
-            Some(pid) if pid.file_name().is_some_and(|s| s == "toolbox-exec") => {},
+            Some(pid) if pid.file_name().is_some_and(|s| s == "toolbox-exec") => {}
             other => return other,
         }
     }
@@ -177,7 +167,10 @@ mod tests {
         let parent = current.parent().unwrap();
         assert_eq!(parent.exe().unwrap(), PathBuf::from_str("bash").unwrap());
         let grandparent = parent.parent().unwrap();
-        assert_eq!(grandparent.exe().unwrap(), PathBuf::from_str("wezterm").unwrap());
+        assert_eq!(
+            grandparent.exe().unwrap(),
+            PathBuf::from_str("wezterm").unwrap()
+        );
         assert!(grandparent.parent().is_none());
     }
 
@@ -195,7 +188,10 @@ mod tests {
         assert_eq!(parent.exe().unwrap(), PathBuf::from_str("bash").unwrap());
         assert_eq!(parent.cmdline(), None);
         let grandparent = parent.parent().unwrap();
-        assert_eq!(grandparent.exe().unwrap(), PathBuf::from_str("python").unwrap());
+        assert_eq!(
+            grandparent.exe().unwrap(),
+            PathBuf::from_str("python").unwrap()
+        );
         assert_eq!(grandparent.cmdline().unwrap(), "terminator");
         assert!(grandparent.parent().is_none());
     }
