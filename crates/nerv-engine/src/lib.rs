@@ -22,11 +22,15 @@ pub mod paths;
 pub mod ranker;
 pub mod shell_parser;
 pub mod spec;
+pub mod spec_loader;
 pub mod spec_parser;
 
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
 pub use parser::{Position, Token};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};
+pub use spec_loader::{
+    SpecLoadError, load_spec_file, parse_spec_str, write_spec_file, write_spec_str,
+};
 pub use spec_parser::{
     Annotation, Arg, CursorContext, Generator, Opt, ParserResult, Spec, Subcommand, TemplateKind,
     TokenKind, parse_arguments,
