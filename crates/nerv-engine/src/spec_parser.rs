@@ -273,7 +273,114 @@ pub(crate) fn is_mandatory_or_variadic(arg: &Arg) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunks 3-5 wire the real implementation)
+// Internal state machine (chunk 3) — drives token-by-token matching.
+//
+// `ParserState` is the snapshot the matcher mutates as it walks the
+// token stream. `ArgState` is the per-position arg cursor (which arg
+// of the current option / subcommand is "expected next"). Both are
+// crate-private; the public surface is [`ParserResult`].
+// ---------------------------------------------------------------------------
+
+/// Cursor inside a fixed-length arg list. Tracks which arg slot is
+/// expected next; clamped to the variadic slot once `args.len()`
+/// runs out and the last arg is variadic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct ArgState {
+    /// Index of the next arg to consume. `args.len()` once exhausted
+    /// for non-variadic specs; pinned to `args.len()-1` for variadic.
+    pub idx: usize,
+    /// Total arg count of the originating spec — owned so we can
+    /// classify "is the cursor past the end" without re-borrowing
+    /// the spec subtree.
+    pub total: usize,
+    /// `true` when the originating spec's last arg is variadic
+    /// (so `idx` saturates instead of advancing past `total`).
+    pub last_is_variadic: bool,
+}
+
+/// Snapshot of "where the matcher is" between two tokens. The state
+/// machine in chunk 5 consumes one token per step and mutates a clone.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
+pub(crate) struct ParserState {
+    /// Chain of subcommand names walked so far, root included.
+    pub subcommand_path: Vec<String>,
+    /// Options already consumed at the current subcommand level —
+    /// used by [`can_consume_option`] / [`count_equal_options`].
+    pub consumed_options: Vec<Opt>,
+    /// Positional-arg cursor for the current subcommand. `None`
+    /// when the current subcommand has no args (or all consumed
+    /// and not variadic).
+    pub subcommand_args: Option<ArgState>,
+    /// When inside an option's arg list, cursor into that option's
+    /// `args`. `None` between options.
+    pub option_args: Option<ArgState>,
+    /// `true` once `--` has been parsed — disables further option
+    /// matching, all subsequent tokens are subcommand_args.
+    pub past_double_dash: bool,
+}
+
+#[allow(dead_code)]
+impl ArgState {
+    /// Build an `ArgState` for `args` if it has at least one entry.
+    pub(crate) fn new(args: &[Arg]) -> Option<Self> {
+        if args.is_empty() {
+            return None;
+        }
+        Some(Self {
+            idx: 0,
+            total: args.len(),
+            last_is_variadic: args.last().is_some_and(|a| a.is_variadic),
+        })
+    }
+
+    /// `true` if more args remain to consume.
+    pub(crate) fn has_more(&self) -> bool {
+        self.idx < self.total || self.last_is_variadic
+    }
+
+    /// Advance the cursor by one. Saturates at `total - 1` for variadic
+    /// specs so the variadic slot keeps accepting tokens.
+    pub(crate) fn advance(&mut self) {
+        if self.last_is_variadic && self.idx + 1 >= self.total {
+            self.idx = self.total - 1;
+        } else {
+            self.idx += 1;
+        }
+    }
+
+    /// Currently-expected arg index, clamped to `total - 1`.
+    /// Returns `None` when the cursor is past the end (non-variadic).
+    pub(crate) fn current(&self) -> Option<usize> {
+        if self.idx < self.total {
+            Some(self.idx)
+        } else if self.last_is_variadic {
+            Some(self.total - 1)
+        } else {
+            None
+        }
+    }
+}
+
+/// Build the initial parser state for a root spec.
+///
+/// `subcommand_path` carries the root spec's `name`; the args cursor
+/// is initialized to the root's positional args (if any). No options
+/// have been seen.
+#[allow(dead_code)]
+pub(crate) fn get_initial_state(root: &Spec) -> ParserState {
+    ParserState {
+        subcommand_path: vec![root.name.clone()],
+        consumed_options: Vec::new(),
+        subcommand_args: ArgState::new(&root.args),
+        option_args: None,
+        past_double_dash: false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point (chunks 4-5 wire the real implementation)
 // ---------------------------------------------------------------------------
 
 /// Match the shell-parser tokens for the command at the cursor against
@@ -501,6 +608,97 @@ mod tests {
     fn can_consume_option_allows_unseen() {
         let v = opt(&["-v"]);
         assert!(can_consume_option(&v, &[]));
+    }
+
+    // ---- chunk 3: state machine types --------------------------------
+
+    fn req_arg() -> Arg {
+        Arg {
+            name: Some("a".into()),
+            ..Default::default()
+        }
+    }
+
+    fn variadic_arg() -> Arg {
+        Arg {
+            name: Some("rest".into()),
+            is_variadic: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn arg_state_new_empty_returns_none() {
+        assert!(ArgState::new(&[]).is_none());
+    }
+
+    #[test]
+    fn arg_state_new_tracks_total_and_variadic_flag() {
+        let s = ArgState::new(&[req_arg(), variadic_arg()]).unwrap();
+        assert_eq!(s.idx, 0);
+        assert_eq!(s.total, 2);
+        assert!(s.last_is_variadic);
+
+        let s2 = ArgState::new(&[req_arg(), req_arg()]).unwrap();
+        assert!(!s2.last_is_variadic);
+    }
+
+    #[test]
+    fn arg_state_advance_walks_then_stops_non_variadic() {
+        let mut s = ArgState::new(&[req_arg(), req_arg()]).unwrap();
+        assert_eq!(s.current(), Some(0));
+        s.advance();
+        assert_eq!(s.current(), Some(1));
+        assert!(s.has_more());
+        s.advance();
+        assert_eq!(s.current(), None);
+        assert!(!s.has_more());
+    }
+
+    #[test]
+    fn arg_state_advance_saturates_variadic() {
+        let mut s = ArgState::new(&[req_arg(), variadic_arg()]).unwrap();
+        s.advance(); // idx 0 → 1
+        s.advance(); // saturates at 1
+        s.advance(); // still saturated
+        assert_eq!(s.idx, 1);
+        assert_eq!(s.current(), Some(1));
+        assert!(s.has_more());
+    }
+
+    #[test]
+    fn arg_state_single_variadic_stays_at_zero() {
+        let mut s = ArgState::new(&[variadic_arg()]).unwrap();
+        assert_eq!(s.current(), Some(0));
+        s.advance();
+        s.advance();
+        assert_eq!(s.idx, 0);
+        assert_eq!(s.current(), Some(0));
+    }
+
+    #[test]
+    fn get_initial_state_records_root_name_and_args() {
+        let g = git_spec();
+        let st = get_initial_state(&g);
+        assert_eq!(st.subcommand_path, vec!["git".to_string()]);
+        assert!(st.subcommand_args.is_none());
+        assert!(st.option_args.is_none());
+        assert!(!st.past_double_dash);
+        assert!(st.consumed_options.is_empty());
+    }
+
+    #[test]
+    fn get_initial_state_with_root_args_populates_arg_state() {
+        let spec = Subcommand {
+            name: "ls".into(),
+            args: vec![req_arg(), req_arg(), variadic_arg()],
+            ..Default::default()
+        };
+        let st = get_initial_state(&spec);
+        let args = st.subcommand_args.unwrap();
+        assert_eq!(args.total, 3);
+        assert_eq!(args.idx, 0);
+        assert!(args.last_is_variadic);
     }
 
     #[test]
