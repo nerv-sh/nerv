@@ -1,28 +1,34 @@
 #![allow(clippy::ref_option_ref)]
 use std::collections::BTreeMap;
 
-use nerv_os::{
-    Context,
-    Os,
-    PlatformProvider,
-};
-use fig_telemetry::InstallMethod;
+use nerv_os::{Context, Os, PlatformProvider};
+// PLAN.md v0.6 §0.2 strips fig_telemetry. Replace upstream's
+// InstallMethod enum with a minimal local stub — diagnostics still
+// report a value, but we no longer infer install path from telemetry.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstallMethod {
+    Unknown,
+}
+
+impl std::fmt::Display for InstallMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unknown => f.write_str("unknown"),
+        }
+    }
+}
+
+fn get_install_method() -> InstallMethod {
+    InstallMethod::Unknown
+}
+
 use nerv_util::consts::build::HASH;
 use nerv_util::manifest::manifest;
-use nerv_util::system_info::{
-    OSVersion,
-    os_version,
-};
-use nerv_util::{
-    Shell,
-    Terminal,
-};
+use nerv_util::system_info::{OSVersion, os_version};
+use nerv_util::{Shell, Terminal};
 use serde::Serialize;
-use sysinfo::{
-    CpuRefreshKind,
-    MemoryRefreshKind,
-    RefreshKind,
-};
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
@@ -112,7 +118,10 @@ impl SystemInfo {
             os: os_version(),
             chip: None,
             total_cores: system.physical_core_count(),
-            memory: Some(format!("{:0.2} GB", system.total_memory() as f32 / 2.0_f32.powi(30))),
+            memory: Some(format!(
+                "{:0.2} GB",
+                system.total_memory() as f32 / 2.0_f32.powi(30)
+            )),
         };
 
         if let Some(processor) = system.cpus().first() {
@@ -193,10 +202,7 @@ pub struct CurrentEnvironment {
 
 impl CurrentEnvironment {
     async fn new() -> CurrentEnvironment {
-        use nerv_util::process_info::{
-            Pid,
-            PidExt,
-        };
+        use nerv_util::process_info::{Pid, PidExt};
         let ctx = Context::new();
 
         let username = format!("/{}", whoami::username());
@@ -221,7 +227,7 @@ impl CurrentEnvironment {
 
         let os = ctx.platform().os();
         let terminal = Terminal::parent_terminal(&ctx);
-        let install_method = fig_telemetry::get_install_method();
+        let install_method = get_install_method();
 
         let in_cloudshell = nerv_util::system_info::in_cloudshell();
         let in_ssh = nerv_util::system_info::in_ssh();

@@ -13,10 +13,13 @@ impl InsertTextRequest {
                 "\x1b[D",
                 self.offset.unwrap_or(0).unsigned_abs() as usize,
             )),
-            _ => {},
+            _ => {}
         }
 
-        out.extend(std::iter::repeat_n('\x08', self.deletion.unwrap_or(0) as usize));
+        out.extend(std::iter::repeat_n(
+            '\x08',
+            self.deletion.unwrap_or(0) as usize,
+        ));
 
         if let Some(insertion) = &self.insertion {
             out.push_str(insertion);

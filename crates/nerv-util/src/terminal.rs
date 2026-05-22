@@ -3,10 +3,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use nerv_os::Context;
-use serde::{
-    Deserialize,
-    Serialize,
-};
+use serde::{Deserialize, Serialize};
 
 /// Terminals that macOS supports
 pub const MACOS_TERMINALS: &[Terminal] = &[
@@ -68,7 +65,9 @@ pub fn current_terminal() -> Option<&'static Terminal> {
 
 pub fn current_terminal_version() -> Option<&'static str> {
     static CURRENT_TERMINAL_VERSION: OnceLock<Option<String>> = OnceLock::new();
-    CURRENT_TERMINAL_VERSION.get_or_init(Terminal::version).as_deref()
+    CURRENT_TERMINAL_VERSION
+        .get_or_init(Terminal::version)
+        .as_deref()
 }
 
 /// Checks if the current process is inside of one of the pseudoterminals listed under
@@ -323,7 +322,10 @@ impl Terminal {
             .map(str::to_string);
         if let Some(first_arg_name) = first_arg_name {
             for terminal in terminals {
-                if terminal.executable_names().contains(&first_arg_name.as_str()) {
+                if terminal
+                    .executable_names()
+                    .contains(&first_arg_name.as_str())
+                {
                     return Some(terminal.clone());
                 }
             }
@@ -334,7 +336,9 @@ impl Terminal {
 
     pub fn version() -> Option<String> {
         static RE: OnceLock<Option<regex::Regex>> = OnceLock::new();
-        let re = RE.get_or_init(|| regex::Regex::new("[0-9\\-\\._]+").ok()).as_ref()?;
+        let re = RE
+            .get_or_init(|| regex::Regex::new("[0-9\\-\\._]+").ok())
+            .as_ref()?;
         let version = std::env::var("TERM_PROGRAM_VERSION").ok()?;
         match re.captures(&version).is_some() {
             true => Some(version),
@@ -411,7 +415,9 @@ impl Terminal {
             Terminal::Ghostty => Some("com.mitchellh.ghostty".into()),
             Terminal::Positron => Some("co.posit.positron".into()),
             Terminal::Trae => Some("com.trae.app".into()),
-            Terminal::Custom(custom_terminal) => custom_terminal.macos.bundle_id.clone().map(Cow::Owned),
+            Terminal::Custom(custom_terminal) => {
+                custom_terminal.macos.bundle_id.clone().map(Cow::Owned)
+            }
             _ => None,
         }
     }
@@ -442,7 +448,7 @@ impl Terminal {
             // TODO: the following line does not account for Android Studio
             _ if bundle.starts_with("com.jetbrains.") | bundle.starts_with("com.google.") => {
                 Terminal::IntelliJ(IntelliJVariant::from_bundle_id(bundle))
-            },
+            }
             _ => return None,
         };
 
@@ -798,10 +804,7 @@ mod tests {
     use std::sync::Arc;
 
     use nerv_os::process_info::TestExe;
-    use nerv_os::{
-        Os,
-        ProcessInfo,
-    };
+    use nerv_os::{Os, ProcessInfo};
 
     use super::*;
 
@@ -829,27 +832,39 @@ mod tests {
             "Special terminals should return None"
         );
 
-        let ctx = make_context(Os::Linux, vec!["cargo", "cargo", "q", "bash", "tmux", "wezterm"]);
+        let ctx = make_context(
+            Os::Linux,
+            vec!["cargo", "cargo", "q", "bash", "tmux", "wezterm"],
+        );
         assert_eq!(
             Terminal::from_process_info(&ctx, &LINUX_TERMINALS.to_vec()),
             None,
             "Max search depth reached should return None"
         );
 
-        let ctx = make_context(Os::Linux, vec![
-            (Some("q"), None),
-            (Some("python3"), Some("/usr/bin/python3 /usr/bin/terminator")),
-        ]);
+        let ctx = make_context(
+            Os::Linux,
+            vec![
+                (Some("q"), None),
+                (
+                    Some("python3"),
+                    Some("/usr/bin/python3 /usr/bin/terminator"),
+                ),
+            ],
+        );
         assert_eq!(
             Terminal::from_process_info(&ctx, &LINUX_TERMINALS.to_vec()),
             Some(Terminal::Terminator),
             "should return terminator"
         );
 
-        let ctx = make_context(Os::Linux, vec![
-            (Some("q"), None),
-            (Some("python3"), Some("/usr/bin/python3 /usr/bin/guake")),
-        ]);
+        let ctx = make_context(
+            Os::Linux,
+            vec![
+                (Some("q"), None),
+                (Some("python3"), Some("/usr/bin/python3 /usr/bin/guake")),
+            ],
+        );
         assert_eq!(
             Terminal::from_process_info(&ctx, &LINUX_TERMINALS.to_vec()),
             Some(Terminal::Guake),

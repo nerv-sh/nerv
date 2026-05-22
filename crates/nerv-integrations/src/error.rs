@@ -1,12 +1,6 @@
 use std::borrow::Cow;
-use std::io::{
-    self,
-    ErrorKind,
-};
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 
 use nerv_util::CLI_BINARY_NAME;
 use owo_colors::OwoColorize as _;
@@ -35,12 +29,8 @@ pub enum Error {
     StripPrefix(#[from] std::path::StripPrefixError),
     #[error("{0}")]
     Custom(Cow<'static, str>),
-    #[cfg(target_os = "macos")]
-    #[error(transparent)]
-    InputMethod(#[from] crate::input_method::InputMethodError),
-    #[cfg(target_os = "macos")]
-    #[error("Application not installed: {0}")]
-    ApplicationNotInstalled(Cow<'static, str>),
+    // PLAN.md v0.6 §0.2: input_method + ApplicationNotInstalled stripped
+    // with the input_method module.
     #[error(transparent)]
     SerdeJSON(#[from] serde_json::Error),
     #[cfg(target_os = "macos")]
@@ -50,10 +40,8 @@ pub enum Error {
     PermissionDenied { path: PathBuf, inner: io::Error },
     #[error("nix: {}", .0)]
     Nix(#[from] nix::Error),
-    #[cfg(target_os = "linux")]
-    #[error(transparent)]
-    ExtensionsError(#[from] dbus::gnome_shell::ExtensionsError),
-
+    // PLAN.md v0.6 §0.2: dbus stripped; gnome_extension module also
+    // needs its ExtensionsError dependency removed (chunk 3c followup).
     #[error("{context}: {error}")]
     Context {
         #[source]
@@ -146,10 +134,12 @@ impl<T, E: Into<Error>> ErrorExt<T, E> for Result<T, E> {
         self.map_err(|err| {
             let error = err.into();
             match error {
-                Error::Io(err) if err.kind() == ErrorKind::PermissionDenied => Error::PermissionDenied {
-                    path: path.as_ref().to_path_buf(),
-                    inner: err,
-                },
+                Error::Io(err) if err.kind() == ErrorKind::PermissionDenied => {
+                    Error::PermissionDenied {
+                        path: path.as_ref().to_path_buf(),
+                        inner: err,
+                    }
+                }
                 _ => error,
             }
         })

@@ -1,25 +1,11 @@
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use dbus::gnome_shell::{
-    ExtensionInstallationStatus,
-    ShellExtensions,
-    get_extension_status,
-};
-use nerv_os::{
-    EnvProvider,
-    FsProvider,
-    SysInfoProvider,
-};
+use dbus::gnome_shell::{ExtensionInstallationStatus, ShellExtensions, get_extension_status};
+use nerv_os::{EnvProvider, FsProvider, SysInfoProvider};
 
 use crate::Integration;
-use crate::error::{
-    Error,
-    Result,
-};
+use crate::error::{Error, Result};
 
 #[derive(Debug, Clone)]
 pub struct GnomeExtensionIntegration<'a, Ctx, ExtensionsCtx> {
@@ -83,12 +69,16 @@ where
         }
 
         match &self.bundle_path {
-            Some(bundle_path) => self.shell_extensions.install_bundled_extension(bundle_path).await?,
+            Some(bundle_path) => {
+                self.shell_extensions
+                    .install_bundled_extension(bundle_path)
+                    .await?
+            }
             None => {
                 return Err(Error::Custom(
                     "Extension bundle path is required for installation.".into(),
                 ));
-            },
+            }
         };
 
         Ok(())

@@ -1,20 +1,10 @@
-use std::io::{
-    self,
-    IoSlice,
-};
+use std::io::{self, IoSlice};
 use std::pin::Pin;
-use std::task::{
-    Context,
-    Poll,
-};
+use std::task::{Context, Poll};
 
 use bytes::BytesMut;
 use pin_project_lite::pin_project;
-use tokio::io::{
-    AsyncRead,
-    AsyncWrite,
-    ReadBuf,
-};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pin_project! {
     /// A light wrapper around a `BufReader<UnixStream>`
@@ -48,7 +38,11 @@ impl<T> AsyncWrite for BufferedReader<T>
 where
     T: AsyncWrite,
 {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         self.project().inner.poll_write(cx, buf)
     }
 
@@ -77,7 +71,11 @@ impl<T> AsyncRead for BufferedReader<T>
 where
     T: AsyncRead,
 {
-    fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         self.project().inner.poll_read(cx, buf)
     }
 }

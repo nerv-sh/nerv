@@ -2,40 +2,15 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nerv_proto::local::{
-    self,
-    BundleMetadataCommand,
-    BundleMetadataResponse,
-    CommandResponse,
-    DebugModeCommand,
-    DevtoolsCommand,
-    DumpStateCommand,
-    DumpStateResponse,
-    InputMethodAction,
-    InputMethodCommand,
-    LogLevelCommand,
-    LogLevelResponse,
-    LoginCommand,
-    LogoutCommand,
-    OpenUiElementCommand,
-    PromptAccessibilityCommand,
-    QuitCommand,
-    RestartCommand,
-    RestartSettingsListenerCommand,
-    UiElement,
-    UpdateCommand,
-    command,
-    command_response,
-    devtools_command,
-    dump_state_command,
+    self, BundleMetadataCommand, BundleMetadataResponse, CommandResponse, DebugModeCommand,
+    DevtoolsCommand, DumpStateCommand, DumpStateResponse, InputMethodAction, InputMethodCommand,
+    LogLevelCommand, LogLevelResponse, LoginCommand, LogoutCommand, OpenUiElementCommand,
+    PromptAccessibilityCommand, QuitCommand, RestartCommand, RestartSettingsListenerCommand,
+    UiElement, UpdateCommand, command, command_response, devtools_command, dump_state_command,
 };
 use nerv_util::directories;
 
-use crate::{
-    BufferedUnixStream,
-    Error,
-    RecvError,
-    SendRecvMessage,
-};
+use crate::{BufferedUnixStream, Error, RecvError, SendRecvMessage};
 
 type Result<T, E = crate::Error> = std::result::Result<T, E>;
 
@@ -147,14 +122,20 @@ pub async fn logout_command() -> Result<()> {
 }
 
 pub async fn devtools_command(window: devtools_command::Window) -> Result<()> {
-    let command = command::Command::Devtools(DevtoolsCommand { window: window.into() });
+    let command = command::Command::Devtools(DevtoolsCommand {
+        window: window.into(),
+    });
     send_command_to_socket(command).await
 }
 
 #[async_trait]
 pub trait LocalIpc: SendRecvMessage {
     async fn send_hook(&mut self, hook: local::Hook) -> Result<()>;
-    async fn send_command(&mut self, command: local::command::Command, response: bool) -> Result<()>;
+    async fn send_command(
+        &mut self,
+        command: local::command::Command,
+        response: bool,
+    ) -> Result<()>;
     async fn send_recv_command(
         &mut self,
         command: local::command::Command,
@@ -176,7 +157,11 @@ where
     }
 
     /// Send a command to the desktop app
-    async fn send_command(&mut self, command: local::command::Command, response: bool) -> Result<()> {
+    async fn send_command(
+        &mut self,
+        command: local::command::Command,
+        response: bool,
+    ) -> Result<()> {
         let message = local::LocalMessage {
             r#type: Some(local::local_message::Type::Command(local::Command {
                 id: None,
@@ -214,7 +199,9 @@ pub async fn send_command_to_socket(command: local::command::Command) -> Result<
     conn.send_command(command, false).await
 }
 
-pub async fn send_recv_command_to_socket(command: local::command::Command) -> Result<Option<local::CommandResponse>> {
+pub async fn send_recv_command_to_socket(
+    command: local::command::Command,
+) -> Result<Option<local::CommandResponse>> {
     send_recv_command_to_socket_with_timeout(command, Duration::from_secs(2)).await
 }
 

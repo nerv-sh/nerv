@@ -1,16 +1,8 @@
 use crate::proto::local::{
-    EditBufferHook,
-    InterceptedKeyHook,
-    PostExecHook,
-    PreExecHook,
-    PromptHook,
-    ShellContext,
+    EditBufferHook, InterceptedKeyHook, PostExecHook, PreExecHook, PromptHook, ShellContext,
     TerminalCursorCoordinates,
 };
-use crate::proto::remote::{
-    Hostbound,
-    hostbound,
-};
+use crate::proto::remote::{Hostbound, hostbound};
 
 fn hook_enum_to_hook(request: hostbound::request::Request) -> hostbound::Request {
     hostbound::Request {
@@ -73,11 +65,13 @@ pub fn new_intercepted_key_hook(
     action: impl Into<String>,
     key: impl Into<String>,
 ) -> hostbound::Request {
-    hook_enum_to_hook(hostbound::request::Request::InterceptedKey(InterceptedKeyHook {
-        context: context.into(),
-        action: action.into(),
-        key: key.into(),
-    }))
+    hook_enum_to_hook(hostbound::request::Request::InterceptedKey(
+        InterceptedKeyHook {
+            context: context.into(),
+            action: action.into(),
+            key: key.into(),
+        },
+    ))
 }
 
 #[cfg(test)]

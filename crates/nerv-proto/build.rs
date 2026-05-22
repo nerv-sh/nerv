@@ -10,7 +10,10 @@ enum Version {
 
 /// Try to find the version of protoc installed on the system.
 fn protoc_version() -> Option<Version> {
-    let output = std::process::Command::new("protoc").arg("--version").output().ok()?;
+    let output = std::process::Command::new("protoc")
+        .arg("--version")
+        .output()
+        .ok()?;
     let version = String::from_utf8(output.stdout).ok()?;
     eprintln!("protoc version: {version:?}");
 
@@ -137,7 +140,10 @@ fn download_protoc_windows(protoc_version: &str, tmp_folder: &tempfile::TempDir)
         tmp_folder.path().join("protoc.zip").display()
     ));
     let checksum_output = checksum_command.output().unwrap();
-    let checksum_output = String::from_utf8(checksum_output.stdout).unwrap().trim().to_lowercase();
+    let checksum_output = String::from_utf8(checksum_output.stdout)
+        .unwrap()
+        .trim()
+        .to_lowercase();
 
     eprintln!("checksum: {checksum_output:?}");
     assert_eq!(
@@ -175,7 +181,9 @@ fn download_protoc_windows(protoc_version: &str, tmp_folder: &tempfile::TempDir)
 fn main() -> Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
 
-    let proto_files = std::fs::read_dir("../../proto")?
+    // Single source of truth: read protos directly from the vendored
+    // upstream subtree, no duplication at workspace root.
+    let proto_files = std::fs::read_dir("../../vendor/aws-autocomplete/proto")?
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "proto"))
@@ -190,7 +198,7 @@ fn main() -> Result<()> {
     // if the version of the system protoc is too old, we must panic
     match protoc_version() {
         Some(Version::V1([0..=2, _, _] | [3, 0..=11, _])) => download_protoc(),
-        Some(Version::V1(_) | Version::V2(_)) => {},
+        Some(Version::V1(_) | Version::V2(_)) => {}
         None => download_protoc(),
     };
 
@@ -207,9 +215,15 @@ fn main() -> Result<()> {
     config.extern_path(".fig_common.Empty", "()");
 
     prost_reflect_build::Builder::new()
-        .file_descriptor_set_path(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("file_descriptor_set.bin"))
+        .file_descriptor_set_path(
+            PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("file_descriptor_set.bin"),
+        )
         .descriptor_pool("crate::DESCRIPTOR_POOL")
-        .compile_protos_with_config(config, &proto_files, &["../../proto"])?;
+        .compile_protos_with_config(
+            config,
+            &proto_files,
+            &["../../vendor/aws-autocomplete/proto"],
+        )?;
 
     Ok(())
 }

@@ -1,13 +1,10 @@
 use std::fs::File;
-use std::io::{
-    BufWriter,
-    Write,
-};
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use nerv_util::directories;
 use inner::Inner;
+use nerv_util::directories;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 pub use rusqlite;
@@ -17,12 +14,10 @@ use serde_json::Value;
 use tracing::trace;
 
 use crate::Result;
-use crate::sqlite::{
-    Db,
-    database,
-};
+use crate::sqlite::{Db, database};
 
-const ALL_COLUMNS: &str = "id, command, shell, pid, session_id, cwd, start_time, duration, hostname, exit_code";
+const ALL_COLUMNS: &str =
+    "id, command, shell, pid, session_id, cwd, start_time, duration, hostname, exit_code";
 
 fn escape_string(s: impl AsRef<str>) -> String {
     s.as_ref()
@@ -155,7 +150,11 @@ impl History {
                     let cwd = command_info.cwd.as_deref().unwrap_or("");
                     let time = command_info
                         .start_time
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()))
+                        .and_then(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH)
+                                .ok()
+                                .map(|d| d.as_secs())
+                        })
                         .unwrap_or(0);
                     let entry = format!(
                         "\n- command: {}\n  exit_code: {}\n  shell: {}\n  session_id: {}\n  cwd: {}\n  time: {}",
@@ -169,8 +168,8 @@ impl History {
 
                     legacy_history_buff.write_all(entry.as_bytes())?;
                     legacy_history_buff.flush()?;
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
 
@@ -179,11 +178,15 @@ impl History {
 
     pub fn all_rows(&self) -> Result<Vec<CommandInfo>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(&format!("SELECT {ALL_COLUMNS} FROM history ORDER BY start_time ASC"))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ALL_COLUMNS} FROM history ORDER BY start_time ASC"
+        ))?;
 
         let rows = stmt.query([])?;
 
-        let rows_mapped = rows.mapped(map_row).collect::<rusqlite::Result<Vec<CommandInfo>>>()?;
+        let rows_mapped = rows
+            .mapped(map_row)
+            .collect::<rusqlite::Result<Vec<CommandInfo>>>()?;
 
         Ok(rows_mapped)
     }
@@ -222,7 +225,9 @@ impl History {
 
         let rows = stmt.query(params![limit, offset])?;
 
-        let rows_mapped = rows.mapped(map_row).collect::<rusqlite::Result<Vec<CommandInfo>>>()?;
+        let rows_mapped = rows
+            .mapped(map_row)
+            .collect::<rusqlite::Result<Vec<CommandInfo>>>()?;
 
         Ok(rows_mapped)
     }
@@ -252,16 +257,17 @@ impl History {
             Ok(map)
         })?;
 
-        let rows = rows.collect::<rusqlite::Result<Vec<serde_json::Map<String, serde_json::Value>>>>()?;
+        let rows =
+            rows.collect::<rusqlite::Result<Vec<serde_json::Map<String, serde_json::Value>>>>()?;
 
         Ok(rows)
     }
 }
 
 fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommandInfo> {
-    let start_time = row
-        .get::<_, Option<i64>>(6)?
-        .and_then(|t| std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(u64::try_from(t).ok()?)));
+    let start_time = row.get::<_, Option<i64>>(6)?.and_then(|t| {
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(u64::try_from(t).ok()?))
+    });
 
     let duration = row
         .get::<_, Option<i64>>(7)?
@@ -517,7 +523,12 @@ mod tests {
         assert_eq!(rows[2].exit_code, None);
 
         let row = history
-            .rows(None, vec![OrderBy::new(HistoryColumn::Id, Order::Desc)], 1, 0)
+            .rows(
+                None,
+                vec![OrderBy::new(HistoryColumn::Id, Order::Desc)],
+                1,
+                0,
+            )
             .unwrap();
         assert_eq!(row.len(), 1);
         assert_eq!(row[0].command, Some("cargo run".into()));
@@ -534,7 +545,9 @@ mod tests {
         assert_eq!(row.len(), 2);
 
         // while we're here, test the `query` method
-        let row = history.query("SELECT * FROM history ORDER BY id ASC", ()).unwrap();
+        let row = history
+            .query("SELECT * FROM history ORDER BY id ASC", ())
+            .unwrap();
 
         assert_eq!(row.len(), 3);
 

@@ -6,7 +6,10 @@ members = [
     "crates/nerv-engine",
     "crates/nerv-shell",
     # Imported from aws/amazon-q-developer-cli-autocomplete (M0-2):
-    "crates/nerv-pty",
+    # nerv-pty deferred to M1 (PRD §5.8 figterm opt-in). Body still
+    # has fig_telemetry/fig_auth/fig_install/fig_request/fig_telemetry_core
+    # call-site strip work. Members re-add when chunk 3d completes.
+    # "crates/nerv-pty",
     "crates/nerv-term",
     "crates/nerv-ipc",
     "crates/nerv-proto",

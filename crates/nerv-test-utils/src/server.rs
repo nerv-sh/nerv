@@ -8,15 +8,9 @@ pub use http::Method;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::service::Service;
-use hyper::{
-    Request,
-    Response,
-};
+use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use tokio::net::{
-    TcpListener,
-    TcpStream,
-};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
 
@@ -62,7 +56,12 @@ impl TestServer {
         }
     }
 
-    pub fn with_mock_response(mut self, method: http::Method, path: String, response: String) -> Self {
+    pub fn with_mock_response(
+        mut self,
+        method: http::Method,
+        path: String,
+        response: String,
+    ) -> Self {
         self.mock_responses.insert((method, path), response);
         self
     }

@@ -1,9 +1,6 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{
-    ItemFn,
-    parse_macro_input,
-};
+use syn::{ItemFn, parse_macro_input};
 
 #[proc_macro_attribute]
 pub fn test(_: TokenStream, stream: TokenStream) -> TokenStream {
@@ -11,7 +8,10 @@ pub fn test(_: TokenStream, stream: TokenStream) -> TokenStream {
 
     input.block.stmts.insert(
         0,
-        syn::parse(quote!(let mut environment = fig_test::ENVIRONMENT_LOCK.blocking_lock();).into()).unwrap(),
+        syn::parse(
+            quote!(let mut environment = fig_test::ENVIRONMENT_LOCK.blocking_lock();).into(),
+        )
+        .unwrap(),
     );
     input.block.stmts.insert(
         1,
@@ -48,7 +48,8 @@ pub fn test_async(_: TokenStream, stream: TokenStream) -> TokenStream {
 
     input.block.stmts.insert(
         0,
-        syn::parse(quote!(let mut environment = fig_test::ENVIRONMENT_LOCK.lock().await;).into()).unwrap(),
+        syn::parse(quote!(let mut environment = fig_test::ENVIRONMENT_LOCK.lock().await;).into())
+            .unwrap(),
     );
     input.block.stmts.insert(
         1,

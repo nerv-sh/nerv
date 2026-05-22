@@ -1,14 +1,8 @@
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::{
-    Arc,
-    Weak,
-};
+use std::sync::{Arc, Weak};
 
-use super::{
-    Pid,
-    RawPid,
-};
+use super::{Pid, RawPid};
 use crate::Context;
 
 pub fn current(ctx: Weak<Context>) -> Pid {
@@ -36,7 +30,9 @@ pub fn parent(ctx: Weak<Context>, pid: &RawPid) -> Option<Box<Pid>> {
 
 pub fn exe(_: Weak<Context>, pid: &RawPid) -> Option<PathBuf> {
     // TODO: add links to the fake file system
-    std::path::PathBuf::from(format!("/proc/{pid}/exe")).read_link().ok()
+    std::path::PathBuf::from(format!("/proc/{pid}/exe"))
+        .read_link()
+        .ok()
 }
 
 pub fn cmdline(ctx: Weak<Context>, pid: &RawPid) -> Option<String> {

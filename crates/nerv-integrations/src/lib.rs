@@ -4,20 +4,15 @@ pub mod error;
 pub mod file;
 #[cfg(target_os = "linux")]
 pub mod gnome_extension;
-#[cfg(target_os = "macos")]
-pub mod input_method;
-pub mod intellij;
 pub mod shell;
-pub mod ssh;
-#[cfg(target_os = "macos")]
-pub mod vscode;
+// PLAN.md v0.6 §0.2 strips IDE/desktop integration paths:
+// input_method (objc/macos-utils), intellij (macos-utils),
+// vscode (macos-utils), ssh (fig_remote_ipc → stripped crate).
+// Source files preserved on disk for reference but not compiled.
 
 use async_trait::async_trait;
 pub use backup::backup_file;
-pub use error::{
-    Error,
-    Result,
-};
+pub use error::{Error, Result};
 pub use file::FileIntegration;
 
 #[async_trait]

@@ -1,19 +1,11 @@
-use std::io::{
-    Error,
-    Write,
-};
+use std::io::{Error, Write};
 use std::marker::PhantomData;
 
 use base64::prelude::*;
 use bytes::BytesMut;
-use nerv_proto::prost::Message;
 use flate2::Compression;
-use tokio_util::codec::{
-    AnyDelimiterCodec,
-    AnyDelimiterCodecError,
-    Decoder,
-    Encoder,
-};
+use nerv_proto::prost::Message;
+use tokio_util::codec::{AnyDelimiterCodec, AnyDelimiterCodecError, Decoder, Encoder};
 
 #[derive(Debug, Clone)]
 pub struct Base64LineCodec<T: Message> {
@@ -54,9 +46,11 @@ impl<T: Message + Default> Decoder for Base64LineCodec<T> {
             Err(AnyDelimiterCodecError::Io(io)) => return Err(io),
             Err(err @ AnyDelimiterCodecError::MaxChunkLengthExceeded) => {
                 return Err(Error::other(err.to_string()));
-            },
+            }
         };
-        let base64_decoded = BASE64_STANDARD.decode(line).map_err(std::io::Error::other)?;
+        let base64_decoded = BASE64_STANDARD
+            .decode(line)
+            .map_err(std::io::Error::other)?;
         let message = T::decode(&*base64_decoded)?;
         Ok(Some(message))
     }
@@ -78,7 +72,9 @@ impl<T: Message> Encoder<T> for Base64LineCodec<T> {
         match self.line_delimited.encode(&base64_encoded, dst) {
             Ok(()) => Ok(()),
             Err(AnyDelimiterCodecError::Io(io)) => Err(io),
-            Err(err @ AnyDelimiterCodecError::MaxChunkLengthExceeded) => Err(Error::other(err.to_string())),
+            Err(err @ AnyDelimiterCodecError::MaxChunkLengthExceeded) => {
+                Err(Error::other(err.to_string()))
+            }
         }
     }
 }
@@ -87,15 +83,9 @@ impl<T: Message> Encoder<T> for Base64LineCodec<T> {
 mod tests {
     use std::collections::HashMap;
 
-    use nerv_proto::fig::{
-        EnvironmentVariable,
-        ShellContext,
-    };
+    use nerv_proto::fig::{EnvironmentVariable, ShellContext};
     use nerv_proto::local::PromptHook;
-    use nerv_proto::remote::{
-        Hostbound,
-        hostbound,
-    };
+    use nerv_proto::remote::{Hostbound, hostbound};
 
     use super::*;
 
@@ -110,7 +100,14 @@ mod tests {
             .filter(|line| !line.starts_with('#'))
             .map(|line| {
                 let (key, value) = line.split_once('=').unwrap();
-                (key.into(), if value.is_empty() { None } else { Some(value.into()) })
+                (
+                    key.into(),
+                    if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.into())
+                    },
+                )
             })
             .collect::<HashMap<String, Option<String>>>();
         let get_var = |key: &str| environment_variables.get(key).cloned().unwrap_or(None);

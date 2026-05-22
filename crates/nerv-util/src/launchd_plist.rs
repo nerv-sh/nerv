@@ -159,7 +159,11 @@ impl LaunchdPlist {
                 }
 
                 if let Some(associated_bundle_identifiers) = &self.associated_bundle_identifiers {
-                    push_key_val!("AssociatedBundleIdentifiers", &[String], associated_bundle_identifiers);
+                    push_key_val!(
+                        "AssociatedBundleIdentifiers",
+                        &[String],
+                        associated_bundle_identifiers
+                    );
                 }
             });
 
@@ -220,10 +224,11 @@ impl LaunchdPlist {
         match self.environment_variables {
             Some(ref mut env) => {
                 env.insert(key.into(), value.into());
-            },
+            }
             None => {
-                self.environment_variables = Some(BTreeMap::from_iter(vec![(key.into(), value.into())]));
-            },
+                self.environment_variables =
+                    Some(BTreeMap::from_iter(vec![(key.into(), value.into())]));
+            }
         };
         self
     }
@@ -285,13 +290,20 @@ impl LaunchdPlist {
     }
 
     /// Set the program arguments
-    pub fn associated_bundle_identifiers<I, T>(mut self, associated_bundle_identifiers: I) -> LaunchdPlist
+    pub fn associated_bundle_identifiers<I, T>(
+        mut self,
+        associated_bundle_identifiers: I,
+    ) -> LaunchdPlist
     where
         I: IntoIterator<Item = T>,
         T: Into<String>,
     {
-        self.associated_bundle_identifiers =
-            Some(associated_bundle_identifiers.into_iter().map(|s| s.into()).collect());
+        self.associated_bundle_identifiers = Some(
+            associated_bundle_identifiers
+                .into_iter()
+                .map(|s| s.into())
+                .collect(),
+        );
         self
     }
 }

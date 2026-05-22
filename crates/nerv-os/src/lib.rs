@@ -9,19 +9,11 @@ use std::sync::Arc;
 
 pub use env::Env;
 pub use fs::Fs;
-pub use platform::{
-    Os,
-    Platform,
-};
+pub use platform::{Os, Platform};
 use process_info::FakePid;
 pub use process_info::ProcessInfo;
 pub use providers::{
-    ContextArcProvider,
-    ContextProvider,
-    EnvProvider,
-    FsProvider,
-    PlatformProvider,
-    SysInfoProvider,
+    ContextArcProvider, ContextProvider, EnvProvider, FsProvider, PlatformProvider, SysInfoProvider,
 };
 pub use sysinfo::SysInfo;
 
@@ -172,7 +164,10 @@ impl ContextBuilder {
         let fs = Fs::new_chroot();
         fs.create_dir_all(home).await?;
         self.fs = Some(fs);
-        self.env = Some(Env::from_slice(&[("HOME", "/home/testuser"), ("USER", "testuser")]));
+        self.env = Some(Env::from_slice(&[
+            ("HOME", "/home/testuser"),
+            ("USER", "testuser"),
+        ]));
         Ok(self)
     }
 
@@ -181,7 +176,7 @@ impl ContextBuilder {
             Some(env) if !env.is_real() => {
                 unsafe { env.set_var(key, value) };
                 Some(env)
-            },
+            }
             _ => Some(Env::from_slice(&[(key, value)])),
         };
         self

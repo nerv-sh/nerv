@@ -6,40 +6,19 @@ pub mod settings;
 pub mod sqlite;
 pub mod state;
 
-use std::fs::{
-    self,
-    File,
-};
-use std::io::{
-    Read,
-    Seek,
-    SeekFrom,
-    Write,
-};
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
-pub use error::{
-    Error,
-    Result,
-};
+pub use error::{Error, Result};
 use fd_lock::RwLock as FileRwLock;
 use nerv_util::directories;
 use parking_lot::{
-    MappedRwLockReadGuard,
-    MappedRwLockWriteGuard,
-    RwLock,
-    RwLockReadGuard,
-    RwLockWriteGuard,
+    MappedRwLockReadGuard, MappedRwLockWriteGuard, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };
 use serde_json::Value;
-pub use settings::{
-    Settings,
-    SettingsProvider,
-};
-pub use state::{
-    State,
-    StateProvider,
-};
+pub use settings::{Settings, SettingsProvider};
+pub use state::{State, StateProvider};
 use thiserror::Error;
 use tracing::error;
 
@@ -63,22 +42,24 @@ pub enum ReadGuard<'a, T> {
 impl<'a, T> ReadGuard<'a, T> {
     pub fn map<U, F: FnOnce(&T) -> &U>(self, f: F) -> MappedReadGuard<'a, U> {
         match self {
-            ReadGuard::Global(guard) => {
-                MappedReadGuard::Global(RwLockReadGuard::<'a, Option<T>>::map(guard, |data: &Option<T>| {
+            ReadGuard::Global(guard) => MappedReadGuard::Global(
+                RwLockReadGuard::<'a, Option<T>>::map(guard, |data: &Option<T>| {
                     f(data.as_ref().expect("global backend is not used"))
-                }))
-            },
+                }),
+            ),
             ReadGuard::Memory(data) => MappedReadGuard::Memory(f(data)),
         }
     }
 
     pub fn try_map<U, F: FnOnce(&T) -> Option<&U>>(self, f: F) -> Option<MappedReadGuard<'a, U>> {
         match self {
-            ReadGuard::Global(guard) => RwLockReadGuard::<'a, Option<T>>::try_map(guard, |data: &Option<T>| {
-                f(data.as_ref().expect("global backend is not used"))
-            })
-            .ok()
-            .map(MappedReadGuard::Global),
+            ReadGuard::Global(guard) => {
+                RwLockReadGuard::<'a, Option<T>>::try_map(guard, |data: &Option<T>| {
+                    f(data.as_ref().expect("global backend is not used"))
+                })
+                .ok()
+                .map(MappedReadGuard::Global)
+            }
             ReadGuard::Memory(data) => f(data).map(MappedReadGuard::Memory),
         }
     }
@@ -119,22 +100,27 @@ pub enum WriteGuard<'a, T> {
 impl<'a, T> WriteGuard<'a, T> {
     pub fn map<U, F: FnOnce(&mut T) -> &mut U>(self, f: F) -> MappedWriteGuard<'a, U> {
         match self {
-            WriteGuard::Global(guard) => {
-                MappedWriteGuard::Global(RwLockWriteGuard::<'a, Option<T>>::map(guard, |data: &mut Option<T>| {
+            WriteGuard::Global(guard) => MappedWriteGuard::Global(
+                RwLockWriteGuard::<'a, Option<T>>::map(guard, |data: &mut Option<T>| {
                     f(data.as_mut().expect("global backend is not used"))
-                }))
-            },
+                }),
+            ),
             WriteGuard::Memory(data) => MappedWriteGuard::Memory(f(data)),
         }
     }
 
-    pub fn try_map<U, F: FnOnce(&mut T) -> Option<&mut U>>(self, f: F) -> Option<MappedWriteGuard<'a, U>> {
+    pub fn try_map<U, F: FnOnce(&mut T) -> Option<&mut U>>(
+        self,
+        f: F,
+    ) -> Option<MappedWriteGuard<'a, U>> {
         match self {
-            WriteGuard::Global(guard) => RwLockWriteGuard::<'a, Option<T>>::try_map(guard, |data: &mut Option<T>| {
-                f(data.as_mut().expect("global backend is not used"))
-            })
-            .ok()
-            .map(MappedWriteGuard::Global),
+            WriteGuard::Global(guard) => {
+                RwLockWriteGuard::<'a, Option<T>>::try_map(guard, |data: &mut Option<T>| {
+                    f(data.as_mut().expect("global backend is not used"))
+                })
+                .ok()
+                .map(MappedWriteGuard::Global)
+            }
             WriteGuard::Memory(data) => f(data).map(MappedWriteGuard::Memory),
         }
     }
@@ -206,7 +192,9 @@ pub trait JsonStore: Sized {
         if is_global {
             Ok(Self::new_from_backend(Backend::Global))
         } else {
-            Ok(Self::new_from_backend(Backend::Memory(Self::load_from_file()?)))
+            Ok(Self::new_from_backend(Backend::Memory(
+                Self::load_from_file()?,
+            )))
         }
     }
 
@@ -244,7 +232,7 @@ pub trait JsonStore: Sized {
             Ok(json) => {
                 *Self::data_lock().write() = Some(json);
                 Ok(())
-            },
+            }
             Err(err) => {
                 *Self::data_lock().write() = Some(Map::new());
 
@@ -267,7 +255,7 @@ pub trait JsonStore: Sized {
                 }
 
                 Err(err)
-            },
+            }
         }
     }
 
@@ -331,7 +319,8 @@ pub trait JsonStore: Sized {
     }
 
     fn get_string(&self, key: impl AsRef<str>) -> Option<String> {
-        self.get(key).and_then(|value| value.as_str().map(|s| s.into()))
+        self.get(key)
+            .and_then(|value| value.as_str().map(|s| s.into()))
     }
 
     fn get_string_or(&self, key: impl AsRef<str>, default: String) -> String {
@@ -366,7 +355,9 @@ impl JsonStore for OldSettings {
 
     fn new_from_backend(backend: Backend) -> Self {
         match backend {
-            Backend::Global => Self { inner: Backend::Global },
+            Backend::Global => Self {
+                inner: Backend::Global,
+            },
             Backend::Memory(map) => Self {
                 inner: Backend::Memory(map),
             },

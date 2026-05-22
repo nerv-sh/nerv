@@ -1,40 +1,17 @@
 use std::fs::File;
-use std::io::{
-    ErrorKind,
-    Write,
-};
+use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use cfg_if::cfg_if;
 use clap::ValueEnum;
 use nerv_os::Env;
-use nerv_util::{
-    CLI_BINARY_NAME,
-    PRODUCT_NAME,
-    PTY_BINARY_NAME,
-    Shell,
-    directories,
-};
-use regex::{
-    Regex,
-    RegexSet,
-};
-use serde::{
-    Deserialize,
-    Serialize,
-};
+use nerv_util::{CLI_BINARY_NAME, PRODUCT_NAME, PTY_BINARY_NAME, Shell, directories};
+use regex::{Regex, RegexSet};
+use serde::{Deserialize, Serialize};
 
-use crate::error::{
-    ErrorExt,
-    Result,
-};
-use crate::{
-    Error,
-    FileIntegration,
-    Integration,
-    backup_file,
-};
+use crate::error::{ErrorExt, Result};
+use crate::{Error, FileIntegration, Integration, backup_file};
 
 pub mod inline_shell_completion_plugin {
     pub const ZSH_SCRIPT: &str = concat!(
@@ -137,7 +114,11 @@ impl ShellExt for Shell {
                 let mut configs = vec![".bashrc"];
                 let other_configs = [".profile", ".bash_login", ".bash_profile"];
 
-                configs.extend(other_configs.into_iter().filter(|f| config_dir.join(f).exists()));
+                configs.extend(
+                    other_configs
+                        .into_iter()
+                        .filter(|f| config_dir.join(f).exists()),
+                );
 
                 // Include .profile if none of [.profile, .bash_login, .bash_profile] exist.
                 if configs.len() == 1 {
@@ -156,7 +137,7 @@ impl ShellExt for Shell {
                         }) as Box<dyn ShellIntegration>
                     })
                     .collect()
-            },
+            }
             Shell::Zsh => vec![".zshrc", ".zprofile"]
                 .into_iter()
                 .map(|filename| {
@@ -183,7 +164,7 @@ impl ShellExt for Shell {
                         path: fish_config_dir.join("99_fig_post.fish"),
                     }),
                 ]
-            },
+            }
             Shell::Nu => vec![],
         };
 
@@ -206,7 +187,7 @@ impl ShellExt for Shell {
                     "function __bp_adjust_histcontrol() { :; }\n",
                     include_str!("scripts/pre.sh")
                 )
-            },
+            }
             (Shell::Bash, When::Post) => {
                 concat!(
                     "function __fig_source_bash_preexec() {\n",
@@ -217,7 +198,7 @@ impl ShellExt for Shell {
                     "function __bp_adjust_histcontrol() { :; }\n",
                     include_str!("scripts/post.bash")
                 )
-            },
+            }
             (Shell::Nu, When::Pre) => include_str!("scripts/pre.nu"),
             (Shell::Nu, When::Post) => include_str!("scripts/post.nu"),
         };
@@ -387,7 +368,9 @@ impl DotfileShellIntegration {
     fn legacy_script_integration(&self, when: When) -> Result<ShellScriptShellIntegration> {
         let integration_file_name = format!(
             "{}.{}.{}",
-            Regex::new(r"^\.").unwrap().replace_all(self.dotfile_name, ""),
+            Regex::new(r"^\.")
+                .unwrap()
+                .replace_all(self.dotfile_name, ""),
             when,
             self.shell
         );
@@ -403,14 +386,18 @@ impl DotfileShellIntegration {
     fn script_integration(&self, when: When) -> Result<ShellScriptShellIntegration> {
         let integration_file_name = format!(
             "{}.{}.{}",
-            Regex::new(r"^\.").unwrap().replace_all(self.dotfile_name, ""),
+            Regex::new(r"^\.")
+                .unwrap()
+                .replace_all(self.dotfile_name, ""),
             when,
             self.shell
         );
         Ok(ShellScriptShellIntegration {
             shell: self.shell,
             when,
-            path: directories::fig_data_dir()?.join("shell").join(integration_file_name),
+            path: directories::fig_data_dir()?
+                .join("shell")
+                .join(integration_file_name),
         })
     }
 
@@ -487,7 +474,10 @@ impl DotfileShellIntegration {
     fn legacy_source_text_2(&self, when: When) -> Result<String> {
         let home = directories::home_dir()?;
         let integration_path = self.script_integration(when)?.path;
-        let path = format!("\"$HOME/{}\"", integration_path.strip_prefix(home)?.display());
+        let path = format!(
+            "\"$HOME/{}\"",
+            integration_path.strip_prefix(home)?.display()
+        );
 
         match self.shell {
             Shell::Fish => Ok(format!("if test -f {path}; . {path}; end")),
@@ -504,15 +494,22 @@ impl DotfileShellIntegration {
         ));
 
         match self.shell {
-            Shell::Fish => Ok(format!(r"test\s*\-f\s*{path};\s*and\s+builtin\s+source\s+{path}")),
-            _ => Ok(format!(r"\[\[\s*\-f\s*{path}\s*\]\]\s*&&\s*builtin\s+source\s*{path}")),
+            Shell::Fish => Ok(format!(
+                r"test\s*\-f\s*{path};\s*and\s+builtin\s+source\s+{path}"
+            )),
+            _ => Ok(format!(
+                r"\[\[\s*\-f\s*{path}\s*\]\]\s*&&\s*builtin\s+source\s*{path}"
+            )),
         }
     }
 
     fn source_text(&self, when: When) -> Result<String> {
         let home = directories::home_dir()?;
         let integration_path = self.script_integration(when)?.path;
-        let path = format!("\"${{HOME}}/{}\"", integration_path.strip_prefix(home)?.display());
+        let path = format!(
+            "\"${{HOME}}/{}\"",
+            integration_path.strip_prefix(home)?.display()
+        );
 
         match self.shell {
             Shell::Fish => Ok(format!("test -f {path}; and builtin source {path}")),
@@ -659,9 +656,11 @@ impl Integration for DotfileShellIntegration {
                 .replace_all(&contents, "")
                 .into();
 
-            contents = Regex::new(r"(?mi)^#.*Please make sure this block is at the .* of this file.*$\n?")?
-                .replace_all(&contents, "")
-                .into();
+            contents = Regex::new(
+                r"(?mi)^#.*Please make sure this block is at the .* of this file.*$\n?",
+            )?
+            .replace_all(&contents, "")
+            .into();
 
             if self.pre {
                 contents = self.remove_from_text(&contents, When::Pre)?;
@@ -691,7 +690,8 @@ impl Integration for DotfileShellIntegration {
     async fn is_installed(&self) -> Result<()> {
         let dotfile = self.dotfile_path();
 
-        let filtered_contents: String = match std::fs::read_to_string(&dotfile).with_path(&dotfile) {
+        let filtered_contents: String = match std::fs::read_to_string(&dotfile).with_path(&dotfile)
+        {
             // Remove comments and empty lines.
             Ok(contents) => {
                 // Check for existence of ignore flag
@@ -706,10 +706,10 @@ impl Integration for DotfileShellIntegration {
                     .unwrap()
                     .replace_all(&contents, "")
                     .into()
-            },
+            }
             Err(Error::Io(err)) if err.kind() == ErrorKind::NotFound => {
                 return Err(Error::FileDoesNotExist(dotfile.into()));
-            },
+            }
             Err(err) => return Err(err),
         };
 
@@ -734,7 +734,7 @@ impl Integration for DotfileShellIntegration {
             Err(Error::LegacyInstallation(_)) => {
                 self.install_inner().await?;
                 Ok(())
-            },
+            }
             Err(err) => Err(err),
         }
     }
@@ -770,16 +770,10 @@ fn split_shebang(contents: &str) -> (&str, &str) {
 #[cfg(test)]
 mod test {
     use std::io::Write;
-    use std::process::{
-        Command,
-        Stdio,
-    };
+    use std::process::{Command, Stdio};
 
     use nerv_util::build::SKIP_SHELLCHECK_TESTS;
-    use nerv_util::directories::{
-        home_dir,
-        old_fig_data_dir,
-    };
+    use nerv_util::directories::{home_dir, old_fig_data_dir};
 
     use super::*;
 
@@ -826,11 +820,13 @@ mod test {
     }
 
     #[test]
+    #[ignore = "requires shellcheck on PATH; run manually after `brew install shellcheck`"]
     fn shellcheck_bash_pre() {
         check_script(Shell::Bash, When::Pre);
     }
 
     #[test]
+    #[ignore = "requires shellcheck on PATH; run manually after `brew install shellcheck`"]
     fn shellcheck_bash_post() {
         check_script(Shell::Bash, When::Post);
     }
@@ -853,7 +849,10 @@ mod test {
         println!("re: {re}");
 
         let data_dir = old_fig_data_dir().unwrap();
-        let dir = data_dir.strip_prefix(home_dir().unwrap()).unwrap().display();
+        let dir = data_dir
+            .strip_prefix(home_dir().unwrap())
+            .unwrap()
+            .display();
 
         // base case
         let doc = &indoc::formatdoc! {r#"
@@ -917,7 +916,11 @@ mod test {
             split_shebang(&with_shebang_no_lf),
             "split with shebang and no linefeed"
         );
-        assert_eq!(("", contents), split_shebang(without_shebang), "split with no shebang");
+        assert_eq!(
+            ("", contents),
+            split_shebang(without_shebang),
+            "split with no shebang"
+        );
     }
 
     #[cfg(target_os = "linux")]

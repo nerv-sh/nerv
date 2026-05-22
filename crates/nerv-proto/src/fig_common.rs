@@ -1,10 +1,7 @@
 //! Fig.js Protocol Buffers
 
 use serde::Serialize;
-use serde::ser::{
-    SerializeStruct,
-    SerializeTuple,
-};
+use serde::ser::{SerializeStruct, SerializeTuple};
 use serde_json::Value;
 
 use crate::proto::fig_common::*;
@@ -136,7 +133,10 @@ where
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         Json {
             value: Some(json::Value::Object(json::Object {
-                map: iter.into_iter().map(|(k, v)| (k.into(), v.into())).collect(),
+                map: iter
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v.into()))
+                    .collect(),
             })),
         }
     }
@@ -192,7 +192,9 @@ impl From<Json> for Value {
                 None => Value::Null,
             },
             Some(json::Value::String(s)) => s.into(),
-            Some(json::Value::Array(a)) => Value::Array(a.array.into_iter().map(Value::from).collect()),
+            Some(json::Value::Array(a)) => {
+                Value::Array(a.array.into_iter().map(Value::from).collect())
+            }
             Some(json::Value::Object(o)) => Value::Object(
                 o.map
                     .into_iter()
@@ -232,7 +234,10 @@ mod tests {
                     ("i64".to_string(), type_hint_json((-123_i64).into())),
                     ("u64".to_string(), type_hint_json(123_u64.into())),
                     ("f64".to_string(), type_hint_json(1.2_f64.into())),
-                    ("string".to_string(), type_hint_json("value".to_string().into())),
+                    (
+                        "string".to_string(),
+                        type_hint_json("value".to_string().into())
+                    ),
                     (
                         "array".to_string(),
                         Json::from_iter(["foo".to_string(), "bar".to_string(), "baz".to_string()])

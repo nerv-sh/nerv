@@ -1,32 +1,18 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use nerv_os::{
-    EnvProvider,
-    Fs,
-    FsProvider,
-};
-use nerv_settings::{
-    Settings,
-    State,
-};
+use nerv_os::{EnvProvider, Fs, FsProvider};
+use nerv_settings::{Settings, State};
 use nerv_util::PRODUCT_NAME;
 use nerv_util::consts::APP_PROCESS_NAME;
 use nerv_util::consts::linux::DESKTOP_ENTRY_NAME;
 use nerv_util::directories::home_dir_ctx;
 
 use crate::Integration;
-use crate::error::{
-    Error,
-    ErrorExt,
-    Result,
-};
+use crate::error::{Error, ErrorExt, Result};
 
 /// Path to the local [PRODUCT_NAME] desktop entry installed under `~/.local/share/applications`
 pub fn local_entry_path<Ctx: FsProvider + EnvProvider>(ctx: &Ctx) -> Result<PathBuf> {
@@ -82,7 +68,12 @@ where
     Ctx: FsProvider + EnvProvider,
 {
     /// Creates a new [`DesktopEntryIntegration`].
-    pub fn new<P>(ctx: &'a Ctx, entry_path: Option<P>, icon_path: Option<P>, exec_path: Option<P>) -> Self
+    pub fn new<P>(
+        ctx: &'a Ctx,
+        entry_path: Option<P>,
+        icon_path: Option<P>,
+        exec_path: Option<P>,
+    ) -> Self
     where
         P: AsRef<Path>,
     {
@@ -94,11 +85,18 @@ where
         }
     }
 
-    fn validate_field_path(entry_contents: &EntryContents, field: &str, expected_path: &PathBuf) -> Result<()> {
+    fn validate_field_path(
+        entry_contents: &EntryContents,
+        field: &str,
+        expected_path: &PathBuf,
+    ) -> Result<()> {
         match entry_contents.get_field(field) {
             Some(path) => {
-                let set_path = PathBuf::from_str(path)
-                    .map_err(|err| Error::ImproperInstallation(format!("Invalid field {}: {:?}", field, err).into()))?;
+                let set_path = PathBuf::from_str(path).map_err(|err| {
+                    Error::ImproperInstallation(
+                        format!("Invalid field {}: {:?}", field, err).into(),
+                    )
+                })?;
                 if set_path != *expected_path {
                     return Err(Error::ImproperInstallation(
                         format!(
@@ -110,12 +108,12 @@ where
                         .into(),
                     ));
                 }
-            },
+            }
             None => {
                 return Err(Error::ImproperInstallation(
                     format!("Field {} is missing", field).into(),
                 ));
-            },
+            }
         }
         Ok(())
     }
@@ -134,14 +132,15 @@ where
         if self.is_installed().await.is_ok() {
             return Ok(());
         }
-        let (entry_path, icon_path, exec_path) = match (&self.entry_path, &self.icon_path, &self.exec_path) {
-            (Some(entry), Some(icon), Some(exec)) => (entry, icon, exec),
-            _ => {
-                return Err(Error::Custom(
-                    "entry, icon, and exec paths are required for installation".into(),
-                ));
-            },
-        };
+        let (entry_path, icon_path, exec_path) =
+            match (&self.entry_path, &self.icon_path, &self.exec_path) {
+                (Some(entry), Some(icon), Some(exec)) => (entry, icon, exec),
+                _ => {
+                    return Err(Error::Custom(
+                        "entry, icon, and exec paths are required for installation".into(),
+                    ));
+                }
+            };
 
         let fs = self.ctx.fs();
 
@@ -189,11 +188,15 @@ where
         let to_icon_path = local_icon_path(self.ctx)?;
 
         // Check if the installed entry exists.
-        let entry_contents = match fs.read_to_string(&to_entry_path).await.with_path(&to_entry_path) {
+        let entry_contents = match fs
+            .read_to_string(&to_entry_path)
+            .await
+            .with_path(&to_entry_path)
+        {
             Ok(contents) => contents,
             Err(Error::Io(err)) if err.kind() == ErrorKind::NotFound => {
                 return Err(Error::FileDoesNotExist(to_entry_path.clone().into()));
-            },
+            }
             Err(err) => return Err(err),
         };
         let entry_contents = EntryContents::new(entry_contents);
@@ -273,7 +276,7 @@ impl EntryContents {
             None => {
                 self.lines.push(to_add);
                 self.fields.insert(key.to_string(), self.lines.len() - 1);
-            },
+            }
         }
     }
 }
@@ -374,7 +377,11 @@ where
 
 /// Whether or not the [`AutostartIntegration`] should be installed according to the user's
 /// environment and settings.
-pub fn should_install_autostart_entry<Ctx: EnvProvider>(env: &Ctx, settings: &Settings, state: &State) -> bool {
+pub fn should_install_autostart_entry<Ctx: EnvProvider>(
+    env: &Ctx,
+    settings: &Settings,
+    state: &State,
+) -> bool {
     if env.env().in_appimage() && !state.get_bool_or("appimage.manageDesktopEntry", false) {
         return false;
     }
@@ -383,11 +390,7 @@ pub fn should_install_autostart_entry<Ctx: EnvProvider>(env: &Ctx, settings: &Se
 
 #[cfg(test)]
 mod tests {
-    use nerv_os::{
-        Context,
-        ContextBuilder,
-        Env,
-    };
+    use nerv_os::{Context, ContextBuilder, Env};
 
     use super::*;
 
@@ -403,8 +406,9 @@ Type=Application"#;
 
     #[tokio::test]
     async fn test_entry_contents() {
-        let mut contents =
-            EntryContents::new("[Desktop Entry]\n# Some Comment\nExec=testapp\nIcon=testapp.png".to_string());
+        let mut contents = EntryContents::new(
+            "[Desktop Entry]\n# Some Comment\nExec=testapp\nIcon=testapp.png".to_string(),
+        );
         assert_eq!(contents.get_field("Exec"), Some("testapp"));
         assert_eq!(contents.get_field("Icon"), Some("testapp.png"));
         contents.set_field("Icon", "/path/img.png");
@@ -418,12 +422,21 @@ Type=Application"#;
         let fs = ctx.fs();
         fs.write("/app.desktop", TEST_DESKTOP_ENTRY).await.unwrap();
         fs.write("/app.png", "image").await.unwrap();
-        DesktopEntryIntegration::new(ctx, Some("/app.desktop"), Some("/app.png"), Some(TEST_EXEC_VALUE))
+        DesktopEntryIntegration::new(
+            ctx,
+            Some("/app.desktop"),
+            Some("/app.png"),
+            Some(TEST_EXEC_VALUE),
+        )
     }
 
     #[tokio::test]
     async fn test_desktop_entry_integration_install_and_uninstall() {
-        let ctx = ContextBuilder::new().with_test_home().await.unwrap().build();
+        let ctx = ContextBuilder::new()
+            .with_test_home()
+            .await
+            .unwrap()
+            .build();
         let fs = ctx.fs();
         let integration = make_test_local_desktop_entry(&ctx).await;
         assert!(integration.is_installed().await.is_err());
@@ -446,11 +459,17 @@ Type=Application"#;
         );
 
         // Validating the content of the desktop entry
-        let entry_contents = EntryContents::from_path(fs, &installed_entry_path).await.unwrap();
+        let entry_contents = EntryContents::from_path(fs, &installed_entry_path)
+            .await
+            .unwrap();
         let actual_exec = entry_contents.get_field("Exec").unwrap();
         assert_eq!(actual_exec, TEST_EXEC_VALUE, "invalid Exec field");
         let actual_icon = entry_contents.get_field("Icon").unwrap();
-        assert_eq!(actual_icon, installed_icon_path.to_string_lossy(), "invalid Icon field");
+        assert_eq!(
+            actual_icon,
+            installed_icon_path.to_string_lossy(),
+            "invalid Icon field"
+        );
 
         // Test uninstall.
         integration.uninstall().await.unwrap();
@@ -482,23 +501,40 @@ Type=Application"#;
         let integration = AutostartIntegration::new(&ctx).unwrap();
         assert_eq!(integration.target, local_entry_path(&ctx).unwrap());
 
-        let ctx = Context::builder().with_test_home().await.unwrap().build_fake();
+        let ctx = Context::builder()
+            .with_test_home()
+            .await
+            .unwrap()
+            .build_fake();
         let integration = AutostartIntegration::new(&ctx).unwrap();
         assert_eq!(integration.target, global_entry_path(&ctx));
     }
 
     #[tokio::test]
     async fn test_autostart_integration_install_and_uninstall() {
-        let ctx = ContextBuilder::new().with_test_home().await.unwrap().build_fake();
+        let ctx = ContextBuilder::new()
+            .with_test_home()
+            .await
+            .unwrap()
+            .build_fake();
 
         // Create desktop entries both locally and globally
         {
             let local_path = local_entry_path(&ctx).unwrap();
             let global_path = global_entry_path(&ctx);
-            ctx.fs().create_dir_all(local_path.parent().unwrap()).await.unwrap();
+            ctx.fs()
+                .create_dir_all(local_path.parent().unwrap())
+                .await
+                .unwrap();
             ctx.fs().write(local_path, "[Desktop Entry]").await.unwrap();
-            ctx.fs().create_dir_all(global_path.parent().unwrap()).await.unwrap();
-            ctx.fs().write(global_path, "[Desktop Entry]").await.unwrap();
+            ctx.fs()
+                .create_dir_all(global_path.parent().unwrap())
+                .await
+                .unwrap();
+            ctx.fs()
+                .write(global_path, "[Desktop Entry]")
+                .await
+                .unwrap();
         }
 
         let local_autostart = AutostartIntegration::to_local(&ctx).unwrap();

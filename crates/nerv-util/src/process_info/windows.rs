@@ -1,42 +1,28 @@
 use std::ffi::CStr;
-use std::mem::{
-    MaybeUninit,
-    size_of,
-};
+use std::mem::{MaybeUninit, size_of};
 use std::ops::Deref;
 use std::path::PathBuf;
 
-use windows::Wdk::System::Threading::{
-    NtQueryInformationProcess,
-    ProcessBasicInformation,
-};
-use windows::Win32::Foundation::{
-    CloseHandle,
-    HANDLE,
-    MAX_PATH,
-};
+use windows::Wdk::System::Threading::{NtQueryInformationProcess, ProcessBasicInformation};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, MAX_PATH};
 use windows::Win32::System::Threading::{
-    GetCurrentProcessId,
-    OpenProcess,
-    PROCESS_BASIC_INFORMATION,
-    PROCESS_NAME_FORMAT,
-    PROCESS_QUERY_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_VM_READ,
+    GetCurrentProcessId, OpenProcess, PROCESS_BASIC_INFORMATION, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
     QueryFullProcessImageNameA,
 };
 use windows::core::PSTR;
 
-use super::{
-    Pid,
-    PidExt,
-};
+use super::{Pid, PidExt};
 
 struct SafeHandle(HANDLE);
 
 impl SafeHandle {
     fn new(handle: HANDLE) -> Option<Self> {
-        if !handle.is_invalid() { Some(Self(handle)) } else { None }
+        if !handle.is_invalid() {
+            Some(Self(handle))
+        } else {
+            None
+        }
     }
 }
 

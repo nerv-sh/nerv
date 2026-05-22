@@ -1,8 +1,5 @@
 use std::ffi::OsString;
-use std::sync::{
-    Arc,
-    Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 use crate::Shim;
 
@@ -11,10 +8,7 @@ pub struct SysInfo(inner::Inner);
 
 mod inner {
     use std::collections::HashSet;
-    use std::sync::{
-        Arc,
-        Mutex,
-    };
+    use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone, Default)]
     pub enum Inner {
@@ -31,7 +25,9 @@ mod inner {
 
 impl SysInfo {
     pub fn new_fake() -> Self {
-        Self(inner::Inner::Fake(Arc::new(Mutex::new(inner::Fake::default()))))
+        Self(inner::Inner::Fake(Arc::new(Mutex::new(
+            inner::Fake::default(),
+        ))))
     }
 
     /// Returns whether the process containing `name` is running.
@@ -41,8 +37,11 @@ impl SysInfo {
             Inner::Real => {
                 let system = sysinfo::System::new_all();
 
-                system.processes_by_name(&OsString::from(name)).next().is_some()
-            },
+                system
+                    .processes_by_name(&OsString::from(name))
+                    .next()
+                    .is_some()
+            }
             Inner::Fake(fake) => fake.lock().unwrap().process_names.contains(name),
         }
     }
@@ -56,7 +55,7 @@ impl SysInfo {
                 for name in process_names {
                     curr_names.insert((*name).to_string());
                 }
-            },
+            }
         }
     }
 }

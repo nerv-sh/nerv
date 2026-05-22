@@ -3,14 +3,8 @@ use std::io;
 use async_trait::async_trait;
 use bytes::Buf;
 use nerv_proto::prost::Message;
-use nerv_proto::{
-    FigMessage,
-    ReflectMessage,
-};
-use tokio::io::{
-    AsyncRead,
-    AsyncReadExt,
-};
+use nerv_proto::{FigMessage, ReflectMessage};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::BufferedReader;
 use crate::error::RecvError;
@@ -39,7 +33,7 @@ where
                 Ok((len, message)) => {
                     self.buffer.advance(len);
                     return Ok(Some(message.decode()?));
-                },
+                }
                 // If the message is incomplete, read more into the buffer
                 Err(nerv_proto::FigMessageParseError::Incomplete(_, _)) => {
                     let bytes = self.inner.read_buf(&mut self.buffer).await?;
@@ -49,17 +43,19 @@ where
                         if self.buffer.is_empty() {
                             return Ok(None);
                         } else {
-                            return Err(RecvError::Io(io::Error::from(io::ErrorKind::UnexpectedEof)));
+                            return Err(RecvError::Io(io::Error::from(
+                                io::ErrorKind::UnexpectedEof,
+                            )));
                         }
                     }
-                },
+                }
                 // On any other error, return the error
                 Err(err) => {
                     // TODO(grant): add resyncing to message boundary
                     let position = cursor.position() as usize;
                     self.buffer.advance(position);
                     return Err(err.into());
-                },
+                }
             }
         }
     }
@@ -98,7 +94,10 @@ mod tests {
         let mut mock = mock(vec![]);
         mock.send_message(test_message_small()).await.unwrap();
         mock.inner.set_position(0);
-        assert_eq!(mock.recv_message().await.unwrap(), Some(test_message_small()));
+        assert_eq!(
+            mock.recv_message().await.unwrap(),
+            Some(test_message_small())
+        );
     }
 
     #[tokio::test]
@@ -106,7 +105,10 @@ mod tests {
         let mut mock = mock(vec![]);
         mock.send_message(test_message_large()).await.unwrap();
         mock.inner.set_position(0);
-        assert_eq!(mock.recv_message().await.unwrap(), Some(test_message_large()));
+        assert_eq!(
+            mock.recv_message().await.unwrap(),
+            Some(test_message_large())
+        );
     }
 
     #[tokio::test]
@@ -117,7 +119,10 @@ mod tests {
         }
         mock.inner.set_position(0);
         for _ in 0..500 {
-            assert_eq!(mock.recv_message().await.unwrap(), Some(test_message_small()));
+            assert_eq!(
+                mock.recv_message().await.unwrap(),
+                Some(test_message_small())
+            );
         }
         assert_eq!(mock.read(&mut [0u8]).await.unwrap(), 0);
         assert_eq!(mock.buffer.len(), 0);
@@ -131,7 +136,10 @@ mod tests {
         }
         mock.inner.set_position(0);
         for _ in 0..500 {
-            assert_eq!(mock.recv_message().await.unwrap(), Some(test_message_large()));
+            assert_eq!(
+                mock.recv_message().await.unwrap(),
+                Some(test_message_large())
+            );
         }
         assert_eq!(mock.read(&mut [0u8]).await.unwrap(), 0);
         assert_eq!(mock.buffer.len(), 0);
@@ -141,6 +149,10 @@ mod tests {
     async fn invalid_header() {
         let mut mock = mock(vec![b'f', b'o', b'o']);
         mock.inner.set_position(0);
-        assert!(mock.recv_message::<nerv_proto::local::LocalMessage>().await.is_err());
+        assert!(
+            mock.recv_message::<nerv_proto::local::LocalMessage>()
+                .await
+                .is_err()
+        );
     }
 }

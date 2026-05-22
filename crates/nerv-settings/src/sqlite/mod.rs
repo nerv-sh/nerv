@@ -1,20 +1,12 @@
 use std::ops::Deref;
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use nerv_util::directories::fig_data_dir;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::types::FromSql;
-use rusqlite::{
-    Connection,
-    Error,
-    ToSql,
-    params,
-};
+use rusqlite::{Connection, Error, ToSql, params};
 use serde_json::Map;
 use tracing::info;
 
@@ -140,7 +132,11 @@ impl Db {
         Ok(())
     }
 
-    fn get_value<T: FromSql>(&self, table: &'static str, key: impl AsRef<str>) -> Result<Option<T>> {
+    fn get_value<T: FromSql>(
+        &self,
+        table: &'static str,
+        key: impl AsRef<str>,
+    ) -> Result<Option<T>> {
         let conn = self.pool.get()?;
         let mut stmt = conn.prepare(&format!("SELECT value FROM {table} WHERE key = ?1"))?;
         match stmt.query_row([key.as_ref()], |row| row.get(0)) {
@@ -158,7 +154,12 @@ impl Db {
         self.get_value(AUTH_TABLE_NAME, key)
     }
 
-    fn set_value<T: ToSql>(&self, table: &'static str, key: impl AsRef<str>, value: T) -> Result<()> {
+    fn set_value<T: ToSql>(
+        &self,
+        table: &'static str,
+        key: impl AsRef<str>,
+        value: T,
+    ) -> Result<()> {
         self.pool.get()?.execute(
             &format!("INSERT OR REPLACE INTO {table} (key, value) VALUES (?1, ?2)"),
             params![key.as_ref(), value],
@@ -166,7 +167,11 @@ impl Db {
         Ok(())
     }
 
-    pub fn set_state_value(&self, key: impl AsRef<str>, value: impl Into<serde_json::Value>) -> Result<()> {
+    pub fn set_state_value(
+        &self,
+        key: impl AsRef<str>,
+        value: impl Into<serde_json::Value>,
+    ) -> Result<()> {
         self.set_value(STATE_TABLE_NAME, key, value.into())
     }
 
@@ -175,9 +180,10 @@ impl Db {
     }
 
     fn unset_value(&self, table: &'static str, key: impl AsRef<str>) -> Result<()> {
-        self.pool
-            .get()?
-            .execute(&format!("DELETE FROM {table} WHERE key = ?1"), [key.as_ref()])?;
+        self.pool.get()?.execute(
+            &format!("DELETE FROM {table} WHERE key = ?1"),
+            [key.as_ref()],
+        )?;
         Ok(())
     }
 
@@ -286,7 +292,11 @@ fn max_migration_version<C: Deref<Target = Connection>>(conn: &C) -> Option<i64>
     stmt.query_row([], |row| row.get(0)).ok()
 }
 
-fn has_migration<C: Deref<Target = Connection>>(conn: &C, version: usize, max_version: Option<i64>) -> Result<bool> {
+fn has_migration<C: Deref<Target = Connection>>(
+    conn: &C,
+    version: usize,
+    max_version: Option<i64>,
+) -> Result<bool> {
     // IMPORTANT: Due to a bug with the first 7 migrations, we have to check manually
     //
     // Background: the migrations table stores two identifying keys: the sqlite auto-generated
@@ -305,7 +315,7 @@ fn has_migration<C: Deref<Target = Connection>>(conn: &C, version: usize, max_ve
             // will exist.
             Err(Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
                 return Ok(false);
-            },
+            }
             Err(err) => return Err(err.into()),
         };
         let count: i32 = stmt.query_row([version], |row| row.get(0))?;
@@ -355,7 +365,8 @@ mod tests {
         );
 
         // Assert all the files in migrations/ are in the list
-        let migration_folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sqlite/migrations");
+        let migration_folder =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sqlite/migrations");
         let migration_count = std::fs::read_dir(migration_folder).unwrap().count();
         assert_eq!(MIGRATIONS.len(), migration_count);
     }
@@ -380,7 +391,10 @@ mod tests {
         assert_eq!(db.get_state_value("int").unwrap().unwrap(), 1);
         assert_eq!(db.get_state_value("float").unwrap().unwrap(), 1.0);
         assert_eq!(db.get_state_value("bool").unwrap().unwrap(), true);
-        assert_eq!(db.get_state_value("null").unwrap().unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            db.get_state_value("null").unwrap().unwrap(),
+            serde_json::Value::Null
+        );
         assert_eq!(
             db.get_state_value("array").unwrap().unwrap(),
             serde_json::json!([1, 2, 3])

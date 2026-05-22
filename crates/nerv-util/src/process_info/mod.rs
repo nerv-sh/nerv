@@ -1,8 +1,5 @@
 use std::path::PathBuf;
-use std::{
-    fmt,
-    str,
-};
+use std::{fmt, str};
 
 use cfg_if::cfg_if;
 
@@ -89,7 +86,7 @@ pub fn get_parent_process_exe() -> Option<PathBuf> {
         pid = pid.parent()?;
         match pid.exe() {
             // We ignore toolbox-exec since we never want to know if that is the parent process
-            Some(pid) if pid.file_name().is_some_and(|s| s == "toolbox-exec") => {},
+            Some(pid) if pid.file_name().is_some_and(|s| s == "toolbox-exec") => {}
             other => return other,
         }
     }
