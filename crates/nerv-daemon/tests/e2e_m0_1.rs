@@ -65,7 +65,7 @@ async fn complete_returns_stub_suggestions() {
         let resp: Response = serde_json::from_str(resp_line.trim()).unwrap();
         match resp {
             Response::Suggestions { items } => {
-                assert_eq!(items.len(), 3, "expected 3 stub suggestions");
+                assert_eq!(items.len(), 5, "expected 5 stub suggestions (top 5)");
                 let names: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
                 assert!(names.contains(&"commit"));
                 assert!(names.contains(&"clone"));
