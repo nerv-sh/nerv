@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use cfg_if::cfg_if;
 use clap::ValueEnum;
-use fig_os_shim::Env;
-use fig_util::{
+use nerv_os::Env;
+use nerv_util::{
     CLI_BINARY_NAME,
     PRODUCT_NAME,
     PTY_BINARY_NAME,
@@ -45,7 +45,7 @@ pub mod inline_shell_completion_plugin {
 
     #[cfg(test)]
     mod tests {
-        use fig_util::CLI_BINARY_NAME;
+        use nerv_util::CLI_BINARY_NAME;
 
         use super::*;
 
@@ -590,7 +590,7 @@ impl DotfileShellIntegration {
     async fn install_inner(&self) -> Result<()> {
         let dotfile = self.dotfile_path();
         let mut contents = if dotfile.exists() {
-            backup_file(&dotfile, fig_util::directories::utc_backup_dir().ok())?;
+            backup_file(&dotfile, nerv_util::directories::utc_backup_dir().ok())?;
             self.uninstall().await?;
             std::fs::read_to_string(&dotfile)?
         } else {
@@ -775,8 +775,8 @@ mod test {
         Stdio,
     };
 
-    use fig_util::build::SKIP_SHELLCHECK_TESTS;
-    use fig_util::directories::{
+    use nerv_util::build::SKIP_SHELLCHECK_TESTS;
+    use nerv_util::directories::{
         home_dir,
         old_fig_data_dir,
     };

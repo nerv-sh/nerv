@@ -1,16 +1,16 @@
 use crossterm::style::Stylize;
-use fig_os_shim::{
+use nerv_os::{
     Context,
     Os,
 };
-use fig_settings::keys::UPDATE_AVAILABLE_KEY;
-use fig_settings::settings::get_bool_or;
+use nerv_settings::keys::UPDATE_AVAILABLE_KEY;
+use nerv_settings::settings::get_bool_or;
 use fig_telemetry::{
     InstallMethod,
     get_install_method,
 };
-use fig_util::CLI_BINARY_NAME;
-use fig_util::manifest::{
+use nerv_util::CLI_BINARY_NAME;
+use nerv_util::manifest::{
     Variant,
     manifest,
 };
@@ -57,7 +57,7 @@ pub fn check_for_update(context: &Context) {
     tokio::spawn(async {
         match fig_install::check_for_updates(false, true).await {
             Ok(Some(pkg)) => {
-                if let Err(err) = fig_settings::state::set_value(UPDATE_AVAILABLE_KEY, pkg.version.to_string()) {
+                if let Err(err) = nerv_settings::state::set_value(UPDATE_AVAILABLE_KEY, pkg.version.to_string()) {
                     warn!(?err, "Error setting {UPDATE_AVAILABLE_KEY}: {err}");
                 }
             },
@@ -68,7 +68,7 @@ pub fn check_for_update(context: &Context) {
         };
     });
 
-    match fig_settings::state::get_string(UPDATE_AVAILABLE_KEY) {
+    match nerv_settings::state::get_string(UPDATE_AVAILABLE_KEY) {
         Ok(Some(version)) => match Version::parse(&version) {
             Ok(version) => {
                 let current_version = current_version();
@@ -78,13 +78,13 @@ pub fn check_for_update(context: &Context) {
             },
             Err(err) => {
                 warn!(?err, "Error parsing {UPDATE_AVAILABLE_KEY}: {err}");
-                let _ = fig_settings::state::remove_value(UPDATE_AVAILABLE_KEY);
+                let _ = nerv_settings::state::remove_value(UPDATE_AVAILABLE_KEY);
             },
         },
         Ok(None) => {},
         Err(err) => {
             warn!(?err, "Error getting {UPDATE_AVAILABLE_KEY}: {err}");
-            let _ = fig_settings::state::remove_value(UPDATE_AVAILABLE_KEY);
+            let _ = nerv_settings::state::remove_value(UPDATE_AVAILABLE_KEY);
         },
     }
 }

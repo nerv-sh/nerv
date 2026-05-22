@@ -1,4 +1,4 @@
-use fig_settings::history::{
+use nerv_settings::history::{
     HistoryColumn,
     Order,
     OrderBy,
@@ -18,10 +18,10 @@ pub struct HistoryQueryParams {
 }
 
 pub enum HistoryCommand {
-    Insert(alacritty_terminal::term::CommandInfo),
+    Insert(nerv_term::term::CommandInfo),
     Query(
         HistoryQueryParams,
-        Sender<Option<Vec<fig_settings::history::CommandInfo>>>,
+        Sender<Option<Vec<nerv_settings::history::CommandInfo>>>,
     ),
 }
 
@@ -33,12 +33,12 @@ pub async fn spawn_history_task() -> HistorySender {
     let (sender, receiver) = flume::bounded::<HistoryCommand>(64);
 
     tokio::task::spawn(async move {
-        let history = fig_settings::history::History::new();
+        let history = nerv_settings::history::History::new();
 
         while let Ok(command) = receiver.recv_async().await {
             match command {
                 HistoryCommand::Insert(command) => {
-                    let command_info = fig_settings::history::CommandInfo {
+                    let command_info = nerv_settings::history::CommandInfo {
                         command: command.command,
                         shell: command.shell,
                         pid: command.pid,

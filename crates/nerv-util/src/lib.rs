@@ -77,7 +77,7 @@ impl std::fmt::Display for UnknownDesktopErrContext {
 /// # Example
 ///
 /// ```
-/// use fig_util::gen_hex_string;
+/// use nerv_util::gen_hex_string;
 ///
 /// let hex = gen_hex_string();
 /// assert_eq!(hex.len(), 64);

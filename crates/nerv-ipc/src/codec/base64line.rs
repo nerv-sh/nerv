@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 
 use base64::prelude::*;
 use bytes::BytesMut;
-use fig_proto::prost::Message;
+use nerv_proto::prost::Message;
 use flate2::Compression;
 use tokio_util::codec::{
     AnyDelimiterCodec,
@@ -87,12 +87,12 @@ impl<T: Message> Encoder<T> for Base64LineCodec<T> {
 mod tests {
     use std::collections::HashMap;
 
-    use fig_proto::fig::{
+    use nerv_proto::fig::{
         EnvironmentVariable,
         ShellContext,
     };
-    use fig_proto::local::PromptHook;
-    use fig_proto::remote::{
+    use nerv_proto::local::PromptHook;
+    use nerv_proto::remote::{
         Hostbound,
         hostbound,
     };

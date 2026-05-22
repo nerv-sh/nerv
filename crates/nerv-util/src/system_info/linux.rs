@@ -2,7 +2,7 @@ use std::io;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use fig_os_shim::EnvProvider;
+use nerv_os::EnvProvider;
 use regex::Regex;
 use serde::{
     Deserialize,
@@ -198,7 +198,7 @@ impl SandboxKind {
 
 #[cfg(test)]
 mod test {
-    use fig_os_shim::Env;
+    use nerv_os::Env;
 
     use super::*;
 

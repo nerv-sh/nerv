@@ -7,19 +7,19 @@ use std::path::{
 use std::str::FromStr;
 
 use async_trait::async_trait;
-use fig_os_shim::{
+use nerv_os::{
     EnvProvider,
     Fs,
     FsProvider,
 };
-use fig_settings::{
+use nerv_settings::{
     Settings,
     State,
 };
-use fig_util::PRODUCT_NAME;
-use fig_util::consts::APP_PROCESS_NAME;
-use fig_util::consts::linux::DESKTOP_ENTRY_NAME;
-use fig_util::directories::home_dir_ctx;
+use nerv_util::PRODUCT_NAME;
+use nerv_util::consts::APP_PROCESS_NAME;
+use nerv_util::consts::linux::DESKTOP_ENTRY_NAME;
+use nerv_util::directories::home_dir_ctx;
 
 use crate::Integration;
 use crate::error::{
@@ -47,7 +47,7 @@ pub fn local_autostart_path<Ctx: FsProvider + EnvProvider>(ctx: &Ctx) -> Result<
 
 /// Path to the icon referenced by the desktop entry.
 pub fn local_icon_path<Ctx: FsProvider>(ctx: &Ctx) -> Result<PathBuf> {
-    Ok(fig_util::directories::fig_data_dir_ctx(ctx)?.join(format!("{APP_PROCESS_NAME}.png")))
+    Ok(nerv_util::directories::fig_data_dir_ctx(ctx)?.join(format!("{APP_PROCESS_NAME}.png")))
 }
 
 /// Helper to create the parent directory of `path` if it doesn't already exist.
@@ -383,7 +383,7 @@ pub fn should_install_autostart_entry<Ctx: EnvProvider>(env: &Ctx, settings: &Se
 
 #[cfg(test)]
 mod tests {
-    use fig_os_shim::{
+    use nerv_os::{
         Context,
         ContextBuilder,
         Env,

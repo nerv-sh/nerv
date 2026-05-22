@@ -46,11 +46,11 @@ use core_foundation::{
     declare_TCFType,
     impl_TCFType,
 };
-use fig_settings::state;
-use fig_util::Terminal;
-use fig_util::consts::CLI_BINARY_NAME;
-use fig_util::directories::home_dir;
-use fig_util::macos::BUNDLE_CONTENTS_HELPERS_PATH;
+use nerv_settings::state;
+use nerv_util::Terminal;
+use nerv_util::consts::CLI_BINARY_NAME;
+use nerv_util::directories::home_dir;
+use nerv_util::macos::BUNDLE_CONTENTS_HELPERS_PATH;
 use macos_utils::applications;
 use objc::runtime::Object;
 use objc::{
@@ -260,7 +260,7 @@ impl std::fmt::Debug for TISInputSource {
 
 impl std::default::Default for InputMethod {
     fn default() -> Self {
-        let fig_app_path = fig_util::app_bundle_path();
+        let fig_app_path = nerv_util::app_bundle_path();
         let bundle_path = fig_app_path
             .join(BUNDLE_CONTENTS_HELPERS_PATH)
             .join("CodeWhispererInputMethod.app");
@@ -483,7 +483,7 @@ impl Integration for InputMethod {
         // Can we load input source?
 
         // todo: pull this into a function in fig_directories
-        let cli_path = fig_util::app_bundle_path()
+        let cli_path = nerv_util::app_bundle_path()
             .join("Contents")
             .join("MacOS")
             .join(CLI_BINARY_NAME);
@@ -547,7 +547,7 @@ impl Integration for InputMethod {
         }
 
         // todo: pull this into a function in fig_directories
-        let q_cli_path = fig_util::app_bundle_path()
+        let q_cli_path = nerv_util::app_bundle_path()
             .join("Contents")
             .join("MacOS")
             .join(CLI_BINARY_NAME);

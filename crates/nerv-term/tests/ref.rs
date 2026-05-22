@@ -5,21 +5,21 @@ use std::fs::{
 use std::io::Read;
 use std::path::Path;
 
-use alacritty_terminal::ansi::Processor;
-use alacritty_terminal::event::{
+use nerv_term::ansi::Processor;
+use nerv_term::event::{
     Event,
     EventListener,
 };
-use alacritty_terminal::grid::{
+use nerv_term::grid::{
     Dimensions,
     Grid,
 };
-use alacritty_terminal::index::{
+use nerv_term::index::{
     Column,
     Line,
 };
-use alacritty_terminal::term::cell::Cell;
-use alacritty_terminal::term::{
+use nerv_term::term::cell::Cell;
+use nerv_term::term::{
     ShellState,
     SizeInfo,
     Term,

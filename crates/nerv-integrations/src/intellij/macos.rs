@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use fig_util::macos::BUNDLE_CONTENTS_INFO_PLIST_PATH;
-use fig_util::terminal::IntelliJVariant;
+use nerv_util::macos::BUNDLE_CONTENTS_INFO_PLIST_PATH;
+use nerv_util::terminal::IntelliJVariant;
 use macos_utils::url::path_for_application;
 use serde::Deserialize;
 

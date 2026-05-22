@@ -9,24 +9,24 @@ use std::task::{
 use std::time::Duration;
 
 use anyhow::Result;
-use fig_ipc::{
+use nerv_ipc::{
     BufferedReader,
     RecvMessage,
     SendMessage,
 };
-use fig_proto::FigProtobufEncodable;
-use fig_proto::figterm::{
+use nerv_proto::FigProtobufEncodable;
+use nerv_proto::figterm::{
     FigtermRequestMessage,
     FigtermResponseMessage,
 };
-use fig_proto::remote::hostbound::Handshake;
-use fig_proto::remote::{
+use nerv_proto::remote::hostbound::Handshake;
+use nerv_proto::remote::{
     Clientbound,
     Hostbound,
     clientbound,
     hostbound,
 };
-use fig_util::{
+use nerv_util::{
     PTY_BINARY_NAME,
     directories,
     gen_hex_string,
@@ -115,7 +115,7 @@ impl AsyncWrite for MessageSink {
 
 async fn get_forwarded_stream() -> Result<(MessageSource, MessageSink, Option<JoinHandle<()>>)> {
     #[cfg(target_os = "linux")]
-    if fig_util::system_info::in_wsl() {
+    if nerv_util::system_info::in_wsl() {
         use std::process::Stdio;
 
         use anyhow::Context as AnyhowContext;
@@ -144,7 +144,7 @@ async fn get_forwarded_stream() -> Result<(MessageSource, MessageSink, Option<Jo
     }
 
     let socket = directories::remote_socket_path()?;
-    let stream = fig_ipc::socket_connect_timeout(&socket, Duration::from_secs(5)).await?;
+    let stream = nerv_ipc::socket_connect_timeout(&socket, Duration::from_secs(5)).await?;
     let (reader, writer) = tokio::io::split(stream);
     Ok((MessageSource::UnixStream(reader), MessageSink::UnixStream(writer), None))
 }
@@ -214,7 +214,7 @@ pub async fn spawn_figterm_ipc(
                             res = response_rx.recv_async() => {
                                 match res {
                                     Ok(response) => {
-                                        match response.encode_fig_protobuf() {
+                                        match response.encode_nerv_protobuf() {
                                             Ok(protobuf) => {
                                                 if let Err(err) = write_half.write_all(&protobuf).await {
                                                     error!(%err, "Failed to send response");

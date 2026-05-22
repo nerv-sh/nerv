@@ -17,21 +17,21 @@ use fig_api_client::model::{
     ProgrammingLanguage,
     RecommendationsInput,
 };
-use fig_proto::figterm::figterm_response_message::Response as FigtermResponse;
-use fig_proto::figterm::{
+use nerv_proto::figterm::figterm_response_message::Response as FigtermResponse;
+use nerv_proto::figterm::{
     FigtermResponseMessage,
     InlineShellCompletionAcceptRequest,
     InlineShellCompletionRequest,
     InlineShellCompletionResponse,
     InlineShellCompletionSetEnabledRequest,
 };
-use fig_settings::history::CommandInfo;
+use nerv_settings::history::CommandInfo;
 use fig_telemetry::{
     AppTelemetryEvent,
     SuggestionState,
 };
-use fig_util::Shell;
-use fig_util::terminal::{
+use nerv_util::Shell;
+use nerv_util::terminal::{
     current_terminal,
     current_terminal_version,
 };
@@ -60,20 +60,20 @@ static INLINE_ENABLED: Mutex<bool> = Mutex::const_new(true);
 static LAST_RECEIVED: Mutex<Option<SystemTime>> = Mutex::const_new(None);
 
 static CACHE_ENABLED: LazyLock<bool> =
-    LazyLock::new(|| fig_os_shim::Env::new().q_inline_shell_completion_cache_enabled());
+    LazyLock::new(|| nerv_os::Env::new().q_inline_shell_completion_cache_enabled());
 static COMPLETION_CACHE: LazyLock<Mutex<CompletionCache>> = LazyLock::new(|| Mutex::new(CompletionCache::new()));
 
 static TELEMETRY_QUEUE: Mutex<TelemetryQueue> = Mutex::const_new(TelemetryQueue::new());
 
 static HISTORY_COUNT: LazyLock<usize> = LazyLock::new(|| {
-    fig_os_shim::Env::new()
+    nerv_os::Env::new()
         .q_inline_shell_completion_history_count()
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(HISTORY_COUNT_DEFAULT)
 });
 static DEBOUNCE_DURATION: LazyLock<Duration> = LazyLock::new(|| {
-    fig_os_shim::Env::new()
+    nerv_os::Env::new()
         .q_inline_shell_completion_debounce_ms()
         .ok()
         .and_then(|s| s.parse().ok())
@@ -422,7 +422,7 @@ fn clean_completion(response: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use fig_settings::history::{
+    use nerv_settings::history::{
         HistoryColumn,
         Order,
         OrderBy,
@@ -483,7 +483,7 @@ mod tests {
     #[ignore = "not in CI"]
     #[tokio::test]
     async fn test_inline_suggestion_prompt() {
-        let history = fig_settings::history::History::new();
+        let history = nerv_settings::history::History::new();
         let commands = history
             .rows(
                 Some(WhereExpression::NotNull(HistoryColumn::ExitCode)),

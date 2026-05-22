@@ -29,11 +29,11 @@ use std::time::{
     SystemTime,
 };
 
-use alacritty_terminal::Term;
-use alacritty_terminal::ansi::Processor;
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{
+use nerv_term::Term;
+use nerv_term::ansi::Processor;
+use nerv_term::event::EventListener;
+use nerv_term::grid::Dimensions;
+use nerv_term::term::{
     ShellState,
     SizeInfo,
     TextBuffer,
@@ -47,37 +47,37 @@ use bytes::BytesMut;
 use cfg_if::cfg_if;
 use clap::Parser;
 use cli::Cli;
-use fig_log::{
+use nerv_log::{
     LogArgs,
     initialize_logging,
 };
-use fig_os_shim::{
+use nerv_os::{
     Context,
     Env,
 };
-use fig_proto::local::{
+use nerv_proto::local::{
     self,
     EnvironmentVariable,
     TerminalCursorCoordinates,
 };
-use fig_proto::remote::Hostbound;
-use fig_proto::remote_hooks::{
+use nerv_proto::remote::Hostbound;
+use nerv_proto::remote_hooks::{
     hook_to_message,
     new_edit_buffer_hook,
 };
-use fig_settings::state;
-use fig_util::consts::CLI_BINARY_NAME;
-use fig_util::env_var::{
+use nerv_settings::state;
+use nerv_util::consts::CLI_BINARY_NAME;
+use nerv_util::env_var::{
     Q_LOG_LEVEL,
     Q_SHELL,
     Q_TERM,
     QTERM_SESSION_ID,
 };
-use fig_util::process_info::{
+use nerv_util::process_info::{
     Pid,
     PidExt,
 };
-use fig_util::{
+use nerv_util::{
     PRODUCT_NAME,
     PTY_BINARY_NAME,
     Terminal as FigTerminal,
@@ -150,7 +150,7 @@ static SHELL_ENVIRONMENT_VARIABLES: Mutex<Vec<EnvironmentVariable>> = Mutex::new
 static SHELL_ALIAS: Mutex<Option<String>> = Mutex::new(None);
 
 static USER_ENABLED_SHELLS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    fig_settings::state::get("user.enabled-shells")
+    nerv_settings::state::get("user.enabled-shells")
         .ok()
         .flatten()
         .unwrap_or_default()
@@ -234,26 +234,26 @@ async fn _should_install_remote_ssh_integration(
     uuid: String,
     remote_host: String,
     main_loop_tx: Sender<MainLoopEvent>,
-    remote_receiver: Receiver<fig_proto::remote::Clientbound>,
+    remote_receiver: Receiver<nerv_proto::remote::Clientbound>,
     remote_sender: Sender<Hostbound>,
     term: &Term<EventHandler>,
     pty_master: &mut Box<dyn crate::pty::AsyncMasterPty + Send + Sync>,
     key_interceptor: &mut KeyInterceptor,
 ) -> Option<bool> {
-    use fig_proto::remote::clientbound;
+    use nerv_proto::remote::clientbound;
 
-    let remote_install_setting = fig_settings::settings::get_string_or("ssh.remote-prompt", "ask".into());
+    let remote_install_setting = nerv_settings::settings::get_string_or("ssh.remote-prompt", "ask".into());
     if remote_install_setting == "never" {
         return Some(false);
     }
 
     let key = format!("ssh.remote-prompt.disable-host.{remote_host}");
-    let disable_host = fig_settings::state::get_bool_or(key, false);
+    let disable_host = nerv_settings::state::get_bool_or(key, false);
     if disable_host {
         return Some(false);
     }
 
-    let prompt_timeout: u64 = fig_settings::settings::get_int_or("ssh.remote-prompt.timeout", 2000)
+    let prompt_timeout: u64 = nerv_settings::settings::get_int_or("ssh.remote-prompt.timeout", 2000)
         .try_into()
         .unwrap_or(2000);
 
@@ -476,7 +476,7 @@ fn launch_shell(command: Option<&[String]>) -> Result<()> {
 }
 
 fn figterm_main(command: Option<&[String]>) -> Result<()> {
-    fig_settings::settings::init_global().ok();
+    nerv_settings::settings::init_global().ok();
     fig_telemetry::init_global_telemetry_emitter();
 
     let context = Context::new();
@@ -490,7 +490,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
         std::env::set_var(QTERM_SESSION_ID, &session_id);
     }
 
-    let parent_id = fig_os_shim::Env::new().q_parent().ok();
+    let parent_id = nerv_os::Env::new().q_parent().ok();
 
     let mut terminal = SystemTerminal::new_from_stdio()?;
     let screen_size = terminal.get_screen_size()?;
@@ -515,7 +515,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
     }) {
         Ok(logger_guard) => Some(logger_guard),
         Err(err) => {
-            if !fig_settings::state::get_bool_or("pty.suppress_log_error", false) {
+            if !nerv_settings::state::get_bool_or("pty.suppress_log_error", false) {
                 // let id = capture_anyhow(&err);
                 eprintln!("Fig failed to init logger: {err:?}");
             }
@@ -578,7 +578,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
         let mut processor = Processor::new();
         let size = SizeInfo::new(pty_size.rows as usize, pty_size.cols as usize);
         let event_sender = EventHandler::new(remote_sender.clone(), history_sender.clone(), main_loop_tx.clone());
-        let mut term = alacritty_terminal::Term::new(size, event_sender, 1, session_id.clone());
+        let mut term = nerv_term::Term::new(size, event_sender, 1, session_id.clone());
 
         #[cfg(target_os = "windows")]
         term.set_windows_delay_end_prompt(true);
@@ -603,7 +603,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
             newline_mode: false,
         };
 
-        let ai_enabled = fig_settings::settings::get_bool_or("ai.terminal-hash-sub", true);
+        let ai_enabled = nerv_settings::settings::get_bool_or("ai.terminal-hash-sub", true);
 
         if let Ok(shell) = get_parent_shell() {
             let path = std::path::Path::new(&shell);
@@ -639,7 +639,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                 MainLoopEvent::Insert { insert, unlock, bracketed, execute } => {
                                     use bstr::ByteSlice;
                                     if bracketed {
-                                        if term.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE) {
+                                        if term.mode().contains(nerv_term::term::TermMode::BRACKETED_PASTE) {
                                             master.write_all(b"\x1b[200~").await?;
                                             master.write_all(&insert.replace(b"\x1b", "")).await?;
                                             master.write_all(b"\x1b[201~").await?;
@@ -772,7 +772,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                                     .and_then(|b| String::from_utf8(b.to_vec()).ok())
                                                     .unwrap_or_default();
                                                 let context = shell_state_to_context(term.shell_state());
-                                                let hook = fig_proto::remote_hooks::new_intercepted_key_hook(context, action, s);
+                                                let hook = nerv_proto::remote_hooks::new_intercepted_key_hook(context, action, s);
                                                 remote_sender.send(hook_to_message(hook)).unwrap();
 
                                                 if event.key == KeyCode::Escape {
@@ -814,7 +814,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                     }
                                     Ok((None, InputEvent::Paste(string))) => {
                                         // Pass through bracketed pastes.
-                                        if term.mode().contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE) {
+                                        if term.mode().contains(nerv_term::term::TermMode::BRACKETED_PASTE) {
                                             write_buffer.extend(b"\x1b[200~");
                                             write_buffer.extend(string.replace('\x1b', "").as_bytes());
                                             write_buffer.extend(b"\x1b[201~");
@@ -977,7 +977,7 @@ fn main() {
     let cli = Cli::parse();
     let command = cli.command.as_deref();
 
-    logger::stdio_debug_log(format!("{Q_LOG_LEVEL}={}", fig_log::get_log_level()));
+    logger::stdio_debug_log(format!("{Q_LOG_LEVEL}={}", nerv_log::get_log_level()));
 
     if !state::get_bool_or("qterm.enabled", true) {
         println!("[NOTE] qterm is disabled. Autocomplete will not work.");

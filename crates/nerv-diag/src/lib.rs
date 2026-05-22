@@ -1,19 +1,19 @@
 #![allow(clippy::ref_option_ref)]
 use std::collections::BTreeMap;
 
-use fig_os_shim::{
+use nerv_os::{
     Context,
     Os,
     PlatformProvider,
 };
 use fig_telemetry::InstallMethod;
-use fig_util::consts::build::HASH;
-use fig_util::manifest::manifest;
-use fig_util::system_info::{
+use nerv_util::consts::build::HASH;
+use nerv_util::manifest::manifest;
+use nerv_util::system_info::{
     OSVersion,
     os_version,
 };
-use fig_util::{
+use nerv_util::{
     Shell,
     Terminal,
 };
@@ -60,7 +60,7 @@ pub struct BuildDetails {
 
 impl BuildDetails {
     pub fn new() -> BuildDetails {
-        let date = fig_util::consts::build::DATETIME
+        let date = nerv_util::consts::build::DATETIME
             .and_then(|input| OffsetDateTime::parse(input, &Rfc3339).ok())
             .and_then(|time| {
                 let rfc3339 = time.format(&Rfc3339).ok()?;
@@ -133,7 +133,7 @@ impl EnvVarDiagnostic {
     fn new() -> EnvVarDiagnostic {
         let env_vars = std::env::vars()
             .filter(|(key, _)| {
-                let fig_var = fig_util::env_var::ALL.contains(&key.as_str());
+                let fig_var = nerv_util::env_var::ALL.contains(&key.as_str());
                 let other_var = [
                     // General env vars
                     "SHELL",
@@ -193,7 +193,7 @@ pub struct CurrentEnvironment {
 
 impl CurrentEnvironment {
     async fn new() -> CurrentEnvironment {
-        use fig_util::process_info::{
+        use nerv_util::process_info::{
             Pid,
             PidExt,
         };
@@ -223,11 +223,11 @@ impl CurrentEnvironment {
         let terminal = Terminal::parent_terminal(&ctx);
         let install_method = fig_telemetry::get_install_method();
 
-        let in_cloudshell = fig_util::system_info::in_cloudshell();
-        let in_ssh = fig_util::system_info::in_ssh();
-        let in_ci = fig_util::system_info::in_ci();
-        let in_wsl = fig_util::system_info::in_wsl();
-        let in_codespaces = fig_util::system_info::in_codespaces();
+        let in_cloudshell = nerv_util::system_info::in_cloudshell();
+        let in_ssh = nerv_util::system_info::in_ssh();
+        let in_ci = nerv_util::system_info::in_ci();
+        let in_wsl = nerv_util::system_info::in_wsl();
+        let in_codespaces = nerv_util::system_info::in_codespaces();
 
         CurrentEnvironment {
             shell_path,

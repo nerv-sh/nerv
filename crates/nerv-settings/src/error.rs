@@ -1,6 +1,6 @@
 use std::sync::PoisonError;
 
-use fig_util::directories;
+use nerv_util::directories;
 use thiserror::Error;
 
 // A cloneable error
@@ -15,7 +15,7 @@ pub enum Error {
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
     #[error(transparent)]
-    FigUtilError(#[from] fig_util::Error),
+    FigUtilError(#[from] nerv_util::Error),
     #[error("settings file is not a json object")]
     SettingsNotObject,
     #[error(transparent)]
@@ -48,7 +48,7 @@ mod tests {
         vec![
             std::io::Error::new(std::io::ErrorKind::InvalidData, "oops").into(),
             serde_json::from_str::<()>("oops").unwrap_err().into(),
-            fig_util::Error::UnsupportedPlatform.into(),
+            nerv_util::Error::UnsupportedPlatform.into(),
             Error::SettingsNotObject,
             directories::DirectoryError::NoHomeDirectory.into(),
             Error::MemoryBackendNotUsed,

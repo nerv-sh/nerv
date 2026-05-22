@@ -6,7 +6,7 @@ use std::io::{
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-use fig_util::directories;
+use nerv_util::directories;
 use inner::Inner;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -403,7 +403,7 @@ impl std::fmt::Display for WhereExpression {
 
 #[cfg(test)]
 mod tests {
-    use fig_util::CLI_BINARY_NAME;
+    use nerv_util::CLI_BINARY_NAME;
 
     use super::*;
 

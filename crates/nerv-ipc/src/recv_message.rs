@@ -2,8 +2,8 @@ use std::io;
 
 use async_trait::async_trait;
 use bytes::Buf;
-use fig_proto::prost::Message;
-use fig_proto::{
+use nerv_proto::prost::Message;
+use nerv_proto::{
     FigMessage,
     ReflectMessage,
 };
@@ -41,7 +41,7 @@ where
                     return Ok(Some(message.decode()?));
                 },
                 // If the message is incomplete, read more into the buffer
-                Err(fig_proto::FigMessageParseError::Incomplete(_, _)) => {
+                Err(nerv_proto::FigMessageParseError::Incomplete(_, _)) => {
                     let bytes = self.inner.read_buf(&mut self.buffer).await?;
 
                     // If the buffer is empty, we've reached EOF
@@ -79,12 +79,12 @@ mod tests {
         BufferedReader::new(inner)
     }
 
-    fn test_message_small() -> fig_proto::local::LocalMessage {
-        fig_proto::hooks::hook_to_message(fig_proto::hooks::new_hide_hook())
+    fn test_message_small() -> nerv_proto::local::LocalMessage {
+        nerv_proto::hooks::hook_to_message(nerv_proto::hooks::new_hide_hook())
     }
 
-    fn test_message_large() -> fig_proto::local::LocalMessage {
-        fig_proto::hooks::hook_to_message(fig_proto::hooks::new_edit_buffer_hook(
+    fn test_message_large() -> nerv_proto::local::LocalMessage {
+        nerv_proto::hooks::hook_to_message(nerv_proto::hooks::new_edit_buffer_hook(
             None,
             "A".repeat(10000),
             0,
@@ -141,6 +141,6 @@ mod tests {
     async fn invalid_header() {
         let mut mock = mock(vec![b'f', b'o', b'o']);
         mock.inner.set_position(0);
-        assert!(mock.recv_message::<fig_proto::local::LocalMessage>().await.is_err());
+        assert!(mock.recv_message::<nerv_proto::local::LocalMessage>().await.is_err());
     }
 }

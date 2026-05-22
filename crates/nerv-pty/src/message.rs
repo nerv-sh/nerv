@@ -7,33 +7,33 @@ use std::time::{
     SystemTime,
 };
 
-use alacritty_terminal::Term;
-use alacritty_terminal::term::ShellState;
+use nerv_term::Term;
+use nerv_term::term::ShellState;
 use anyhow::Result;
-use fig_proto::fig::{
+use nerv_proto::fig::{
     EnvironmentVariable,
     RunProcessResponse,
 };
-use fig_proto::figterm::figterm_request_message::Request as FigtermRequest;
-use fig_proto::figterm::figterm_response_message::Response as FigtermResponse;
-use fig_proto::figterm::intercept_request::{
+use nerv_proto::figterm::figterm_request_message::Request as FigtermRequest;
+use nerv_proto::figterm::figterm_response_message::Response as FigtermResponse;
+use nerv_proto::figterm::intercept_request::{
     InterceptCommand,
     SetFigjsIntercepts,
     SetFigjsVisible,
 };
-use fig_proto::figterm::{
+use nerv_proto::figterm::{
     self,
     FigtermRequestMessage,
     FigtermResponseMessage,
     TelemetryRequest,
 };
-use fig_proto::remote::{
+use nerv_proto::remote::{
     Clientbound,
     Hostbound,
     clientbound,
     hostbound,
 };
-use fig_util::env_var::PROCESS_LAUNCHED_BY_Q;
+use nerv_util::env_var::PROCESS_LAUNCHED_BY_Q;
 use flume::Sender;
 use tokio::process::Command;
 use tracing::{

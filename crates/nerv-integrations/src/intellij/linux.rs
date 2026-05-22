@@ -2,8 +2,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use fig_util::partitioned_compare;
-use fig_util::terminal::IntelliJVariant;
+use nerv_util::partitioned_compare;
+use nerv_util::terminal::IntelliJVariant;
 use serde::Deserialize;
 use tracing::debug;
 

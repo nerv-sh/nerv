@@ -11,7 +11,7 @@ pub enum Error {
     #[error("timeout")]
     Timeout,
     #[error(transparent)]
-    Dir(#[from] fig_util::directories::DirectoryError),
+    Dir(#[from] nerv_util::directories::DirectoryError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[cfg(unix)]
@@ -32,7 +32,7 @@ pub enum ConnectError {
 #[derive(Debug, Error)]
 pub enum SendError {
     #[error(transparent)]
-    Encode(#[from] fig_proto::FigMessageEncodeError),
+    Encode(#[from] nerv_proto::FigMessageEncodeError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -42,9 +42,9 @@ pub enum RecvError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
-    Parse(#[from] fig_proto::FigMessageParseError),
+    Parse(#[from] nerv_proto::FigMessageParseError),
     #[error(transparent)]
-    Decode(#[from] fig_proto::FigMessageDecodeError),
+    Decode(#[from] nerv_proto::FigMessageDecodeError),
     #[error("invalid message type")]
     InvalidMessageType,
 }
@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn is_disconnect() {
-        assert!(!RecvError::Decode(fig_proto::FigMessageDecodeError::NameNotValid("test".to_string())).is_disconnect());
+        assert!(!RecvError::Decode(nerv_proto::FigMessageDecodeError::NameNotValid("test".to_string())).is_disconnect());
         assert!(RecvError::Io(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "error")).is_disconnect());
         assert!(!RecvError::Io(std::io::Error::new(std::io::ErrorKind::WouldBlock, "error")).is_disconnect());
     }

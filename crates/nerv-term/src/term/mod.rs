@@ -216,7 +216,7 @@ pub struct ShellState {
     /// Command info
     pub command_info: Option<CommandInfo>,
     /// Fig Log Level
-    pub fig_log_level: Option<String>,
+    pub nerv_log_level: Option<String>,
     /// OSC Lock
     pub osc_lock: bool,
 }
@@ -833,7 +833,7 @@ impl<T> Term<T> {
         trace!("New command cursor: {:?}", self.shell_state.cmd_cursor);
 
         // Add work around for emojis
-        if let Ok(cursor_offset) = fig_os_shim::Env::new().q_prompt_offset_workaround() {
+        if let Ok(cursor_offset) = nerv_os::Env::new().q_prompt_offset_workaround() {
             if let Ok(offset) = cursor_offset.parse::<i32>() {
                 self.shell_state.cmd_cursor = self.shell_state.cmd_cursor.map(|cursor| Point {
                     column: Column((cursor.column.0 as i32 - offset).max(0) as usize),
@@ -1907,15 +1907,15 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
-    fn log(&mut self, fig_log_level: &str) {
+    fn log(&mut self, nerv_log_level: &str) {
         if self.shell_state.osc_lock {
             return;
         }
-        let fig_log_level = fig_log_level.trim().to_owned();
-        trace!("Fig log: {fig_log_level:?}");
+        let nerv_log_level = nerv_log_level.trim().to_owned();
+        trace!("Fig log: {nerv_log_level:?}");
 
-        self.shell_state.fig_log_level = Some(fig_log_level.clone());
-        self.event_proxy.log_level_event(Some(fig_log_level));
+        self.shell_state.nerv_log_level = Some(nerv_log_level.clone());
+        self.event_proxy.log_level_event(Some(nerv_log_level));
     }
 
     #[inline]
@@ -2056,7 +2056,7 @@ pub mod test {
     /// # Examples
     ///
     /// ```rust
-    /// use alacritty_terminal::term::test::mock_term;
+    /// use nerv_term::term::test::mock_term;
     ///
     /// // Create a terminal with the following cells:
     /// //
