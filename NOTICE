@@ -11,17 +11,39 @@ or available at <https://www.apache.org/licenses/LICENSE-2.0>.
 This product includes software developed by Fig (now part of AWS):
     withfig/autocomplete   <https://github.com/withfig/autocomplete>
     Copyright (c) 2021 Hercules Labs Inc. (Fig)
-    Licensed under the MIT License.
+    Licensed under the ISC License.
 
 The bundled CLI specifications (vendored under `vendor/withfig-autocomplete/`)
-remain under their original MIT license. Build artifacts derived from these
-specifications (under `specs-prebuilt/` in releases) preserve the same MIT
-attribution.
+remain under their original ISC license. Build artifacts derived from these
+specifications preserve the same ISC attribution.
 
 Pinned upstream commit (M0-9):
     aef52acff84c45edde61ae610cc2c964802b9a38
 
-This pin is also recorded in the squash commit added by `git subtree add`,
-and is monitored every 2 weeks by `.github/workflows/upstream-monitor.yml`.
+---
+
+This product also includes software developed by Amazon Web Services
+(the preserved pre-Amazon-Q Fig codebase):
+    aws/amazon-q-developer-cli-autocomplete
+        <https://github.com/aws/amazon-q-developer-cli-autocomplete>
+    Copyright (c) Amazon.com, Inc. or its affiliates.
+    Dual-licensed under the Apache License, Version 2.0 AND the MIT License.
+
+The vendored sources (under `vendor/aws-autocomplete/`) remain under their
+original Apache-2.0 + MIT dual license. License texts are preserved at
+`vendor/aws-autocomplete/LICENSE.APACHE` and `vendor/aws-autocomplete/LICENSE.MIT`.
+
+Crates absorbed into `crates/nerv-{pty,term,ipc,proto,integrations,os,util,
+settings,log,diag}/` retain their original Apache-2.0 + MIT license headers.
+Upstream contributors are credited in `AUTHORS.md` (added during M1 0–4주차
+per PLAN.md §14).
+
+Pinned upstream commit (M0-1, v0.6):
+    b654a1beb880951dd2343120bb867659622eecd9
+
+---
+
+Both pins are also recorded in the squash commits added by `git subtree add`,
+and are monitored every 2 weeks by `.github/workflows/upstream-monitor.yml`.
 Fork policy (3-month inactivity or archived → forward-only fork) is
 documented in `docs/spec-conversion-policy.md` §5.3.

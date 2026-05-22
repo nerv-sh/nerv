@@ -1,13 +1,17 @@
 name: upstream-monitor
 
-# Watch withfig/autocomplete for staleness and archival.
+# Watch vendored upstreams for staleness and archival.
 # Spec contract: docs/spec-conversion-policy.md §5.3
 #
-# Triggers a `fork:trigger` issue when EITHER:
+# Triggers a `fork:trigger:<upstream>` issue when EITHER:
 #   - upstream is archived, OR
 #   - upstream's main HEAD has not advanced for >= 90 days.
 #
 # Runs every 2 weeks (1st and 15th at 00:00 UTC) and on manual dispatch.
+#
+# Upstreams monitored (PLAN.md v0.6 §14):
+#   - withfig/autocomplete (M0-9, ISC, TS specs)
+#   - aws/amazon-q-developer-cli-autocomplete (M0-1 v0.6, Apache+MIT, Rust+TS engine)
 
 on:
   schedule:
@@ -19,18 +23,32 @@ permissions:
   contents: read
 
 env:
-  UPSTREAM_OWNER: withfig
-  UPSTREAM_REPO: autocomplete
   STALE_DAYS: 90  # spec-conversion-policy.md §5.3
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - upstream_owner: withfig
+            upstream_repo: autocomplete
+            slug: withfig
+            pin_label: M0-9
+            pinned_sha: aef52acff84c45edde61ae610cc2c964802b9a38
+          - upstream_owner: aws
+            upstream_repo: amazon-q-developer-cli-autocomplete
+            slug: aws
+            pin_label: M0-1 (v0.6)
+            pinned_sha: b654a1beb880951dd2343120bb867659622eecd9
     steps:
       - name: Inspect upstream
         id: upstream
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_OWNER: ${{ matrix.upstream_owner }}
+          UPSTREAM_REPO: ${{ matrix.upstream_repo }}
         run: |
           set -euo pipefail
 
@@ -57,11 +75,12 @@ jobs:
           echo "last_sha=$last_sha"   >> "$GITHUB_OUTPUT"
 
           {
-            echo "## Upstream status — withfig/autocomplete"
+            echo "## Upstream status — ${UPSTREAM_OWNER}/${UPSTREAM_REPO}"
             echo ""
             echo "- archived: \`$archived\`"
             echo "- last commit: \`$last_commit\` (${age_days} days ago)"
             echo "- last SHA: \`$last_sha\`"
+            echo "- pinned (${{ matrix.pin_label }}): \`${{ matrix.pinned_sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Decide trigger
@@ -85,35 +104,42 @@ jobs:
         if: steps.decide.outputs.trigger == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_OWNER: ${{ matrix.upstream_owner }}
+          UPSTREAM_REPO: ${{ matrix.upstream_repo }}
+          SLUG: ${{ matrix.slug }}
+          PIN_LABEL: ${{ matrix.pin_label }}
+          PINNED_SHA: ${{ matrix.pinned_sha }}
         run: |
           set -euo pipefail
-          # De-duplicate: only open if no existing open issue with the same label.
+          # De-duplicate per upstream: only open if no existing open issue
+          # carries this upstream's slug label.
+          label="fork:trigger:${SLUG}"
           existing=$(gh issue list \
             --state open \
-            --label "fork:trigger" \
+            --label "$label" \
             --json number \
             --jq 'length')
           if [ "$existing" != "0" ]; then
-            echo "existing fork:trigger issue is already open — skipping" \
+            echo "existing ${label} issue is already open — skipping" \
               >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
           gh issue create \
-            --title "fork: trigger — withfig/autocomplete inactivity" \
-            --label "fork:trigger" \
+            --title "fork: trigger — ${UPSTREAM_OWNER}/${UPSTREAM_REPO} inactivity" \
+            --label "$label" \
             --body "$(cat <<EOF
-          The upstream \`withfig/autocomplete\` repository has triggered the
-          fork policy (see \`docs/spec-conversion-policy.md\` §5.3).
+          The upstream \`${UPSTREAM_OWNER}/${UPSTREAM_REPO}\` repository has
+          triggered the fork policy (see \`docs/spec-conversion-policy.md\` §5.3).
 
           - **Reason**: ${{ steps.decide.outputs.reason }}
           - **Last upstream commit**: ${{ steps.upstream.outputs.last_commit }}
           - **Last upstream SHA**: \`${{ steps.upstream.outputs.last_sha }}\`
-          - **Currently pinned (M0-9)**: \`aef52acff84c45edde61ae610cc2c964802b9a38\`
+          - **Currently pinned (${PIN_LABEL})**: \`${PINNED_SHA}\`
 
           Action items:
           1. Confirm finding — manually inspect the upstream repository.
-          2. Decide: forward-only fork to \`nerv-sh/autocomplete-specs\`,
+          2. Decide: forward-only fork to \`nerv-sh/<fork-name>\`,
              or extend the deadline if upstream activity has resumed.
           3. If forking, follow \`docs/spec-conversion-policy.md\` §5.3 steps 1–5
              and update this repo's \`vendor/\` subtree + \`NOTICE\`.
