@@ -1,8 +1,5 @@
 use std::collections::BTreeMap;
-use std::ffi::{
-    OsStr,
-    OsString,
-};
+use std::ffi::{OsStr, OsString};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
@@ -45,11 +42,14 @@ impl EnvEntry {
 fn get_base_env() -> BTreeMap<OsString, EnvEntry> {
     std::env::vars_os()
         .map(|(key, value)| {
-            (EnvEntry::map_key(key.clone()), EnvEntry {
-                is_from_base_env: true,
-                preferred_key: key,
-                value,
-            })
+            (
+                EnvEntry::map_key(key.clone()),
+                EnvEntry {
+                    is_from_base_env: true,
+                    preferred_key: key,
+                    value,
+                },
+            )
         })
         .collect()
 }
@@ -142,11 +142,14 @@ impl CommandBuilder {
     {
         let key: OsString = key.as_ref().into();
         let value: OsString = value.as_ref().into();
-        self.envs.insert(EnvEntry::map_key(key.clone()), EnvEntry {
-            is_from_base_env: false,
-            preferred_key: key,
-            value,
-        });
+        self.envs.insert(
+            EnvEntry::map_key(key.clone()),
+            EnvEntry {
+                is_from_base_env: false,
+                preferred_key: key,
+                value,
+            },
+        );
     }
 
     pub fn env_remove<K>(&mut self, key: K)
@@ -221,7 +224,8 @@ impl CommandBuilder {
                 .ok_or_else(|| anyhow::anyhow!("argument cannot be represented as utf8"))?;
             strs.push(s);
         }
-        shlex::try_join(strs).map_err(|e| anyhow::anyhow!("Failed to join command arguments: {}", e))
+        shlex::try_join(strs)
+            .map_err(|e| anyhow::anyhow!("Failed to join command arguments: {}", e))
     }
 }
 
@@ -328,7 +332,10 @@ impl CommandBuilder {
             use std::ffi::CStr;
             use std::str;
             let shell = unsafe { CStr::from_ptr((*ent).pw_shell) };
-            shell.to_str().map(str::to_owned).context("failed to resolve shell")
+            shell
+                .to_str()
+                .map(str::to_owned)
+                .context("failed to resolve shell")
         }
     }
 
@@ -344,7 +351,9 @@ impl CommandBuilder {
             use std::ffi::CStr;
             use std::str;
             let home = unsafe { CStr::from_ptr((*ent).pw_dir) };
-            home.to_str().map(str::to_owned).context("failed to resolve home dir")
+            home.to_str()
+                .map(str::to_owned)
+                .context("failed to resolve home dir")
         }
     }
 }
@@ -353,7 +362,9 @@ impl CommandBuilder {
 impl CommandBuilder {
     fn search_path(&self, exe: &OsStr) -> OsString {
         if let Some(path) = self.get_env("PATH") {
-            let extensions = self.get_env("PATHEXT").unwrap_or_else(|| OsStr::new(".EXE"));
+            let extensions = self
+                .get_env("PATHEXT")
+                .unwrap_or_else(|| OsStr::new(".EXE"));
             for path in std::env::split_paths(&path) {
                 // Check for exactly the user's string in this path dir
                 let candidate = path.join(exe);
@@ -382,7 +393,9 @@ impl CommandBuilder {
     pub fn current_directory(&self) -> Option<Vec<u16>> {
         use std::path::Path;
 
-        let home: Option<&OsStr> = self.get_env("USERPROFILE").filter(|path| Path::new(path).is_dir());
+        let home: Option<&OsStr> = self
+            .get_env("USERPROFILE")
+            .filter(|path| Path::new(path).is_dir());
         let cwd: Option<&OsStr> = self.cwd.as_deref().filter(|path| Path::new(path).is_dir());
         let dir: Option<&OsStr> = cwd.or(home);
 
@@ -430,15 +443,22 @@ impl CommandBuilder {
     }
 
     pub fn get_shell(&self) -> anyhow::Result<String> {
-        let exe: OsString = self.get_env("ComSpec").unwrap_or_else(|| OsStr::new("cmd.exe")).into();
-        Ok(exe.into_string().unwrap_or_else(|_| "%CompSpec%".to_string()))
+        let exe: OsString = self
+            .get_env("ComSpec")
+            .unwrap_or_else(|| OsStr::new("cmd.exe"))
+            .into();
+        Ok(exe
+            .into_string()
+            .unwrap_or_else(|_| "%CompSpec%".to_string()))
     }
 
     pub fn cmdline(&self) -> anyhow::Result<(Vec<u16>, Vec<u16>)> {
         let mut cmdline = Vec::<u16>::new();
 
         let exe: OsString = if self.is_default_prog() {
-            self.get_env("ComSpec").unwrap_or_else(|| OsStr::new("cmd.exe")).into()
+            self.get_env("ComSpec")
+                .unwrap_or_else(|| OsStr::new("cmd.exe"))
+                .into()
         } else {
             self.search_path(&self.args[0])
         };
@@ -469,7 +489,11 @@ impl CommandBuilder {
     fn append_quoted(arg: &OsStr, cmdline: &mut Vec<u16>) {
         if !arg.is_empty()
             && !arg.encode_wide().any(|c| {
-                c == ' ' as u16 || c == '\t' as u16 || c == '\n' as u16 || c == '\x0b' as u16 || c == '\"' as u16
+                c == ' ' as u16
+                    || c == '\t' as u16
+                    || c == '\n' as u16
+                    || c == '\x0b' as u16
+                    || c == '\"' as u16
             })
         {
             cmdline.extend(arg.encode_wide());
@@ -516,6 +540,9 @@ mod tests {
     fn test_unix_command_line() {
         let mut cb = CommandBuilder::new("/bin/sh");
         cb.args(["-c", "echo hello"]);
-        assert_eq!(cb.as_unix_command_line().unwrap(), "/bin/sh -c 'echo hello'");
+        assert_eq!(
+            cb.as_unix_command_line().unwrap(),
+            "/bin/sh -c 'echo hello'"
+        );
     }
 }

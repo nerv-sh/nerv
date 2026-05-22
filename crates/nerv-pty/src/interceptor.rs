@@ -3,17 +3,10 @@ use std::sync::LazyLock;
 use anyhow::Result;
 use dashmap::DashMap;
 use nerv_proto::figterm::Action;
-use nerv_settings::keybindings::{
-    KeyBinding,
-    KeyBindings,
-};
+use nerv_settings::keybindings::{KeyBinding, KeyBindings};
 use tracing::trace;
 
-use crate::input::{
-    KeyCode,
-    KeyEvent,
-    Modifiers,
-};
+use crate::input::{KeyCode, KeyEvent, Modifiers};
 
 // TODO: remove hardcoded list of global actions and use `availability`
 const GLOBAL_ACTIONS: &[&str] = &["toggleAutocomplete", "showAutocomplete"];
@@ -32,7 +25,7 @@ pub fn key_from_text(text: impl AsRef<str>) -> Option<KeyEvent> {
         match remaining.split_once('+') {
             Some(("", "")) | None => {
                 break remaining;
-            },
+            }
             Some((modifier_txt, key)) => {
                 modifiers |= match modifier_txt {
                     "ctrl" | "control" => Modifiers::CTRL,
@@ -42,7 +35,7 @@ pub fn key_from_text(text: impl AsRef<str>) -> Option<KeyEvent> {
                     _ => Modifiers::NONE,
                 };
                 remaining = key;
-            },
+            }
         }
     };
 
@@ -66,7 +59,7 @@ pub fn key_from_text(text: impl AsRef<str>) -> Option<KeyEvent> {
             let f_key = f_key.trim_start_matches('f');
             let f_key = f_key.parse::<u8>().ok()?;
             KeyCode::Function(f_key)
-        },
+        }
         c => {
             let mut chars = c.chars();
             let mut first_char = chars.next()?;
@@ -80,7 +73,7 @@ pub fn key_from_text(text: impl AsRef<str>) -> Option<KeyEvent> {
                 return None;
             }
             KeyCode::Char(first_char)
-        },
+        }
     };
 
     Some(KeyEvent { key, modifiers })
@@ -106,7 +99,11 @@ impl KeyInterceptor {
 
     pub fn load_key_intercepts(&mut self) -> Result<()> {
         let key_bindings = KeyBindings::load_hardcoded();
-        for KeyBinding { identifier, binding } in key_bindings {
+        for KeyBinding {
+            identifier,
+            binding,
+        } in key_bindings
+        {
             if let Some(binding) = key_from_text(binding) {
                 self.insert_binding(binding, identifier);
             }
@@ -134,7 +131,11 @@ impl KeyInterceptor {
             self.mappings.clear();
         }
 
-        for Action { identifier, bindings } in actions {
+        for Action {
+            identifier,
+            bindings,
+        } in actions
+        {
             for binding in bindings {
                 if let Some(binding) = key_from_text(binding) {
                     self.insert_binding(binding, identifier.clone());
@@ -166,7 +167,8 @@ impl KeyInterceptor {
             // This will prevent ctrl+shift+r from being the same as ctrl+r but that is probably
             // fine since we lose context due to parsing ambiguity in the original xterm spec
             // when other modifiers are present
-            if (binding.modifiers.contains(Modifiers::CTRL) || binding.modifiers.contains(Modifiers::ALT))
+            if (binding.modifiers.contains(Modifiers::CTRL)
+                || binding.modifiers.contains(Modifiers::ALT))
                 && key.is_ascii_alphabetic()
             {
                 self.mappings.insert(
@@ -205,11 +207,11 @@ impl KeyInterceptor {
                         Some(action) if action.value() == IGNORE_ACTION => None,
                         Some(action) if GLOBAL_ACTIONS.contains(&action.value().as_str()) => {
                             Some(action.value().clone())
-                        },
+                        }
                         _ => None,
                     }
                 }
-            },
+            }
             (_, true) => {
                 if self.window_visible {
                     match self.mappings.get(key_event) {
@@ -220,7 +222,7 @@ impl KeyInterceptor {
                 } else {
                     None
                 }
-            },
+            }
             _ => None,
         }
     }

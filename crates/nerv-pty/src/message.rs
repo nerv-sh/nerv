@@ -1,61 +1,29 @@
-use std::path::{
-    Path,
-    PathBuf,
-};
-use std::time::{
-    Duration,
-    SystemTime,
-};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
-use nerv_term::Term;
-use nerv_term::term::ShellState;
 use anyhow::Result;
-use nerv_proto::fig::{
-    EnvironmentVariable,
-    RunProcessResponse,
-};
+use flume::Sender;
+use nerv_proto::fig::{EnvironmentVariable, RunProcessResponse};
 use nerv_proto::figterm::figterm_request_message::Request as FigtermRequest;
 use nerv_proto::figterm::figterm_response_message::Response as FigtermResponse;
 use nerv_proto::figterm::intercept_request::{
-    InterceptCommand,
-    SetFigjsIntercepts,
-    SetFigjsVisible,
+    InterceptCommand, SetFigjsIntercepts, SetFigjsVisible,
 };
-use nerv_proto::figterm::{
-    self,
-    FigtermRequestMessage,
-    FigtermResponseMessage,
-    TelemetryRequest,
-};
-use nerv_proto::remote::{
-    Clientbound,
-    Hostbound,
-    clientbound,
-    hostbound,
-};
+use nerv_proto::figterm::{self, FigtermRequestMessage, FigtermResponseMessage, TelemetryRequest};
+use nerv_proto::remote::{Clientbound, Hostbound, clientbound, hostbound};
+use nerv_term::Term;
+use nerv_term::term::ShellState;
 use nerv_util::env_var::PROCESS_LAUNCHED_BY_Q;
-use flume::Sender;
 use tokio::process::Command;
-use tracing::{
-    debug,
-    error,
-    trace,
-    warn,
-};
+use tracing::{debug, error, trace, warn};
 
 use crate::event_handler::EventHandler;
 use crate::history::HistorySender;
 use crate::interceptor::KeyInterceptor;
 use crate::pty::AsyncMasterPty;
 use crate::{
-    EXPECTED_BUFFER,
-    INSERT_ON_NEW_CMD,
-    INSERTION_LOCKED_AT,
-    MainLoopEvent,
-    SHELL_ALIAS,
-    SHELL_ENVIRONMENT_VARIABLES,
-    inline,
-    shell_state_to_context,
+    EXPECTED_BUFFER, INSERT_ON_NEW_CMD, INSERTION_LOCKED_AT, MainLoopEvent, SHELL_ALIAS,
+    SHELL_ENVIRONMENT_VARIABLES, shell_state_to_context,
 };
 
 fn working_directory(path: Option<&str>, shell_state: &ShellState) -> PathBuf {
@@ -64,11 +32,11 @@ fn working_directory(path: Option<&str>, shell_state: &ShellState) -> PathBuf {
         Ok(path) => {
             warn!(?path, "not a directory");
             None
-        },
+        }
         Err(err) => {
             warn!(?path, %err, "failed to canonicalize path");
             None
-        },
+        }
     };
 
     path.map(PathBuf::from)
@@ -102,9 +70,13 @@ fn create_command(executable: impl AsRef<Path>, working_directory: impl AsRef<Pa
     let mut cmd = if executable.as_ref().is_absolute() {
         Command::new(executable.as_ref())
     } else {
-        let path = env
-            .iter()
-            .find_map(|(key, value)| if key == "PATH" { Some(value.as_str()) } else { None });
+        let path = env.iter().find_map(|(key, value)| {
+            if key == "PATH" {
+                Some(value.as_str())
+            } else {
+                None
+            }
+        });
 
         which::which_in(executable.as_ref(), path, working_directory.as_ref())
             .map_or_else(|_| Command::new(executable.as_ref()), Command::new)
@@ -166,7 +138,9 @@ pub async fn process_figterm_request(
                 return Ok(None);
             }
 
-            let current_buffer = term.get_current_buffer().map(|buff| (buff.buffer, buff.cursor_idx));
+            let current_buffer = term
+                .get_current_buffer()
+                .map(|buff| (buff.buffer, buff.cursor_idx));
             let mut insertion_string = String::new();
             if let Some((buffer, Some(position))) = current_buffer {
                 if let Some(ref text_to_insert) = request.insertion {
@@ -184,7 +158,10 @@ pub async fn process_figterm_request(
                     // // split text by cursor
                     // let (left, right) = buffer.split_at(position);
 
-                    INSERTION_LOCKED_AT.write().unwrap().replace(SystemTime::now());
+                    INSERTION_LOCKED_AT
+                        .write()
+                        .unwrap()
+                        .replace(SystemTime::now());
                     let expected = format!("{buffer}{text_to_insert}");
                     trace!(?expected, "lock set, expected buffer");
                     *EXPECTED_BUFFER.lock().unwrap() = expected;
@@ -192,7 +169,8 @@ pub async fn process_figterm_request(
                 if let Some(ref insertion_buffer) = request.insertion_buffer {
                     if buffer.ne(insertion_buffer) {
                         if buffer.starts_with(insertion_buffer) {
-                            if let Some(len_diff) = buffer.len().checked_sub(insertion_buffer.len()) {
+                            if let Some(len_diff) = buffer.len().checked_sub(insertion_buffer.len())
+                            {
                                 insertion_string.extend(std::iter::repeat_n('\x08', len_diff));
                             }
                         } else if insertion_buffer.starts_with(&buffer) {
@@ -204,7 +182,7 @@ pub async fn process_figterm_request(
             insertion_string.push_str(&request.to_term_string());
             pty_master.write(insertion_string.as_bytes()).await?;
             Ok(None)
-        },
+        }
         FigtermRequest::Intercept(request) => {
             match request.intercept_command {
                 Some(InterceptCommand::SetFigjsIntercepts(SetFigjsIntercepts {
@@ -216,15 +194,15 @@ pub async fn process_figterm_request(
                     key_interceptor.set_intercept_global(intercept_global_keystrokes);
                     key_interceptor.set_intercept(intercept_bound_keystrokes);
                     key_interceptor.set_actions(&actions, override_actions);
-                },
+                }
                 Some(InterceptCommand::SetFigjsVisible(SetFigjsVisible { visible })) => {
                     key_interceptor.set_window_visible(visible);
-                },
-                None => {},
+                }
+                None => {}
             }
 
             Ok(None)
-        },
+        }
         FigtermRequest::Diagnostics(_) => {
             let map_color = |color: &shell_color::VTermColor| -> figterm::TermColor {
                 figterm::TermColor {
@@ -235,8 +213,10 @@ pub async fn process_figterm_request(
                                 b: *blue as i32,
                                 g: *green as i32,
                             })
-                        },
-                        shell_color::VTermColor::Indexed { idx } => figterm::term_color::Color::Indexed(*idx as u32),
+                        }
+                        shell_color::VTermColor::Indexed { idx } => {
+                            figterm::term_color::Color::Indexed(*idx as u32)
+                        }
                     }),
                 }
             };
@@ -248,25 +228,40 @@ pub async fn process_figterm_request(
                 }
             };
 
-            let (edit_buffer, cursor_position) = term.get_current_buffer().map_or((None, None), |buf| {
-                (Some(buf.buffer), buf.cursor_idx.and_then(|i| i.try_into().ok()))
-            });
+            let (edit_buffer, cursor_position) =
+                term.get_current_buffer().map_or((None, None), |buf| {
+                    (
+                        Some(buf.buffer),
+                        buf.cursor_idx.and_then(|i| i.try_into().ok()),
+                    )
+                });
 
             let response = FigtermResponse::Diagnostics(figterm::DiagnosticsResponse {
                 shell_context: Some(shell_state_to_context(term.shell_state())),
-                fish_suggestion_style: term.shell_state().fish_suggestion_color.as_ref().map(map_style),
-                zsh_autosuggestion_style: term.shell_state().zsh_autosuggestion_color.as_ref().map(map_style),
+                fish_suggestion_style: term
+                    .shell_state()
+                    .fish_suggestion_color
+                    .as_ref()
+                    .map(map_style),
+                zsh_autosuggestion_style: term
+                    .shell_state()
+                    .zsh_autosuggestion_color
+                    .as_ref()
+                    .map(map_style),
                 edit_buffer,
                 cursor_position,
             });
 
             Ok(Some(response))
-        },
+        }
         FigtermRequest::InsertOnNewCmd(command) => {
-            *INSERT_ON_NEW_CMD.lock().unwrap() = Some((command.text, command.bracketed, command.execute));
+            *INSERT_ON_NEW_CMD.lock().unwrap() =
+                Some((command.text, command.bracketed, command.execute));
             Ok(None)
-        },
-        FigtermRequest::SetBuffer(_) => Err(anyhow::anyhow!("SetBuffer is not supported in figterm")),
+        }
+        FigtermRequest::SetBuffer(_) => {
+            Err(anyhow::anyhow!("SetBuffer is not supported in figterm"))
+        }
         FigtermRequest::UpdateShellContext(request) => {
             if request.update_environment_variables {
                 *SHELL_ENVIRONMENT_VARIABLES.lock().unwrap() = request.environment_variables;
@@ -275,7 +270,7 @@ pub async fn process_figterm_request(
                 *SHELL_ALIAS.lock().unwrap() = request.alias;
             }
             Ok(None)
-        },
+        }
         FigtermRequest::NotifySshSessionStarted(notification) => {
             main_loop_tx
                 .send(MainLoopEvent::PromptSSH {
@@ -284,14 +279,16 @@ pub async fn process_figterm_request(
                 })
                 .ok();
             Ok(None)
-        },
-        FigtermRequest::InlineShellCompletion(_) => anyhow::bail!("InlineShellCompletion is not supported over remote"),
+        }
+        FigtermRequest::InlineShellCompletion(_) => {
+            anyhow::bail!("InlineShellCompletion is not supported over remote")
+        }
         FigtermRequest::InlineShellCompletionAccept(_) => {
             anyhow::bail!("InlineShellCompletionAccept is not supported over remote")
-        },
+        }
         FigtermRequest::InlineShellCompletionSetEnabled(_) => {
             anyhow::bail!("InlineShellCompletionSetEnabled is not supported over remote")
-        },
+        }
         FigtermRequest::Telemtety(_) => anyhow::bail!("Telemetry is not supported over remote"),
     }
 }
@@ -303,34 +300,25 @@ pub async fn process_figterm_message(
     main_loop_tx: Sender<MainLoopEvent>,
     response_tx: Sender<FigtermResponseMessage>,
     term: &Term<EventHandler>,
-    history_sender: &HistorySender,
+    _history_sender: &HistorySender,
     pty_master: &mut Box<dyn AsyncMasterPty + Send + Sync>,
     key_interceptor: &mut KeyInterceptor,
-    session_id: &str,
+    _session_id: &str,
 ) -> Result<()> {
     match figterm_request_message.request {
-        Some(FigtermRequest::InlineShellCompletion(request)) => {
-            let history_sender = history_sender.clone();
-            let session_id = session_id.to_owned();
-
-            tokio::spawn(inline::handle_request(request, session_id, response_tx, history_sender));
-        },
-        Some(FigtermRequest::InlineShellCompletionAccept(request)) => {
-            tokio::spawn(inline::handle_accept(request, session_id.to_owned()));
-        },
-        Some(FigtermRequest::InlineShellCompletionSetEnabled(request)) => {
-            tokio::spawn(inline::handle_set_enabled(request, session_id.to_owned()));
-        },
-        Some(FigtermRequest::Telemtety(TelemetryRequest { event_blob })) => {
-            match fig_telemetry::AppTelemetryEvent::from_json(&event_blob) {
-                Ok(event) => {
-                    tokio::spawn(fig_telemetry::send_event(event));
-                },
-                Err(err) => error!(%err, "Failed to parse telemetry event"),
-            }
-        },
+        Some(FigtermRequest::InlineShellCompletion(_))
+        | Some(FigtermRequest::InlineShellCompletionAccept(_))
+        | Some(FigtermRequest::InlineShellCompletionSetEnabled(_)) => {
+            // AI inline-completion stripped (PRD v0.6 §0.2 — no AI).
+            // Request silently dropped; no response.
+        }
+        Some(FigtermRequest::Telemtety(TelemetryRequest { event_blob: _ })) => {
+            // Telemetry stripped (PRD v0.6 §0.2 — no telemetry).
+        }
         Some(request) => {
-            match process_figterm_request(request, main_loop_tx, term, pty_master, key_interceptor).await {
+            match process_figterm_request(request, main_loop_tx, term, pty_master, key_interceptor)
+                .await
+            {
                 Ok(Some(response)) => {
                     let response_message = FigtermResponseMessage {
                         response: Some(response),
@@ -338,11 +326,11 @@ pub async fn process_figterm_message(
                     if let Err(err) = response_tx.send_async(response_message).await {
                         error!(%err, "Failed sending request response");
                     }
-                },
-                Ok(None) => {},
+                }
+                Ok(None) => {}
                 Err(err) => error!(%err, "Failed to process figterm message"),
             }
-        },
+        }
         None => warn!("Qterm message with no request"),
     }
     Ok(())
@@ -410,7 +398,7 @@ pub async fn process_remote_message(
                         &response_tx,
                     )
                     .await;
-                },
+                }
                 Some(Request::Intercept(request)) => {
                     send_figterm_response_hostbound(
                         process_figterm_request(
@@ -425,7 +413,7 @@ pub async fn process_remote_message(
                         &response_tx,
                     )
                     .await;
-                },
+                }
                 Some(Request::Diagnostics(request)) => {
                     send_figterm_response_hostbound(
                         process_figterm_request(
@@ -440,7 +428,7 @@ pub async fn process_remote_message(
                         &response_tx,
                     )
                     .await;
-                },
+                }
                 Some(Request::InsertOnNewCmd(request)) => {
                     send_figterm_response_hostbound(
                         process_figterm_request(
@@ -455,7 +443,7 @@ pub async fn process_remote_message(
                         &response_tx,
                     )
                     .await;
-                },
+                }
                 Some(Request::RunProcess(request)) => {
                     // TODO: we can infer shell as above for execute if no executable is provided.
                     let mut cmd = create_command(
@@ -474,7 +462,8 @@ pub async fn process_remote_message(
                     tokio::spawn(async move {
                         debug!("running command");
 
-                        let timeout_duration = request.timeout.map_or(Duration::from_secs(60), Into::into);
+                        let timeout_duration =
+                            request.timeout.map_or(Duration::from_secs(60), Into::into);
                         let command_timeout = tokio::time::timeout(timeout_duration, cmd.output());
 
                         let response = match command_timeout.await {
@@ -485,14 +474,14 @@ pub async fn process_remote_message(
                                     stderr: String::from_utf8_lossy(&output.stderr).to_string(),
                                     exit_code: output.status.code().unwrap_or(0),
                                 }))
-                            },
+                            }
                             Ok(Err(err)) => {
                                 warn!(%err, executable = request.executable, "failed running executable");
                                 make_response(Response::Error(format!(
                                     "failed running executable ({}): {err}",
                                     request.executable
                                 )))
-                            },
+                            }
                             Err(err) => {
                                 warn!(
                                     %err,
@@ -505,17 +494,17 @@ pub async fn process_remote_message(
                                     timeout_duration.as_millis(),
                                     request.executable,
                                 )))
-                            },
+                            }
                         };
 
                         if let Err(err) = response_tx.send_async(response).await {
                             error!(%err, "Failed sending request response");
                         }
                     });
-                },
+                }
                 _ => warn!("unhandled request {request:?}"),
             }
-        },
+        }
         Some(clientbound::Packet::Ping(())) => {
             let response = Hostbound {
                 packet: Some(hostbound::Packet::Pong(())),
@@ -524,7 +513,7 @@ pub async fn process_remote_message(
             if let Err(err) = response_tx.send_async(response).await {
                 error!(%err, "Failed sending request response");
             }
-        },
+        }
         packet => warn!("unhandled packet {packet:?}"),
     };
 
@@ -540,7 +529,11 @@ mod tests {
         let output = create_command("cargo", "/").output().await.unwrap();
         assert!(output.status.success());
 
-        let output = create_command("echo", "/").arg("hello world").output().await.unwrap();
+        let output = create_command("echo", "/")
+            .arg("hello world")
+            .output()
+            .await
+            .unwrap();
         assert!(output.status.success());
         assert_eq!(output.stdout, b"hello world\n");
         assert_eq!(output.stderr, b"");

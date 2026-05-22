@@ -2,64 +2,25 @@
 
 use std::io;
 use std::pin::Pin;
-use std::task::{
-    Context,
-    Poll,
-};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use anyhow::Result;
-use nerv_ipc::{
-    BufferedReader,
-    RecvMessage,
-    SendMessage,
-};
+use flume::{Receiver, Sender, unbounded};
+use nerv_ipc::{BufferedReader, RecvMessage, SendMessage};
 use nerv_proto::FigProtobufEncodable;
-use nerv_proto::figterm::{
-    FigtermRequestMessage,
-    FigtermResponseMessage,
-};
+use nerv_proto::figterm::{FigtermRequestMessage, FigtermResponseMessage};
 use nerv_proto::remote::hostbound::Handshake;
-use nerv_proto::remote::{
-    Clientbound,
-    Hostbound,
-    clientbound,
-    hostbound,
-};
-use nerv_util::{
-    PTY_BINARY_NAME,
-    directories,
-    gen_hex_string,
-};
-use flume::{
-    Receiver,
-    Sender,
-    unbounded,
-};
+use nerv_proto::remote::{Clientbound, Hostbound, clientbound, hostbound};
+use nerv_util::{PTY_BINARY_NAME, directories, gen_hex_string};
 use pin_project::pin_project;
-use tokio::io::{
-    AsyncRead,
-    AsyncWrite,
-    AsyncWriteExt,
-    ReadBuf,
-};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::join;
-use tokio::process::{
-    ChildStdin,
-    ChildStdout,
-};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio::time::{
-    MissedTickBehavior,
-    interval,
-};
-use tracing::{
-    debug,
-    error,
-    info,
-    trace,
-};
+use tokio::time::{MissedTickBehavior, interval};
+use tracing::{debug, error, info, trace};
 
 use crate::MainLoopEvent;
 
@@ -91,7 +52,11 @@ enum MessageSink {
 }
 
 impl AsyncWrite for MessageSink {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, io::Error>> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
         match self.project() {
             MessageSinkProj::UnixStream(stream) => stream.poll_write(cx, buf),
             MessageSinkProj::ChildStdin(stdin) => stdin.poll_write(cx, buf),
@@ -146,7 +111,11 @@ async fn get_forwarded_stream() -> Result<(MessageSource, MessageSink, Option<Jo
     let socket = directories::remote_socket_path()?;
     let stream = nerv_ipc::socket_connect_timeout(&socket, Duration::from_secs(5)).await?;
     let (reader, writer) = tokio::io::split(stream);
-    Ok((MessageSource::UnixStream(reader), MessageSink::UnixStream(writer), None))
+    Ok((
+        MessageSource::UnixStream(reader),
+        MessageSink::UnixStream(writer),
+        None,
+    ))
 }
 
 /// Spawns a local unix socket for communicating with figterm on a local machine
@@ -194,15 +163,15 @@ pub async fn spawn_figterm_ipc(
                                         .send_async((message, response_tx.clone()))
                                         .await
                                         .unwrap();
-                                },
+                                }
                                 Ok(None) => {
                                     debug!("Received EOF");
                                     break;
-                                },
+                                }
                                 Err(err) => {
                                     error!("Error receiving message: {err}");
                                     break;
-                                },
+                                }
                             }
                         }
                     });
@@ -242,7 +211,11 @@ pub async fn spawn_remote_ipc(
     session_id: String,
     parent_id: Option<String>,
     main_loop_sender: Sender<MainLoopEvent>,
-) -> Result<(Sender<Hostbound>, Receiver<Clientbound>, oneshot::Sender<()>)> {
+) -> Result<(
+    Sender<Hostbound>,
+    Receiver<Clientbound>,
+    oneshot::Sender<()>,
+)> {
     let (stop_ipc_tx, mut stop_ipc_rx) = oneshot::channel::<()>();
     let (outgoing_tx, outgoing_rx) = unbounded::<Hostbound>();
     let (incoming_tx, incoming_rx) = unbounded::<Clientbound>();

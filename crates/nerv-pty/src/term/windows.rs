@@ -1,76 +1,32 @@
-use std::cmp::{
-    max,
-    min,
-};
+use std::cmp::{max, min};
 use std::fs::OpenOptions;
-use std::io::{
-    Error as IoError,
-    Read,
-    Result as IoResult,
-    Write,
-    stdin,
-    stdout,
-};
+use std::io::{Error as IoError, Read, Result as IoResult, Write, stdin, stdout};
 use std::mem;
 use std::os::windows::io::AsRawHandle;
 
 use anyhow::Result;
 use filedescriptor::FileDescriptor;
-use flume::{
-    Receiver,
-    bounded,
-};
-use tracing::{
-    error,
-    warn,
-};
+use flume::{Receiver, bounded};
+use tracing::{error, warn};
 use winapi::shared::minwindef::BOOL;
 use winapi::um::consoleapi;
 use winapi::um::synchapi::WaitForSingleObject;
-use winapi::um::winbase::{
-    INFINITE,
-    WAIT_FAILED,
-    WAIT_OBJECT_0,
-};
+use winapi::um::winbase::{INFINITE, WAIT_FAILED, WAIT_OBJECT_0};
 use winapi::um::wincon::{
-    CHAR_INFO,
-    CONSOLE_FONT_INFO,
-    CONSOLE_SCREEN_BUFFER_INFO,
-    COORD,
-    DISABLE_NEWLINE_AUTO_RETURN,
-    ENABLE_ECHO_INPUT,
-    ENABLE_LINE_INPUT,
-    ENABLE_MOUSE_INPUT,
-    ENABLE_PROCESSED_INPUT,
-    ENABLE_VIRTUAL_TERMINAL_PROCESSING,
-    ENABLE_WINDOW_INPUT,
-    FillConsoleOutputAttribute,
-    FillConsoleOutputCharacterW,
-    GetConsoleScreenBufferInfo,
-    GetCurrentConsoleFont,
-    INPUT_RECORD,
-    ReadConsoleOutputW,
-    SMALL_RECT,
-    ScrollConsoleScreenBufferW,
-    SetConsoleCP,
-    SetConsoleCursorPosition,
-    SetConsoleOutputCP,
-    SetConsoleScreenBufferSize,
-    SetConsoleTextAttribute,
-    SetConsoleWindowInfo,
-    WriteConsoleOutputW,
+    CHAR_INFO, CONSOLE_FONT_INFO, CONSOLE_SCREEN_BUFFER_INFO, COORD, DISABLE_NEWLINE_AUTO_RETURN,
+    ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_MOUSE_INPUT, ENABLE_PROCESSED_INPUT,
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING, ENABLE_WINDOW_INPUT, FillConsoleOutputAttribute,
+    FillConsoleOutputCharacterW, GetConsoleScreenBufferInfo, GetCurrentConsoleFont, INPUT_RECORD,
+    ReadConsoleOutputW, SMALL_RECT, ScrollConsoleScreenBufferW, SetConsoleCP,
+    SetConsoleCursorPosition, SetConsoleOutputCP, SetConsoleScreenBufferSize,
+    SetConsoleTextAttribute, SetConsoleWindowInfo, WriteConsoleOutputW,
 };
 use winapi::um::winnls::CP_UTF8;
 
 use super::InputEventResult;
 use crate::input::InputParser;
 use crate::term::istty::IsTty;
-use crate::term::{
-    CellCoordinate,
-    ScreenSize,
-    Terminal,
-    cast,
-};
+use crate::term::{CellCoordinate, ScreenSize, Terminal, cast};
 
 const BUF_SIZE: usize = 128;
 
@@ -138,7 +94,9 @@ impl ConsoleInputHandle for InputHandle {
 
     fn get_input_mode(&mut self) -> Result<u32> {
         let mut mode = 0;
-        if unsafe { consoleapi::GetConsoleMode(self.handle.as_raw_handle() as *mut _, &mut mode) } == 0 {
+        if unsafe { consoleapi::GetConsoleMode(self.handle.as_raw_handle() as *mut _, &mut mode) }
+            == 0
+        {
             anyhow::bail!("GetConsoleMode failed: {}", IoError::last_os_error());
         }
         Ok(mode)
@@ -157,8 +115,17 @@ impl ConsoleInputHandle for InputHandle {
 
     fn get_number_of_input_events(&mut self) -> Result<usize> {
         let mut num = 0;
-        if unsafe { consoleapi::GetNumberOfConsoleInputEvents(self.handle.as_raw_handle() as *mut _, &mut num) } == 0 {
-            anyhow::bail!("GetNumberOfConsoleInputEvents failed: {}", IoError::last_os_error());
+        if unsafe {
+            consoleapi::GetNumberOfConsoleInputEvents(
+                self.handle.as_raw_handle() as *mut _,
+                &mut num,
+            )
+        } == 0
+        {
+            anyhow::bail!(
+                "GetNumberOfConsoleInputEvents failed: {}",
+                IoError::last_os_error()
+            );
         }
         Ok(num as usize)
     }
@@ -244,7 +211,9 @@ impl ConsoleOutputHandle for OutputHandle {
 
     fn get_output_mode(&mut self) -> Result<u32> {
         let mut mode = 0;
-        if unsafe { consoleapi::GetConsoleMode(self.handle.as_raw_handle() as *mut _, &mut mode) } == 0 {
+        if unsafe { consoleapi::GetConsoleMode(self.handle.as_raw_handle() as *mut _, &mut mode) }
+            == 0
+        {
             anyhow::bail!("GetConsoleMode failed: {}", IoError::last_os_error());
         }
         Ok(mode)
@@ -273,7 +242,10 @@ impl ConsoleOutputHandle for OutputHandle {
             )
         } == 0
         {
-            anyhow::bail!("FillConsoleOutputCharacterW failed: {}", IoError::last_os_error());
+            anyhow::bail!(
+                "FillConsoleOutputCharacterW failed: {}",
+                IoError::last_os_error()
+            );
         }
         Ok(wrote)
     }
@@ -290,20 +262,29 @@ impl ConsoleOutputHandle for OutputHandle {
             )
         } == 0
         {
-            anyhow::bail!("FillConsoleOutputAttribute failed: {}", IoError::last_os_error());
+            anyhow::bail!(
+                "FillConsoleOutputAttribute failed: {}",
+                IoError::last_os_error()
+            );
         }
         Ok(wrote)
     }
 
     fn set_attr(&mut self, attr: u16) -> Result<()> {
         if unsafe { SetConsoleTextAttribute(self.handle.as_raw_handle() as *mut _, attr) } == 0 {
-            anyhow::bail!("SetConsoleTextAttribute failed: {}", IoError::last_os_error());
+            anyhow::bail!(
+                "SetConsoleTextAttribute failed: {}",
+                IoError::last_os_error()
+            );
         }
         Ok(())
     }
 
     fn set_cursor_position(&mut self, x: i16, y: i16) -> Result<()> {
-        if unsafe { SetConsoleCursorPosition(self.handle.as_raw_handle() as *mut _, COORD { X: x, Y: y }) } == 0 {
+        if unsafe {
+            SetConsoleCursorPosition(self.handle.as_raw_handle() as *mut _, COORD { X: x, Y: y })
+        } == 0
+        {
             anyhow::bail!(
                 "SetConsoleCursorPosition(x={}, y={}) failed: {}",
                 x,
@@ -387,9 +368,14 @@ impl ConsoleOutputHandle for OutputHandle {
 
     fn get_buffer_info(&mut self) -> Result<CONSOLE_SCREEN_BUFFER_INFO> {
         let mut info: CONSOLE_SCREEN_BUFFER_INFO = unsafe { mem::zeroed() };
-        let ok = unsafe { GetConsoleScreenBufferInfo(self.handle.as_raw_handle() as *mut _, &mut info as *mut _) };
+        let ok = unsafe {
+            GetConsoleScreenBufferInfo(self.handle.as_raw_handle() as *mut _, &mut info as *mut _)
+        };
         if ok == 0 {
-            anyhow::bail!("GetConsoleScreenBufferInfo failed: {}", IoError::last_os_error());
+            anyhow::bail!(
+                "GetConsoleScreenBufferInfo failed: {}",
+                IoError::last_os_error()
+            );
         }
         Ok(info)
     }
@@ -465,7 +451,10 @@ impl ConsoleOutputHandle for OutputHandle {
             )
         } == 0
         {
-            anyhow::bail!("ScrollConsoleScreenBufferW failed: {}", IoError::last_os_error());
+            anyhow::bail!(
+                "ScrollConsoleScreenBufferW failed: {}",
+                IoError::last_os_error()
+            );
         }
         Ok(())
     }
@@ -511,7 +500,10 @@ impl WindowsTerminal {
     /// Create an instance using the provided capabilities, read and write
     /// handles. The read and write handles must be tty handles of this
     /// will return an error.
-    pub fn new_with<A: Read + IsTty + AsRawHandle, B: Write + IsTty + AsRawHandle>(read: A, write: B) -> Result<Self> {
+    pub fn new_with<A: Read + IsTty + AsRawHandle, B: Write + IsTty + AsRawHandle>(
+        read: A,
+        write: B,
+    ) -> Result<Self> {
         if !read.is_tty() || !write.is_tty() {
             anyhow::bail!("stdin and stdout must both be tty handles");
         }
@@ -553,8 +545,9 @@ impl WindowsTerminal {
 
     pub fn enable_virtual_terminal_processing(&mut self) -> Result<()> {
         let mode = self.output_handle.get_output_mode()?;
-        self.output_handle
-            .set_output_mode(mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN)?;
+        self.output_handle.set_output_mode(
+            mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN,
+        )?;
 
         // let mode = self.input_handle.get_input_mode()?;
         // self.input_handle.set_input_mode(mode | ENABLE_VIRTUAL_TERMINAL_INPUT)?;
@@ -632,7 +625,10 @@ impl Terminal for WindowsTerminal {
         };
         let handle = self.output_handle.handle.as_raw_handle();
         if unsafe { SetConsoleScreenBufferSize(handle as *mut _, size) } != 1 {
-            anyhow::bail!("failed to SetConsoleScreenBufferSize: {}", IoError::last_os_error());
+            anyhow::bail!(
+                "failed to SetConsoleScreenBufferSize: {}",
+                IoError::last_os_error()
+            );
         }
         Ok(())
     }
@@ -656,8 +652,9 @@ impl Terminal for WindowsTerminal {
                 let mut pending = input_handle.get_number_of_input_events().unwrap_or(0);
 
                 if pending == 0 {
-                    let result =
-                        unsafe { WaitForSingleObject(input_handle.handle.as_raw_handle() as *mut _, INFINITE) };
+                    let result = unsafe {
+                        WaitForSingleObject(input_handle.handle.as_raw_handle() as *mut _, INFINITE)
+                    };
                     if result == WAIT_OBJECT_0 {
                         pending = input_handle.get_number_of_input_events().unwrap_or(0);
                     } else if result == WAIT_FAILED {
@@ -673,14 +670,16 @@ impl Terminal for WindowsTerminal {
                 match input_handle.read_console_input(pending) {
                     Ok(records) => {
                         let mut events = vec![];
-                        parser.decode_input_records(&records, &mut |raw, evt| events.push(Ok((raw, evt))));
+                        parser.decode_input_records(&records, &mut |raw, evt| {
+                            events.push(Ok((raw, evt)))
+                        });
                         if let Err(e) = input_tx.send(events) {
                             warn!("Failed to send input record: {e}");
                         }
-                    },
+                    }
                     Err(e) => {
                         warn!("Failed to read events from console: {e}");
-                    },
+                    }
                 }
             }
         });
