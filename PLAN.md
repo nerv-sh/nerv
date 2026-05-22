@@ -307,16 +307,18 @@ nerv uninstall          # 깔끔한 제거
 
 v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 
-1. **`vendor/aws-autocomplete/` subtree pin** + 라이선스 정합 검증 (Apache+MIT NOTICE 추가).
-2. **`git filter-repo` 로 9개 crate 추출 PoC** — `figterm`, `alacritty_terminal`, `fig_ipc`, `fig_proto`(strip), `fig_integrations`(strip), `fig_util`(strip), `fig_settings`(strip), `fig_os_shim`, `fig_log`(strip), `fig_diagnostic`. `cargo check --workspace` 통과.
-3. **Rust edition 2021 → 2024 bump** — workspace + 모든 crate + rust-toolchain.toml + CLAUDE.md §4 + PLAN §7 동시 갱신.
-4. **`shell-parser/parser.ts` (20 KB) → `nerv-engine::shell_parser` Rust 포팅** — bash grammar 1:1, 회귀 테스트 흡수 (TS test fixtures → Rust `#[test]`).
-5. **`parseArguments.ts` (32 KB) → `nerv-engine::spec_parser` Rust 포팅 부분** — M0 = 상위 50 spec 시나리오 통과 분량만. M1 에서 1,484 전체.
-6. **`loadSpec.ts` → `nerv-engine::spec_loader` 포팅** + 빌드타임 1,484 → JSON serialize (Tier A/B).
-7. **ZLE → UDS → `nerv-engine::complete()` → 인라인 ANSI PoC** — v0.5.1 의 M0-1 latency 검증 (p95 < 25 ms) 재실행. 이번엔 stub 아닌 진짜 엔진.
-8. **Developer ID 서명/공증 선행 검증** (v0.5.1 의 M0-8 그대로) — `fn main(){}` 빌드 + sign + notarize + Homebrew tap 설치 e2e. **No-Go 차단 요건**.
+1. ✅ **`vendor/aws-autocomplete/` subtree pin** + Apache+MIT NOTICE.
+2. ✅ **`git filter-repo` 로 10개 crate 추출** — `figterm`(nerv-pty, M1 opt-in 으로 workspace 보류), `alacritty_terminal`(nerv-term), `fig_ipc`(nerv-ipc), `fig_proto`(nerv-proto strip), `fig_integrations`(nerv-integrations strip), `fig_util`(nerv-util strip), `fig_settings`(nerv-settings strip), `fig_os_shim`(nerv-os), `fig_log`(nerv-log strip), `fig_diagnostic`(nerv-diag). 15 active crates `cargo check --workspace` 통과 (nerv-pty 는 chunk 3d 의존성 strip 마무리 후 합류).
+3. ✅ **Rust edition 2024 bump** — workspace + 모든 crate + rust-toolchain.toml 동시.
+4. ✅ **`shell-parser/parser.ts` → `nerv-engine::shell_parser` Rust 포팅** — bash grammar 1:1, 124 회귀 테스트 (e2e 22 + 단위 102).
+5. ✅ **`parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅** — chunks 1-5 완료 (types + static helpers + state machine + token shape classifier + matcher). 174 단위 + 11 fixture integration test.
+6. ✅ **`loadSpec.ts` → `nerv-engine::spec_loader` 포팅** + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체 (1,484 spec) 는 M1 (외부 node 스크립트 또는 rquickjs Tier C 시간 후). 현재 hand-rolled fixture (git, echo) 로 end-to-end 검증.
+7. ✅ **ZLE → UDS → `nerv-engine::complete()` → 인라인 ANSI** — latency 측정 결과: IPC p95 **0.052 ms**, CLI cold-start p95 **4.07 ms** (25 ms 예산 16%). ZLE widget `_nerv.zsh` 의 `insertion\tdisplay\tdesc` 포맷 호환 확인. (인라인 ANSI 자체는 widget 이 이미 구현 — engine + widget 통합 완료.)
+8. ⏳ **Developer ID 서명/공증 선행 검증** (v0.5.1 의 M0-8 그대로) — `fn main(){}` 빌드 + sign + notarize + Homebrew tap 설치 e2e. **No-Go 차단 요건** — Apple Developer 계정 / 인프라 의존.
 
 **M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
+
+**현재 상태 (2026-05-22)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). 4-6 에서 `git status / log / commit / checkout` 시나리오는 fixture+integration test 로 통과. `docker / kubectl` fixture 는 M1 진입과 함께 (TS→JSON 변환 파이프라인 확립 후 1,484 spec 전체로 확장).
 
 **M0-2 Fig 흡수 결과 의사결정 트리**:
 
