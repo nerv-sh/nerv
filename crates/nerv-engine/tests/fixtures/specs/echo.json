@@ -1,0 +1,21 @@
+{
+  "name": "echo",
+  "description": "Display a line of text",
+  "options": [
+    {
+      "names": ["-n"],
+      "description": "Do not output a trailing newline"
+    },
+    {
+      "names": ["-e"],
+      "description": "Enable backslash escapes"
+    }
+  ],
+  "args": [
+    {
+      "name": "string",
+      "is_variadic": true,
+      "is_optional": true
+    }
+  ]
+}
