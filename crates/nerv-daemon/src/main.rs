@@ -12,7 +12,8 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{Request, Response, Suggestion, SuggestionKind, paths};
+use nerv_engine::{Request, Response, SpecRegistry, complete, paths};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
@@ -29,6 +30,20 @@ async fn main() -> anyhow::Result<()> {
     let pid_path = std::env::var_os("NERV_PID")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| paths::pid_path().expect("HOME present (just checked)"));
+    let specs_dir = std::env::var_os("NERV_SPECS_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| paths::specs_dir().expect("HOME present (just checked)"));
+
+    let (registry, load_errors) = SpecRegistry::load_dir(&specs_dir);
+    for err in &load_errors {
+        warn!(error = %err, "spec load error");
+    }
+    info!(
+        specs_dir = %specs_dir.display(),
+        loaded = registry.len(),
+        "spec registry initialized"
+    );
+    let registry = Arc::new(registry);
 
     write_pid_file(&pid_path).await?;
 
@@ -52,7 +67,8 @@ async fn main() -> anyhow::Result<()> {
             res = listener.accept() => {
                 match res {
                     Ok((stream, _addr)) => {
-                        tokio::spawn(handle_connection(stream));
+                        let registry = registry.clone();
+                        tokio::spawn(handle_connection(stream, registry));
                     }
                     Err(e) => warn!(?e, "accept error"),
                 }
@@ -69,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream) {
+async fn handle_connection(stream: tokio::net::UnixStream, registry: Arc<SpecRegistry>) {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -82,11 +98,7 @@ async fn handle_connection(stream: tokio::net::UnixStream) {
             Ok(Request::Ping) => Response::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
-            Ok(Request::Complete { line, cursor }) => {
-                // M0-1 stub: Fig-like behavior with hardcoded git subcommands.
-                // Real spec-tree matching arrives in M0-2 / M1.
-                stub_complete(&line, cursor)
-            }
+            Ok(Request::Complete { line, cursor }) => engine_complete(&registry, &line, cursor),
             Ok(Request::DoctorAutorun) => Response::Empty {
                 reason: Some("doctor-autorun-stub".to_string()),
             },
@@ -102,6 +114,19 @@ async fn handle_connection(stream: tokio::net::UnixStream) {
                 break;
             }
         }
+    }
+}
+
+/// Dispatch a Complete request through the real engine pipeline.
+fn engine_complete(registry: &SpecRegistry, line: &str, cursor: usize) -> Response {
+    let result = complete(line, cursor, registry);
+    if result.items.is_empty() {
+        return Response::Empty {
+            reason: result.reason,
+        };
+    }
+    Response::Suggestions {
+        items: result.items,
     }
 }
 
@@ -122,63 +147,6 @@ async fn shutdown_signal() {
         _ = term.recv() => {},
         _ = int.recv() => {},
     }
-}
-
-/// M0-1 stub: Fig-like contextual completion for git subcommands.
-///
-/// Only returns suggestions at the subcommand position (first arg after the
-/// command name). Filters by prefix when the user is mid-typing. Returns
-/// empty once a subcommand is already present.
-fn stub_complete(line: &str, cursor: usize) -> Response {
-    let input = &line[..cursor.min(line.len())];
-    let tokens: Vec<&str> = input.split_whitespace().collect();
-    let trailing_space = input.ends_with(' ');
-
-    // Determine what the user is completing:
-    // - 0 tokens: empty → no suggestions
-    // - 1 token, trailing space: "git " → show all subcommands
-    // - 1 token, no space: "git" → still typing command name → no suggestions
-    // - 2 tokens, no space: "git co" → filter subcommands by prefix "co"
-    // - 2 tokens, trailing space: "git commit " → past subcommand → no suggestions (stub)
-    // - 3+ tokens: deep in args → no suggestions (stub)
-
-    let all_subs = [
-        ("commit", "Record changes to the repository"),
-        ("clone", "Clone a repository into a new directory"),
-        ("checkout", "Switch branches or restore files"),
-        ("push", "Update remote refs along with objects"),
-        ("pull", "Fetch and integrate with another repo"),
-        ("branch", "List, create, or delete branches"),
-        ("merge", "Join two or more development histories"),
-        ("rebase", "Reapply commits on top of another base"),
-        ("status", "Show the working tree status"),
-        ("log", "Show commit logs"),
-        ("diff", "Show changes between commits"),
-        ("add", "Add file contents to the index"),
-        ("stash", "Stash changes in a dirty working directory"),
-        ("fetch", "Download objects and refs from a remote"),
-        ("reset", "Reset current HEAD to a specified state"),
-    ];
-
-    let prefix = match (tokens.len(), trailing_space) {
-        (1, true) => "",         // "git " → show all
-        (2, false) => tokens[1], // "git co" → filter by "co"
-        _ => return Response::Suggestions { items: vec![] },
-    };
-
-    let items: Vec<Suggestion> = all_subs
-        .iter()
-        .filter(|(name, _)| name.starts_with(prefix))
-        .take(5)
-        .map(|(name, desc)| Suggestion {
-            insertion: name.to_string(),
-            display: name.to_string(),
-            description: Some(desc.to_string()),
-            kind: SuggestionKind::Subcommand,
-        })
-        .collect();
-
-    Response::Suggestions { items }
 }
 
 fn init_tracing() {

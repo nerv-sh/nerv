@@ -16,6 +16,7 @@
 #![deny(rust_2018_idioms)]
 #![warn(missing_debug_implementations)]
 
+pub mod complete;
 pub mod ipc;
 pub mod parser;
 pub mod paths;
@@ -25,6 +26,7 @@ pub mod spec;
 pub mod spec_loader;
 pub mod spec_parser;
 
+pub use complete::{CompleteResult, SpecRegistry, complete};
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
 pub use parser::{Position, Token};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};

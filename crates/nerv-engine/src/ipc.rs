@@ -46,7 +46,7 @@ pub enum Response {
 }
 
 /// A single completion suggestion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Suggestion {
     /// What gets inserted on Tab.
     pub insertion: String,

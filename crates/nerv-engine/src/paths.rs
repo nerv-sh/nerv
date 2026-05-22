@@ -19,6 +19,7 @@ pub const CONFIG_SUBDIR: &str = ".config/nerv";
 pub const SOCKET_NAME: &str = "nervd.sock";
 pub const PID_NAME: &str = "nervd.pid";
 pub const DAEMON_LOG_NAME: &str = "nervd.log";
+pub const SPECS_SUBDIR: &str = "specs";
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
@@ -46,4 +47,10 @@ pub fn pid_path() -> Option<PathBuf> {
 
 pub fn daemon_log_path() -> Option<PathBuf> {
     log_dir().map(|d| d.join(DAEMON_LOG_NAME))
+}
+
+/// `~/Library/Caches/nerv/specs/` — JSON spec cache populated by
+/// the build-specs binary.
+pub fn specs_dir() -> Option<PathBuf> {
+    cache_dir().map(|c| c.join(SPECS_SUBDIR))
 }
