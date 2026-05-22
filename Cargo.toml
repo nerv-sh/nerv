@@ -21,7 +21,6 @@ members = [
     "crates/nerv-diag",
     "crates/nerv-test-macro",
     "crates/nerv-test-utils",
-    "build/spec-transpile",
 ]
 
 [workspace.package]
