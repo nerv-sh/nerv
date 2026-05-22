@@ -1912,3 +1912,236 @@ mod tests {
         assert!(!arg.complete);
     }
 }
+
+#[cfg(test)]
+mod scenarios {
+    //! End-to-end scenarios that exercise the parser across multiple
+    //! grammar layers at once. Per-chunk unit tests live in the
+    //! `tests` module above; these are the cross-cutting cases that
+    //! consumers (completion engine, cursor token lookup) actually hit.
+    use super::*;
+
+    /// Find the deepest node whose `span` covers `cursor`. Used to
+    /// simulate "what token is the cursor on?", the primary downstream
+    /// use of the parse tree.
+    fn deepest_at(node: &Node, cursor: usize) -> &Node {
+        for child in &node.children {
+            if child.span.start <= cursor && cursor <= child.span.end {
+                return deepest_at(child, cursor);
+            }
+        }
+        node
+    }
+
+    #[test]
+    fn scenario_git_status_at_cursor_zero() {
+        let p = parse("git status");
+        let leaf = deepest_at(&p, 0);
+        assert_eq!(leaf.kind, NodeKind::Word);
+        assert_eq!(leaf.text, "git");
+    }
+
+    #[test]
+    fn scenario_git_status_at_cursor_inside_second_word() {
+        let p = parse("git status");
+        let leaf = deepest_at(&p, 8);
+        assert_eq!(leaf.kind, NodeKind::Word);
+        assert_eq!(leaf.text, "status");
+    }
+
+    #[test]
+    fn scenario_long_pipeline_flattens_to_one_node_per_command() {
+        let p = parse("cat foo | grep bar | wc -l");
+        let pipe = &p.children[0];
+        assert_eq!(pipe.kind, NodeKind::Pipeline);
+        assert_eq!(pipe.children.len(), 3);
+        for child in &pipe.children {
+            assert_eq!(child.kind, NodeKind::Command);
+        }
+        assert_eq!(pipe.children[2].children.len(), 2);
+    }
+
+    #[test]
+    fn scenario_short_circuit_chain_is_a_single_flat_list() {
+        let p = parse("make && make test && make install");
+        let list = &p.children[0];
+        assert_eq!(list.kind, NodeKind::List);
+        assert_eq!(list.children.len(), 3);
+    }
+
+    #[test]
+    fn scenario_background_then_followup_yields_two_statements() {
+        let p = parse("server & client");
+        assert_eq!(p.children.len(), 2);
+        assert_eq!(p.children[0].children[0].text, "server");
+        assert_eq!(p.children[1].children[0].text, "client");
+    }
+
+    #[test]
+    fn scenario_trailing_semicolons_do_not_invent_empty_statements() {
+        let p = parse("a; b; c;");
+        assert_eq!(p.children.len(), 3);
+    }
+
+    #[test]
+    fn scenario_compound_inside_pipeline() {
+        let p = parse("{ ls; cat; } | grep foo");
+        let top = &p.children[0];
+        assert_eq!(top.kind, NodeKind::Pipeline);
+        assert_eq!(top.children.len(), 2);
+        assert_eq!(top.children[0].kind, NodeKind::CompoundStatement);
+        assert_eq!(top.children[1].kind, NodeKind::Command);
+    }
+
+    #[test]
+    fn scenario_subshell_inside_list() {
+        let p = parse("(cd /tmp && ls) || echo gone");
+        let top = &p.children[0];
+        assert_eq!(top.kind, NodeKind::List);
+        assert_eq!(top.children.len(), 2);
+        assert_eq!(top.children[0].kind, NodeKind::Subshell);
+    }
+
+    #[test]
+    fn scenario_assignment_then_command_with_pipeline() {
+        let p = parse("FOO=bar cmd arg | filter");
+        assert_eq!(p.children.len(), 1);
+        let pipe = &p.children[0];
+        assert_eq!(pipe.kind, NodeKind::Pipeline);
+        assert_eq!(pipe.children.len(), 2);
+        assert_eq!(pipe.children[0].kind, NodeKind::AssignmentList);
+        assert_eq!(pipe.children[1].kind, NodeKind::Command);
+    }
+
+    #[test]
+    fn scenario_nested_command_substitution() {
+        let p = parse("echo $(echo $(pwd))");
+        let cmd = &p.children[0];
+        let outer_sub = &cmd.children[1];
+        assert_eq!(outer_sub.kind, NodeKind::CommandSubstitution);
+        let inner_cmd = &outer_sub.children[0];
+        assert_eq!(inner_cmd.children.len(), 2);
+        let inner_sub = &inner_cmd.children[1];
+        assert_eq!(inner_sub.kind, NodeKind::CommandSubstitution);
+        assert_eq!(inner_sub.children[0].children[0].text, "pwd");
+    }
+
+    #[test]
+    fn scenario_command_substitution_inside_string() {
+        let p = parse("echo \"$USER@$(hostname)\"");
+        let cmd = &p.children[0];
+        let arg = &cmd.children[1];
+        assert_eq!(arg.kind, NodeKind::String);
+        let kinds: Vec<NodeKind> = arg.children.iter().map(|c| c.kind).collect();
+        assert!(kinds.contains(&NodeKind::SimpleExpansion));
+        assert!(kinds.contains(&NodeKind::CommandSubstitution));
+    }
+
+    #[test]
+    fn scenario_backslash_then_eof_does_not_panic() {
+        let _ = parse("echo foo\\");
+        let _ = parse("\\");
+        let _ = parse("a\\");
+    }
+
+    #[test]
+    fn scenario_only_operators_does_not_panic() {
+        let _ = parse(";;");
+        let _ = parse("|&");
+        let _ = parse("&&");
+    }
+
+    #[test]
+    fn scenario_pipe_at_eof_makes_pipeline_incomplete() {
+        let p = parse("cmd |");
+        let pipe = &p.children[0];
+        assert_eq!(pipe.kind, NodeKind::Pipeline);
+        let rhs = &pipe.children[1];
+        assert_eq!(rhs.kind, NodeKind::Command);
+        assert!(!rhs.complete);
+    }
+
+    #[test]
+    fn scenario_unterminated_subshell_propagates_incomplete() {
+        let p = parse("( ls && grep");
+        let ss = &p.children[0];
+        assert_eq!(ss.kind, NodeKind::Subshell);
+        assert!(!ss.complete);
+    }
+
+    #[test]
+    fn scenario_mix_of_concat_and_expansion_in_args() {
+        let p = parse("echo prefix-${HOME}-suffix");
+        let cmd = &p.children[0];
+        assert_eq!(cmd.children.len(), 2);
+        let arg = &cmd.children[1];
+        assert_eq!(arg.kind, NodeKind::Concatenation);
+        assert_eq!(arg.children.len(), 3);
+        assert_eq!(arg.children[0].kind, NodeKind::Word);
+        assert_eq!(arg.children[1].kind, NodeKind::Expansion);
+        assert_eq!(arg.children[2].kind, NodeKind::Word);
+    }
+
+    #[test]
+    fn scenario_quoted_string_with_escaped_dollar_does_not_expand() {
+        let p = parse("echo \"\\$HOME\"");
+        let arg = &p.children[0].children[1];
+        assert_eq!(arg.kind, NodeKind::String);
+        assert!(
+            arg.children
+                .iter()
+                .all(|c| c.kind != NodeKind::SimpleExpansion)
+        );
+    }
+
+    #[test]
+    fn scenario_raw_string_does_not_recurse_into_expansions() {
+        let p = parse("echo '$HOME'");
+        let arg = &p.children[0].children[1];
+        assert_eq!(arg.kind, NodeKind::RawString);
+        assert!(arg.children.is_empty());
+        assert_eq!(arg.inner_text, "$HOME");
+    }
+
+    #[test]
+    fn scenario_assignment_value_with_expansion() {
+        let p = parse("FOO=$HOME/bin");
+        let list = &p.children[0];
+        assert_eq!(list.kind, NodeKind::AssignmentList);
+        let assignment = &list.children[0];
+        assert!(assignment.children.len() >= 2);
+        assert_eq!(assignment.children[0].kind, NodeKind::VariableName);
+        let value = &assignment.children[1];
+        assert!(matches!(
+            value.kind,
+            NodeKind::Concatenation | NodeKind::SimpleExpansion
+        ));
+    }
+
+    #[test]
+    fn scenario_spans_are_contiguous_within_a_pipeline() {
+        let input = "a | b | c";
+        let p = parse(input);
+        let pipe = &p.children[0];
+        for child in &pipe.children {
+            let s = &input[child.span.clone()];
+            assert!(!s.is_empty(), "empty span for {child:?}");
+        }
+    }
+
+    #[test]
+    fn scenario_deepest_at_inside_string_returns_string() {
+        let input = "echo \"hello\"";
+        let p = parse(input);
+        let leaf = deepest_at(&p, 7);
+        assert_eq!(leaf.kind, NodeKind::String);
+    }
+
+    #[test]
+    fn scenario_deepest_at_inside_expansion_returns_expansion() {
+        let input = "echo ${HOME}";
+        let p = parse(input);
+        let leaf = deepest_at(&p, 8);
+        assert_eq!(leaf.kind, NodeKind::Expansion);
+    }
+}
