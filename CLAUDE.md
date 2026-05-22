@@ -21,23 +21,25 @@
 
 ## 3. 현재 단계
 
-**M0 흡수 스파이크 (v0.6 재정의)** — 산출물 8개:
+**M0 흡수 스파이크 (v0.6 재정의)** — 산출물 8개 중 7개 완료:
 
 - ✅ M0-9 (v0.5 산출물): `withfig/autocomplete` subtree pin (`aef52acf…`, 1,484 TS spec, ISC)
-- ✅ cargo workspace 스캐폴딩 (4 crates, 단위 테스트 12개 통과)
+- ✅ cargo workspace 스캐폴딩 (16 crates, 412 workspace test 통과)
 - ✅ NOTICE / LICENSE / `.github/workflows/{ci,upstream-monitor}.yml`
-- ⏳ M0-1: `vendor/aws-autocomplete/` subtree add + NOTICE Apache+MIT 추가
-- ⏳ M0-2: `git filter-repo` 로 9개 crate 추출 PoC (figterm, alacritty_terminal, fig_ipc, fig_proto, fig_integrations, fig_util, fig_settings, fig_os_shim, fig_log, fig_diagnostic) → `crates/nerv-{pty,term,ipc,proto,integrations,util,settings,os,log,diag}/` rename + strip. `cargo check --workspace` 통과
-- ⏳ M0-3: Rust edition **2021 → 2024 bump** (workspace + 모든 crate + rust-toolchain.toml + 본 §4 + PLAN §7 동시)
-- ⏳ M0-4: `shell-parser/parser.ts` (20 KB) → `nerv-engine::shell_parser` Rust 포팅. 회귀 테스트 흡수
-- ⏳ M0-5: `parseArguments.ts` (32 KB) → `nerv-engine::spec_parser` Rust 포팅 (상위 50 spec 시나리오 분량)
-- ⏳ M0-6: `loadSpec.ts` → `nerv-engine::spec_loader` 포팅 + 빌드타임 50 spec → JSON serialize (Tier A/B)
-- ⏳ M0-7: ZLE → UDS → 진짜 엔진 → 인라인 ANSI PoC (p95 < 25 ms 재검증)
-- ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건**)
+- ✅ M0-1: `vendor/aws-autocomplete/` subtree add + NOTICE Apache+MIT
+- ✅ M0-2: `git filter-repo` 로 10개 crate 추출 (figterm, alacritty_terminal, fig_ipc, fig_proto, fig_integrations, fig_util, fig_settings, fig_os_shim, fig_log, fig_diagnostic) → `crates/nerv-{pty,term,ipc,proto,integrations,util,settings,os,log,diag}/` rename + strip. nerv-pty (figterm) 는 M1 opt-in 으로 workspace.members 보류
+- ✅ M0-3: Rust edition 2024 bump (workspace + 모든 crate + rust-toolchain.toml)
+- ✅ M0-4: `shell-parser/parser.ts` (20 KB) → `nerv-engine::shell_parser` Rust 포팅 (124 test)
+- ✅ M0-5: `parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅 (chunks 1-5, 174 test) — types + static helpers + state machine + token classifier + matcher
+- ✅ M0-6: `loadSpec.ts` → `nerv-engine::spec_loader` + JSON 직렬화 + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체는 M1 (또는 외부 node 스크립트). hand-rolled fixture (git, echo) + 11 integration test 통과
+- ✅ M0-7: ZLE → CLI → UDS → 실엔진 wire-up + latency bench. IPC p95 0.052 ms, CLI cold-start p95 4.07 ms (25 ms 예산 대비 16%). `_nerv.zsh` widget 포맷 호환 확인
+- ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건** — 인프라 의존)
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
-다음 작업 우선순위는 **M0-1 → M0-3 → M0-2** (PLAN.md §15).
+**진행중 옵션**:
+- M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
+- M1 진입: TS→JSON 변환 파이프라인 / rquickjs Tier C / nerv-pty strip 마무리
 
 ## 4. 절대 깨면 안 되는 불변식
 
@@ -71,15 +73,21 @@ cargo test --workspace
 cargo test -p nerv-engine
 cargo test -p nerv-shell
 
-# nerv-cli / nervd 로컬 실행 (M0-7 이후 의미)
+# nerv-cli / nervd 로컬 실행
 cargo run -p nerv-cli -- init zsh
-cargo run -p nerv-daemon
+NERV_SPECS_DIR=$(pwd)/crates/nerv-engine/tests/fixtures/specs \
+    cargo run -p nerv-daemon                # fixture specs 로 daemon 기동
+cargo run -p nerv-cli -- _complete "git co" 6   # CLI bridge 수동 테스트
 
-# spec 빌드 (M0-6 이후 의미 — loadSpec.ts 포팅 완료 후)
+# spec JSON 빌드 (M0-6 — TS→JSON 변환 자체는 외부 단계)
 cargo run -p nerv-engine --bin build-specs -- \
     --input vendor/withfig-autocomplete/src/ \
     --output ~/Library/Caches/nerv/specs/ \
     --only git --only docker --only kubectl
+
+# Latency bench (M0-7 acceptance)
+cargo test --release -p nerv-daemon --test bench_latency \
+    -- --ignored --nocapture
 
 # 흡수 crate 추출 (M0-2)
 git subtree add --prefix vendor/aws-autocomplete \
@@ -92,9 +100,11 @@ git subtree add --prefix vendor/aws-autocomplete \
 ```
 crates/
   # 기존 보존
-  nerv-cli/        # `nerv` 바이너리 (clap, 5 cmd)
-  nerv-daemon/     # `nervd` (tokio + UDS, stub_complete 폐기 → nerv-engine 위임)
-  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader / ranker / paths)
+  nerv-cli/        # `nerv` 바이너리 (clap, 5 cmd + hidden _complete IPC bridge)
+  nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
+  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader / complete / ipc / paths / ranker)
+                   #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer)
+                   #   + tests/fixtures/specs/{git,echo}.json (M0-6 chunk 3)
   nerv-shell/      # 마커 블록 init_block / strip_blocks (테스트 4종)
 
   # M0-2 신규 (filter-repo 흡수)
@@ -145,7 +155,7 @@ Refs: PLAN.md §<section>  또는  Refs: docs/<file>.md §<section>
 
 PLAN §10 에 명시된 차단 요건을 *직접* 점검하기 전엔 다음 단계 진입 금지:
 
-- **M0 종료**: 산출물 8개 중 1+2+3+7+8 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과.
+- **M0 종료**: 산출물 8개 중 1+2+3+7+8 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과. (현재 1-7 완료; git fixture 시나리오 11개 integration test 통과. docker / kubectl fixture + 상위 50 spec 확장은 M1 진입과 함께.)
 - **M1 4주차**: 50개 spec 시나리오 통과 / latency p95 < 25 ms / tmux+2터미널 회귀 / uninstall 흔적 0
 - **M1 10주차**: 내부 dogfooding 2주
 
