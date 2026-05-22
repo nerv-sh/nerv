@@ -1,14 +1,8 @@
-use std::io::{
-    self,
-    ErrorKind,
-};
+use std::io::{self, ErrorKind};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use portable_pty::{
-    Child,
-    PtySize,
-};
+use portable_pty::{Child, PtySize};
 pub mod cmdbuilder;
 pub use cmdbuilder::CommandBuilder;
 
@@ -35,9 +29,9 @@ pub trait AsyncMasterPtyExt: AsyncMasterPty {
                         ErrorKind::WriteZero,
                         "failed to write whole buffer",
                     ));
-                },
+                }
                 Ok(n) => buff = &buff[n..],
-                Err(ref e) if e.kind() == ErrorKind::Interrupted => {},
+                Err(ref e) if e.kind() == ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
         }

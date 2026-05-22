@@ -23,14 +23,17 @@ impl<Value: Debug> Node<Value> {
             self.value = Some(value);
             return;
         }
-        match self.children.binary_search_by(|node| node.label.cmp(&key[0])) {
+        match self
+            .children
+            .binary_search_by(|node| node.label.cmp(&key[0]))
+        {
             Ok(idx) => {
                 self.children[idx].insert(&key[1..], value);
-            },
+            }
             Err(idx) => {
                 self.children.insert(idx, Node::new(key[0]));
                 self.children[idx].insert(&key[1..], value);
-            },
+            }
         }
     }
 
@@ -42,7 +45,7 @@ impl<Value: Debug> Node<Value> {
                     Some(value) => {
                         // An unambiguous match for the entire input
                         return NodeFind::Exact(depth, value);
-                    },
+                    }
                     None => panic!("Node has no children and no value!?"),
                 }
             }
@@ -52,7 +55,10 @@ impl<Value: Debug> Node<Value> {
             };
         }
 
-        match self.children.binary_search_by(|node| node.label.cmp(&key[0])) {
+        match self
+            .children
+            .binary_search_by(|node| node.label.cmp(&key[0]))
+        {
             Ok(idx) => {
                 match self.children[idx].lookup(&key[1..], depth + 1) {
                     NodeFind::AmbiguousBackTrack => {
@@ -62,10 +68,10 @@ impl<Value: Debug> Node<Value> {
                             Some(value) => NodeFind::AmbiguousMatch(depth, value),
                             None => NodeFind::AmbiguousBackTrack,
                         }
-                    },
+                    }
                     result => result,
                 }
-            },
+            }
             Err(_) => {
                 if depth == 0 {
                     NodeFind::None
@@ -75,7 +81,7 @@ impl<Value: Debug> Node<Value> {
                         None => NodeFind::AmbiguousBackTrack,
                     }
                 }
-            },
+            }
         }
     }
 }

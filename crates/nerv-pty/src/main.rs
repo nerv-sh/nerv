@@ -3,7 +3,6 @@ mod cleanup;
 pub mod cli;
 mod event_handler;
 pub mod history;
-pub mod inline;
 pub mod input;
 pub mod interceptor;
 pub mod ipc;
@@ -15,127 +14,50 @@ pub mod update;
 
 use std::env;
 #[cfg(unix)]
-use std::ffi::{
-    CString,
-    OsStr,
-};
-use std::sync::{
-    LazyLock,
-    Mutex,
-    RwLock,
-};
-use std::time::{
-    Duration,
-    SystemTime,
-};
+use std::ffi::{CString, OsStr};
+use std::sync::{LazyLock, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
 
-use nerv_term::Term;
-use nerv_term::ansi::Processor;
-use nerv_term::event::EventListener;
-use nerv_term::grid::Dimensions;
-use nerv_term::term::{
-    ShellState,
-    SizeInfo,
-    TextBuffer,
-};
-use anyhow::{
-    Context as _,
-    Result,
-    anyhow,
-};
+use anyhow::{Context as _, Result, anyhow};
 use bytes::BytesMut;
 use cfg_if::cfg_if;
 use clap::Parser;
 use cli::Cli;
-use nerv_log::{
-    LogArgs,
-    initialize_logging,
-};
-use nerv_os::{
-    Context,
-    Env,
-};
-use nerv_proto::local::{
-    self,
-    EnvironmentVariable,
-    TerminalCursorCoordinates,
-};
+use flume::{Receiver, Sender};
+use nerv_log::{LogArgs, initialize_logging};
+use nerv_os::{Context, Env};
+use nerv_proto::local::{self, EnvironmentVariable, TerminalCursorCoordinates};
 use nerv_proto::remote::Hostbound;
-use nerv_proto::remote_hooks::{
-    hook_to_message,
-    new_edit_buffer_hook,
-};
+use nerv_proto::remote_hooks::{hook_to_message, new_edit_buffer_hook};
 use nerv_settings::state;
+use nerv_term::Term;
+use nerv_term::ansi::Processor;
+use nerv_term::event::EventListener;
+use nerv_term::grid::Dimensions;
+use nerv_term::term::{ShellState, SizeInfo, TextBuffer};
 use nerv_util::consts::CLI_BINARY_NAME;
-use nerv_util::env_var::{
-    Q_LOG_LEVEL,
-    Q_SHELL,
-    Q_TERM,
-    QTERM_SESSION_ID,
-};
-use nerv_util::process_info::{
-    Pid,
-    PidExt,
-};
-use nerv_util::{
-    PRODUCT_NAME,
-    PTY_BINARY_NAME,
-    Terminal as FigTerminal,
-    directories,
-};
-use flume::{
-    Receiver,
-    Sender,
-};
+use nerv_util::env_var::{Q_LOG_LEVEL, Q_SHELL, Q_TERM, QTERM_SESSION_ID};
+use nerv_util::process_info::{Pid, PidExt};
+use nerv_util::{PRODUCT_NAME, PTY_BINARY_NAME, Terminal as FigTerminal, directories};
 #[cfg(unix)]
 use nix::unistd::execvp;
 use portable_pty::PtySize;
-use tokio::io::{
-    self,
-    AsyncWriteExt,
-};
+use tokio::io::{self, AsyncWriteExt};
 use tokio::sync::oneshot;
-use tokio::{
-    runtime,
-    select,
-};
-use tracing::{
-    debug,
-    error,
-    info,
-    trace,
-    warn,
-};
+use tokio::{runtime, select};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::event_handler::EventHandler;
-use crate::input::{
-    InputEvent,
-    KeyCode,
-    KeyCodeEncodeModes,
-    KeyboardEncoding,
-    Modifiers,
-};
+use crate::input::{InputEvent, KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers};
 use crate::interceptor::KeyInterceptor;
-use crate::ipc::{
-    spawn_figterm_ipc,
-    spawn_remote_ipc,
-};
-use crate::message::{
-    process_figterm_message,
-    process_remote_message,
-};
+use crate::ipc::{spawn_figterm_ipc, spawn_remote_ipc};
+use crate::message::{process_figterm_message, process_remote_message};
 #[cfg(unix)]
 use crate::pty::unix::open_pty;
 #[cfg(windows)]
 use crate::pty::win::open_pty;
-use crate::pty::{
-    AsyncMasterPtyExt,
-    CommandBuilder,
-};
-use crate::term::{
-    SystemTerminal,
-    Terminal,
-};
+use crate::pty::{AsyncMasterPtyExt, CommandBuilder};
+use crate::term::{SystemTerminal, Terminal};
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -199,7 +121,11 @@ fn shell_state_to_context(shell_state: &ShellState) -> local::ShellContext {
             .local_context
             .username
             .as_deref()
-            .and_then(|username| HOSTNAME.as_deref().map(|hostname| format!("{username}@{hostname}"))),
+            .and_then(|username| {
+                HOSTNAME
+                    .as_deref()
+                    .map(|hostname| format!("{username}@{hostname}"))
+            }),
         environment_variables: SHELL_ENVIRONMENT_VARIABLES.lock().unwrap().clone(),
         qterm_version: Some(env!("CARGO_PKG_VERSION").into()),
         preexec: Some(shell_state.preexec),
@@ -242,7 +168,8 @@ async fn _should_install_remote_ssh_integration(
 ) -> Option<bool> {
     use nerv_proto::remote::clientbound;
 
-    let remote_install_setting = nerv_settings::settings::get_string_or("ssh.remote-prompt", "ask".into());
+    let remote_install_setting =
+        nerv_settings::settings::get_string_or("ssh.remote-prompt", "ask".into());
     if remote_install_setting == "never" {
         return Some(false);
     }
@@ -253,38 +180,40 @@ async fn _should_install_remote_ssh_integration(
         return Some(false);
     }
 
-    let prompt_timeout: u64 = nerv_settings::settings::get_int_or("ssh.remote-prompt.timeout", 2000)
-        .try_into()
-        .unwrap_or(2000);
+    let prompt_timeout: u64 =
+        nerv_settings::settings::get_int_or("ssh.remote-prompt.timeout", 2000)
+            .try_into()
+            .unwrap_or(2000);
 
     // Wait for child ssh session to connect to local desktop instance.
-    let got_child_connection = tokio::time::timeout(tokio::time::Duration::from_millis(prompt_timeout), async {
-        loop {
-            if let Ok(msg) = remote_receiver.recv_async().await {
-                if let Some(clientbound::Packet::NotifyChildSessionStarted(clientbound::NotifyChildSessionStarted {
-                    parent_id,
-                })) = msg.packet
-                {
-                    if parent_id == uuid {
-                        return true;
+    let got_child_connection =
+        tokio::time::timeout(tokio::time::Duration::from_millis(prompt_timeout), async {
+            loop {
+                if let Ok(msg) = remote_receiver.recv_async().await {
+                    if let Some(clientbound::Packet::NotifyChildSessionStarted(
+                        clientbound::NotifyChildSessionStarted { parent_id },
+                    )) = msg.packet
+                    {
+                        if parent_id == uuid {
+                            return true;
+                        }
+                    } else {
+                        process_remote_message(
+                            msg,
+                            main_loop_tx.clone(),
+                            remote_sender.clone(),
+                            term,
+                            pty_master,
+                            key_interceptor,
+                        )
+                        .await
+                        .ok();
                     }
-                } else {
-                    process_remote_message(
-                        msg,
-                        main_loop_tx.clone(),
-                        remote_sender.clone(),
-                        term,
-                        pty_master,
-                        key_interceptor,
-                    )
-                    .await
-                    .ok();
                 }
             }
-        }
-    })
-    .await
-    .is_ok();
+        })
+        .await
+        .is_ok();
 
     if got_child_connection {
         return Some(false);
@@ -321,9 +250,9 @@ where
         Some(at) => {
             let lock_expired = at.elapsed().unwrap_or(Duration::ZERO) > Duration::from_millis(16);
             let should_unlock = lock_expired
-                || term
-                    .get_current_buffer()
-                    .is_none_or(|buff| &buff.buffer == (&EXPECTED_BUFFER.lock().unwrap() as &String));
+                || term.get_current_buffer().is_none_or(|buff| {
+                    &buff.buffer == (&EXPECTED_BUFFER.lock().unwrap() as &String)
+                });
             if should_unlock {
                 handle.take();
                 if lock_expired {
@@ -335,7 +264,7 @@ where
             } else {
                 true
             }
-        },
+        }
         None => false,
     };
     drop(handle);
@@ -348,7 +277,8 @@ where
 const Q_DISABLE_AUTOCOMPLETE: &str = "Q_DISABLE_AUTOCOMPLETE";
 
 fn autocomplete_enabled(env: &Env) -> bool {
-    env.get_os(Q_DISABLE_AUTOCOMPLETE).is_none_or(|s| s.is_empty())
+    env.get_os(Q_DISABLE_AUTOCOMPLETE)
+        .is_none_or(|s| s.is_empty())
 }
 
 static AUTOCOMPLETE_ENABLED: LazyLock<bool> = LazyLock::new(|| autocomplete_enabled(&Env::new()));
@@ -370,12 +300,20 @@ where
             if let Some(cursor_idx) = edit_buffer.cursor_idx.and_then(|i| i.try_into().ok()) {
                 debug!("edit_buffer: {edit_buffer:?}");
                 trace!("buffer bytes: {:02X?}", edit_buffer.buffer.as_bytes());
-                trace!("buffer chars: {:?}", edit_buffer.buffer.chars().collect::<Vec<_>>());
+                trace!(
+                    "buffer chars: {:?}",
+                    edit_buffer.buffer.chars().collect::<Vec<_>>()
+                );
 
                 let context = shell_state_to_context(term.shell_state());
 
-                let edit_buffer_hook =
-                    new_edit_buffer_hook(Some(context), edit_buffer.buffer, cursor_idx, 0, cursor_coordinates);
+                let edit_buffer_hook = new_edit_buffer_hook(
+                    Some(context),
+                    edit_buffer.buffer,
+                    cursor_idx,
+                    0,
+                    cursor_coordinates,
+                );
                 let message = hook_to_message(edit_buffer_hook);
 
                 trace!("Sending: {message:?}");
@@ -383,7 +321,7 @@ where
                 sender.send_async(message).await?;
             }
             Ok(())
-        },
+        }
         None => Err(anyhow!("No edit buffer to send")),
     }
 }
@@ -395,7 +333,7 @@ fn get_parent_shell() -> Result<String> {
             Some(shell) => Ok(shell),
             None => {
                 anyhow::bail!("No Q_SHELL or SHELL found");
-            },
+            }
         },
     }
 }
@@ -410,7 +348,7 @@ fn build_shell_command(command: Option<&[String]>) -> Result<CommandBuilder> {
                 builder.arg(arg);
             }
             builder
-        },
+        }
         None => {
             let parent_shell = get_parent_shell()?;
             let mut builder = CommandBuilder::new(parent_shell);
@@ -419,16 +357,26 @@ fn build_shell_command(command: Option<&[String]>) -> Result<CommandBuilder> {
                 builder.arg("--login");
             }
 
-            if let Some(execution_string) = env::var("Q_EXECUTION_STRING").ok().filter(|s| !s.is_empty()) {
+            if let Some(execution_string) = env::var("Q_EXECUTION_STRING")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
                 builder.args(["-c", &execution_string]);
             }
 
-            if let Some(extra_args) = env::var("Q_SHELL_EXTRA_ARGS").ok().filter(|s| !s.is_empty()) {
-                builder.args(extra_args.split_whitespace().filter(|arg| arg != &"--login"));
+            if let Some(extra_args) = env::var("Q_SHELL_EXTRA_ARGS")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
+                builder.args(
+                    extra_args
+                        .split_whitespace()
+                        .filter(|arg| arg != &"--login"),
+                );
             }
 
             builder
-        },
+        }
     };
 
     builder.env(Q_TERM, env!("CARGO_PKG_VERSION"));
@@ -458,7 +406,9 @@ fn launch_shell(command: Option<&[String]>) -> Result<()> {
 
     let cargs: Vec<_> = args
         .into_iter()
-        .map(|arg| CString::new(arg.to_string_lossy().as_ref()).expect("Failed to convert arg to CString"))
+        .map(|arg| {
+            CString::new(arg.to_string_lossy().as_ref()).expect("Failed to convert arg to CString")
+        })
         .collect();
     for (key, val) in cmd.get_envs() {
         unsafe {
@@ -466,7 +416,7 @@ fn launch_shell(command: Option<&[String]>) -> Result<()> {
                 Some(value) => env::set_var(key, value),
                 None => {
                     env::remove_var(key);
-                },
+                }
             }
         }
     }
@@ -477,7 +427,7 @@ fn launch_shell(command: Option<&[String]>) -> Result<()> {
 
 fn figterm_main(command: Option<&[String]>) -> Result<()> {
     nerv_settings::settings::init_global().ok();
-    fig_telemetry::init_global_telemetry_emitter();
+    // Telemetry stripped (PRD v0.6 §0.2).
 
     let context = Context::new();
 
@@ -510,7 +460,9 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
     let _log_guard = match initialize_logging(LogArgs {
         log_level: None,
         log_to_stdout: false,
-        log_file_path: Some(directories::logs_dir()?.join(format!("{PTY_BINARY_NAME}{pty_name}.log"))),
+        log_file_path: Some(
+            directories::logs_dir()?.join(format!("{PTY_BINARY_NAME}{pty_name}.log")),
+        ),
         delete_old_log_file: true,
     }) {
         Ok(logger_guard) => Some(logger_guard),
@@ -520,7 +472,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                 eprintln!("Fig failed to init logger: {err:?}");
             }
             None
-        },
+        }
     };
 
     logger::stdio_debug_log(format!("pty name: {pty_name}"));
@@ -547,7 +499,8 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
     let runtime = runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name_fn(|| {
-            static ATOMIC_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            static ATOMIC_ID: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(0);
             let id = ATOMIC_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             format!("{PTY_BINARY_NAME}-runtime-worker-{id}")
         })
@@ -955,7 +908,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
         };
 
         let _ = stop_ipc_tx.send(());
-        fig_telemetry::finish_telemetry().await;
+        // Telemetry stripped (PRD v0.6 §0.2).
 
         result
     });
@@ -988,7 +941,7 @@ fn main() {
     match figterm_main(command) {
         Ok(()) => {
             info!("Exiting");
-        },
+        }
         Err(err) => {
             error!("Error in async runtime: {err}");
             println!("{PRODUCT_NAME} had an Error!: {err:?}");
@@ -1000,7 +953,7 @@ fn main() {
                 // capture_anyhow(&err);
                 logger::stdio_debug_log(err.to_string());
             }
-        },
+        }
     }
 }
 
@@ -1011,7 +964,10 @@ mod tests {
     #[test]
     fn autocomplete_enabled_test() {
         assert!(autocomplete_enabled(&Env::new_fake()));
-        assert!(autocomplete_enabled(&Env::from_slice(&[(Q_DISABLE_AUTOCOMPLETE, "")])));
+        assert!(autocomplete_enabled(&Env::from_slice(&[(
+            Q_DISABLE_AUTOCOMPLETE,
+            ""
+        )])));
         assert!(!autocomplete_enabled(&Env::from_slice(&[(
             Q_DISABLE_AUTOCOMPLETE,
             "1"

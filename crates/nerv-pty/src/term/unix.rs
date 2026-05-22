@@ -1,68 +1,29 @@
 use std::fs::OpenOptions;
-use std::io::{
-    Error as IoError,
-    Write,
-    stdin,
-    stdout,
-};
+use std::io::{Error as IoError, Write, stdin, stdout};
 use std::mem;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::AsRawFd;
-use std::sync::atomic::{
-    AtomicBool,
-    Ordering,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{
-    Context,
-    Result,
-    bail,
-};
+use anyhow::{Context, Result, bail};
 use bytes::BytesMut;
 use filedescriptor::FileDescriptor;
-use flume::{
-    Receiver,
-    bounded,
-};
-use nix::libc::{
-    self,
-    winsize,
-};
+use flume::{Receiver, bounded};
+use nix::libc::{self, winsize};
 use nix::sys::termios::{
-    FlushArg,
-    SetArg,
-    Termios,
-    cfmakeraw,
-    tcdrain,
-    tcflush,
-    tcgetattr,
-    tcsetattr,
+    FlushArg, SetArg, Termios, cfmakeraw, tcdrain, tcflush, tcgetattr, tcsetattr,
 };
-use tokio::io::{
-    self,
-    AsyncReadExt,
-};
+use tokio::io::{self, AsyncReadExt};
 use tokio::select;
 use tokio::signal::unix::SignalKind;
 use tokio::time::MissedTickBehavior;
-use tracing::{
-    error,
-    trace,
-    warn,
-};
+use tracing::{error, trace, warn};
 
 use super::InputEventResult;
-use crate::input::{
-    InputEvent,
-    InputParser,
-};
+use crate::input::{InputEvent, InputParser};
 use crate::term::istty::IsTty;
-use crate::term::{
-    ScreenSize,
-    Terminal,
-    cast,
-};
+use crate::term::{ScreenSize, Terminal, cast};
 
 const BUF_SIZE: usize = 4096;
 
@@ -149,8 +110,18 @@ impl UnixTty for TtyWriteHandle {
     }
 
     fn set_size(&mut self, size: winsize) -> Result<()> {
-        if unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCSWINSZ as _, &size as *const _) } != 0 {
-            bail!("failed to ioctl(TIOCSWINSZ): {:?}", IoError::last_os_error());
+        if unsafe {
+            libc::ioctl(
+                self.fd.as_raw_fd(),
+                libc::TIOCSWINSZ as _,
+                &size as *const _,
+            )
+        } != 0
+        {
+            bail!(
+                "failed to ioctl(TIOCSWINSZ): {:?}",
+                IoError::last_os_error()
+            );
         }
 
         Ok(())
@@ -207,7 +178,10 @@ impl UnixTerminal {
         let mut write = TtyWriteHandle::new(FileDescriptor::dup(write)?);
         let saved_termios = write.get_termios()?;
 
-        Ok(UnixTerminal { write, saved_termios })
+        Ok(UnixTerminal {
+            write,
+            saved_termios,
+        })
     }
 
     /// Attempt to explicitly open a handle to the terminal device
@@ -235,7 +209,8 @@ impl Terminal for UnixTerminal {
     }
 
     fn set_cooked_mode(&mut self) -> Result<()> {
-        self.write.set_termios(&self.saved_termios, SetAttributeWhen::Now)
+        self.write
+            .set_termios(&self.saved_termios, SetAttributeWhen::Now)
     }
 
     fn get_screen_size(&mut self) -> Result<ScreenSize> {

@@ -1,61 +1,21 @@
-use std::io::{
-    self,
-    Read,
-    Write,
-};
-use std::os::unix::io::{
-    AsRawFd,
-    FromRawFd,
-    RawFd,
-};
+use std::io::{self, Read, Write};
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 
-use anyhow::{
-    Context,
-    Result,
-};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use filedescriptor::FileDescriptor;
-use nix::fcntl::{
-    FcntlArg,
-    FdFlag,
-    OFlag,
-    fcntl,
-    open,
-};
+use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl, open};
 use nix::libc;
-use nix::pty::{
-    PtyMaster,
-    Winsize,
-    grantpt,
-    posix_openpt,
-    ptsname,
-    unlockpt,
-};
-use nix::sys::signal::{
-    SigHandler,
-    Signal,
-    signal,
-};
-use nix::sys::stat::{
-    Mode,
-    umask,
-};
+use nix::pty::{PtyMaster, Winsize, grantpt, posix_openpt, ptsname, unlockpt};
+use nix::sys::signal::{SigHandler, Signal, signal};
+use nix::sys::stat::{Mode, umask};
 use portable_pty::unix::close_random_fds;
-use portable_pty::{
-    Child,
-    PtySize,
-};
+use portable_pty::{Child, PtySize};
 use tokio::io::unix::AsyncFd;
 
-use crate::pty::{
-    AsyncMasterPty,
-    CommandBuilder,
-    MasterPty,
-    PtyPair,
-    SlavePty,
-};
+use crate::pty::{AsyncMasterPty, CommandBuilder, MasterPty, PtyPair, SlavePty};
 
 nix::ioctl_write_ptr_bad!(ioctl_tiocswinsz, libc::TIOCSWINSZ, Winsize);
 
@@ -141,7 +101,10 @@ pub fn open_pty(pty_size: &PtySize) -> Result<PtyPair> {
 }
 
 impl SlavePty for UnixSlavePty {
-    fn spawn_command(&self, builder: CommandBuilder) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
+    fn spawn_command(
+        &self,
+        builder: CommandBuilder,
+    ) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
         let configured_mask = builder.umask;
         let mut cmd = builder.as_command()?;
 
@@ -247,7 +210,10 @@ impl AsyncMasterPty for UnixAsyncMasterPty {
         let res = unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws_size as *const _) };
 
         if res != 0 {
-            anyhow::bail!("failed to ioctl(TIOCSWINSZ): {:?}", io::Error::last_os_error());
+            anyhow::bail!(
+                "failed to ioctl(TIOCSWINSZ): {:?}",
+                io::Error::last_os_error()
+            );
         }
 
         Ok(())
@@ -273,8 +239,8 @@ impl AsRawFd for UnixMasterPty {
 fn set_nonblocking(fd: RawFd) -> Result<()> {
     use nix::fcntl;
 
-    let old_oflag_c_int =
-        fcntl::fcntl(fd, FcntlArg::F_GETFL).with_context(|| format!("Failed to get flags for fd {fd:?}"))?;
+    let old_oflag_c_int = fcntl::fcntl(fd, FcntlArg::F_GETFL)
+        .with_context(|| format!("Failed to get flags for fd {fd:?}"))?;
 
     let old_oflag = OFlag::from_bits_truncate(old_oflag_c_int);
 

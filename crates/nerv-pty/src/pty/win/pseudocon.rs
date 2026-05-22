@@ -1,41 +1,22 @@
 use std::ffi::OsString;
 use std::io::Error as IoError;
 use std::os::windows::ffi::OsStringExt;
-use std::os::windows::io::{
-    AsRawHandle,
-    FromRawHandle,
-};
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
 use std::sync::Mutex;
-use std::{
-    mem,
-    ptr,
-};
+use std::{mem, ptr};
 
-use anyhow::{
-    Error,
-    bail,
-    ensure,
-};
-use filedescriptor::{
-    FileDescriptor,
-    OwnedHandle,
-};
+use anyhow::{Error, bail, ensure};
+use filedescriptor::{FileDescriptor, OwnedHandle};
 use lazy_static::lazy_static;
 use shared_library::shared_library;
 use tracing::error;
 use winapi::shared::minwindef::DWORD;
-use winapi::shared::winerror::{
-    HRESULT,
-    S_OK,
-};
+use winapi::shared::winerror::{HRESULT, S_OK};
 use winapi::um::handleapi::*;
 use winapi::um::processthreadsapi::*;
 use winapi::um::winbase::{
-    CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT,
-    STARTF_USESTDHANDLES,
-    STARTUPINFOEXW,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 use winapi::um::wincon::COORD;
 use winapi::um::winnt::HANDLE;
@@ -66,8 +47,9 @@ shared_library!(ConPtyFuncs,
 fn load_conpty() -> ConPtyFuncs {
     // If the kernel doesn't export these functions then their system is
     // too old and we cannot run.
-    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll"))
-        .expect("this system does not support conpty.  Windows 10 October 2018 or newer is required");
+    let kernel = ConPtyFuncs::open(Path::new("kernel32.dll")).expect(
+        "this system does not support conpty.  Windows 10 October 2018 or newer is required",
+    );
 
     // We prefer to use a sideloaded conpty.dll and openconsole.exe host deployed
     // alongside the application.  We check for this after checking for kernel
@@ -104,11 +86,17 @@ impl PseudoCon {
                 size,
                 input.as_raw_handle() as _,
                 output.as_raw_handle() as _,
-                PSEUDOCONSOLE_RESIZE_QUIRK | PSEUDOCONSOLE_WIN32_INPUT_MODE | PSEUDOCONSOLE_PASSTHROUGH_MODE,
+                PSEUDOCONSOLE_RESIZE_QUIRK
+                    | PSEUDOCONSOLE_WIN32_INPUT_MODE
+                    | PSEUDOCONSOLE_PASSTHROUGH_MODE,
                 &mut con,
             )
         };
-        ensure!(result == S_OK, "failed to create pseudo console: HRESULT {}", result);
+        ensure!(
+            result == S_OK,
+            "failed to create pseudo console: HRESULT {}",
+            result
+        );
         Ok(Self { con })
     }
 
@@ -158,7 +146,9 @@ impl PseudoCon {
                 0,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
                 cmd.environment_block().as_mut_slice().as_mut_ptr() as *mut _,
-                cwd.as_ref().map(|c| c.as_slice().as_ptr()).unwrap_or(ptr::null()),
+                cwd.as_ref()
+                    .map(|c| c.as_slice().as_ptr())
+                    .unwrap_or(ptr::null()),
                 &mut si.StartupInfo,
                 &mut pi,
             )
@@ -180,6 +170,8 @@ impl PseudoCon {
         let _main_thread = unsafe { OwnedHandle::from_raw_handle(pi.hThread as _) };
         let proc = unsafe { OwnedHandle::from_raw_handle(pi.hProcess as _) };
 
-        Ok(WinChild { proc: Mutex::new(proc) })
+        Ok(WinChild {
+            proc: Mutex::new(proc),
+        })
     }
 }

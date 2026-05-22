@@ -1,13 +1,7 @@
 use std::io::Error as IoError;
-use std::{
-    mem,
-    ptr,
-};
+use std::{mem, ptr};
 
-use anyhow::{
-    Error,
-    ensure,
-};
+use anyhow::{Error, ensure};
 use winapi::shared::minwindef::DWORD;
 use winapi::um::processthreadsapi::*;
 
@@ -22,7 +16,14 @@ pub struct ProcThreadAttributeList {
 impl ProcThreadAttributeList {
     pub fn with_capacity(num_attributes: DWORD) -> Result<Self, Error> {
         let mut bytes_required: usize = 0;
-        unsafe { InitializeProcThreadAttributeList(ptr::null_mut(), num_attributes, 0, &mut bytes_required) };
+        unsafe {
+            InitializeProcThreadAttributeList(
+                ptr::null_mut(),
+                num_attributes,
+                0,
+                &mut bytes_required,
+            )
+        };
         let mut data = Vec::with_capacity(bytes_required);
         // We have the right capacity, so force the vec to consider itself
         // that length.  The contents of those bytes will be maintained
@@ -33,7 +34,9 @@ impl ProcThreadAttributeList {
         };
 
         let attr_ptr = data.as_mut_slice().as_mut_ptr() as *mut _;
-        let res = unsafe { InitializeProcThreadAttributeList(attr_ptr, num_attributes, 0, &mut bytes_required) };
+        let res = unsafe {
+            InitializeProcThreadAttributeList(attr_ptr, num_attributes, 0, &mut bytes_required)
+        };
         ensure!(
             res != 0,
             "InitializeProcThreadAttributeList failed: {}",
