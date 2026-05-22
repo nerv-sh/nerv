@@ -23,13 +23,6 @@
 //! Status: M0-4 in progress. Public types and the `parse` entry point
 //! are stable; the implementation lands in subsequent chunks.
 
-// Helpers, literal parsers, and dispatchers are wired up progressively
-// across M0-4 chunks 3b–3f; the early ones go un-called until later
-// chunks land. Lift the dead-code lint module-wide so each in-progress
-// chunk compiles cleanly without a forest of per-fn `#[allow]`s. To
-// remove once chunk 3f wires `parse()` into the full pipeline.
-#![allow(dead_code)]
-
 use std::ops::Range;
 
 /// Statement-level operators recognised by the tokenizer.
@@ -414,12 +407,9 @@ fn parse_arithmetic(input: &str, at: usize) -> Node {
     parse_delimited_literal(input, at, NodeKind::ArithmeticExpansion, "$((", "))")
 }
 
-/// Parse `$(...)` or `` `...` ``.
-///
-/// Chunk 3c implementation is a *shallow* skip-to-terminator — the
-/// substitution body is not recursively parsed yet. Chunk 3f will swap
-/// this for a call into `parse_statements` so the inner command tree
-/// is built.
+/// Parse `$(...)` or `` `...` `` — recursively parses the inner
+/// command tree via `parse_statements` so the substitution body
+/// shows up as proper Command/Pipeline/List children.
 fn parse_command_substitution(input: &str, at: usize, term: char) -> Node {
     let body_start = at
         + if input.as_bytes().get(at) == Some(&b'`') {
@@ -427,29 +417,21 @@ fn parse_command_substitution(input: &str, at: usize, term: char) -> Node {
         } else {
             2
         };
-    let term_byte = term as u8;
-    let bytes = input.as_bytes();
-    let mut i = body_start;
-    while i < input.len() {
-        if bytes[i] == term_byte {
-            return build_literal_node(
-                input,
-                at,
-                i + 1,
-                NodeKind::CommandSubstitution,
-                Vec::new(),
-                true,
-            );
-        }
-        i += 1;
-    }
+    let (children, terminator_idx) = parse_statements(input, body_start, Some(term), false);
+    let terminated = terminator_idx.is_some();
+    let end = if let Some(t) = terminator_idx {
+        t + 1
+    } else {
+        input.len()
+    };
+    let has_children = !children.is_empty();
     build_literal_node(
         input,
         at,
-        input.len(),
+        end,
         NodeKind::CommandSubstitution,
-        Vec::new(),
-        false,
+        children,
+        terminated && has_children,
     )
 }
 
@@ -881,22 +863,219 @@ fn parse_assignment_list_or_command(
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunk 3f wires this into parse())
+// Statements & program entry (chunk 3f)
 // ---------------------------------------------------------------------------
 
-/// Parse a shell command-line string into a `Program`-rooted node tree.
+/// Compose `lhs` and `rhs` into a single `kind` node. When `rhs` is
+/// already the same `kind` (nested pipeline / list), prepend `lhs` to
+/// its children instead of producing a deeper tree.
+fn reduce_statements(input: &str, lhs: Node, rhs: Node, kind: NodeKind) -> Node {
+    let start = lhs.span.start;
+    let end = rhs.span.end;
+    let complete = lhs.complete && rhs.complete;
+    let children = if rhs.kind == kind {
+        let mut v = Vec::with_capacity(rhs.children.len() + 1);
+        v.push(lhs);
+        v.extend(rhs.children);
+        v
+    } else {
+        vec![lhs, rhs]
+    };
+    Node {
+        kind,
+        span: start..end,
+        text: input[start..end].to_string(),
+        inner_text: input[start..end].to_string(),
+        complete,
+        children,
+        operator: None,
+    }
+}
+
+/// Parse a `;` / `&` / `&;`-separated sequence of statements.
 ///
-/// The body still returns an empty `Program`; statement parsing arrives
-/// in chunks 3c–3f. Helpers (`next_word_idx`, `parse_operator`,
-/// `compute_inner_text`) are crate-internal and used by those chunks.
+/// Stops at `terminal_char` (e.g. `)` or `` ` `` for command
+/// substitution, `}` for compound statements) or EOF. When
+/// `must_terminate` is true (compound statement context) the inner
+/// parse_statement call does not stop at `terminal_char` — the
+/// terminator is observed only after each statement, in this loop.
+///
+/// Returns the statement list and an optional byte index pointing
+/// at the seen `terminal_char` (`None` when EOF reached first).
+fn parse_statements(
+    input: &str,
+    start: usize,
+    terminal_char: Option<char>,
+    must_terminate: bool,
+) -> (Vec<Node>, Option<usize>) {
+    let mut statements: Vec<Node> = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = start;
+
+    while i < input.len() {
+        let stmt_terminal = if must_terminate { None } else { terminal_char };
+        let mut statement = parse_statement(input, i, stmt_terminal);
+
+        let op_idx = next_word_idx(input, statement.span.end);
+
+        // Did the next non-whitespace land on our terminal_char?
+        if !must_terminate {
+            if let (Some(idx), Some(tc)) = (op_idx, terminal_char) {
+                if bytes.get(idx).copied() == Some(tc as u8) {
+                    statements.push(statement);
+                    return (statements, Some(idx));
+                }
+            }
+        }
+
+        let Some(op_idx) = op_idx else {
+            statements.push(statement);
+            return (statements, None);
+        };
+
+        let op = parse_operator(input, op_idx);
+        if let Some(op) = op {
+            // Statement terminator (; & &;) or composition (we only
+            // step over the first three here; the others are inner-
+            // statement operators consumed inside parse_statement).
+            i = op_idx + op.len();
+            statements.push(statement);
+
+            // Look ahead for the terminal_char immediately after the
+            // terminator — `cmd;)` should not invent an empty statement.
+            if let (Some(next_idx), Some(tc)) = (next_word_idx(input, i), terminal_char) {
+                if bytes.get(next_idx).copied() == Some(tc as u8) {
+                    return (statements, Some(next_idx));
+                }
+            }
+        } else {
+            // Token sitting where a terminator would go. Treat
+            // assignment-lists as still potentially complete (they
+            // don't need terminators); flag other statements.
+            if !matches!(statement.kind, NodeKind::AssignmentList) {
+                statement.complete = false;
+            }
+            statements.push(statement);
+            i = op_idx;
+        }
+    }
+
+    (statements, None)
+}
+
+/// Parse a single statement: compound `{ ... }`, subshell `( ... )`,
+/// or assignment-list / command optionally combined with the next
+/// statement via `&&`, `||`, `|`, or `|&`.
+fn parse_statement(input: &str, idx: usize, terminal_char: Option<char>) -> Node {
+    let i = next_word_idx(input, idx).unwrap_or(idx);
+    let bytes = input.as_bytes();
+    let first = bytes.get(i).copied();
+
+    let statement = if matches!(first, Some(b'{') | Some(b'(')) {
+        let is_compound = first == Some(b'{');
+        let end_char = if is_compound { '}' } else { ')' };
+        let (children, terminator_idx) =
+            parse_statements(input, i + 1, Some(end_char), is_compound);
+        let has_children = !children.is_empty();
+        let terminated = terminator_idx.is_some();
+        let end_idx = if let Some(t) = terminator_idx {
+            t + 1
+        } else if has_children {
+            children.last().expect("non-empty").span.end
+        } else {
+            input.len()
+        };
+        let kind = if is_compound {
+            NodeKind::CompoundStatement
+        } else {
+            NodeKind::Subshell
+        };
+        Node {
+            kind,
+            span: i..end_idx,
+            text: input[i..end_idx].to_string(),
+            inner_text: input[i..end_idx].to_string(),
+            complete: terminated && has_children,
+            children,
+            operator: None,
+        }
+    } else {
+        parse_assignment_list_or_command(input, i, terminal_char)
+    };
+
+    // Is there a composition operator (| |& && ||) after the statement?
+    let after_idx = next_word_idx(input, statement.span.end);
+    let op = after_idx.and_then(|idx| parse_operator(input, idx));
+
+    let stop_here = match op {
+        None => true,
+        // Statement terminators (`;`/`&`/`&;`) are consumed by
+        // parse_statements, not here.
+        Some(Operator::Semi | Operator::Amp | Operator::AmpSemi) => true,
+        _ => after_idx
+            .and_then(|idx| bytes.get(idx).copied())
+            .zip(terminal_char)
+            .is_some_and(|(b, tc)| b == tc as u8),
+    };
+
+    if stop_here {
+        return statement;
+    }
+
+    // Composition: parse the right-hand statement and fold.
+    let op = op.expect("checked Some via stop_here branch");
+    let op_idx = after_idx.expect("checked Some via op match");
+    let rhs = parse_statement(input, op_idx + op.len(), terminal_char);
+
+    match op {
+        Operator::And | Operator::Or => reduce_statements(input, statement, rhs, NodeKind::List),
+        Operator::Pipe | Operator::PipeAmp => {
+            // Special case: `cmd1 | cmd2 && cmd3`. The rhs is a List
+            // whose first child is `cmd2`; we need to fold lhs+cmd2
+            // into a Pipeline as the new first child of the List.
+            if rhs.kind == NodeKind::List {
+                let mut other = rhs.children;
+                let first_child = other.remove(0);
+                let new_first =
+                    reduce_statements(input, statement, first_child, NodeKind::Pipeline);
+                let start = new_first.span.start;
+                let end = rhs.span.end;
+                let mut all = Vec::with_capacity(1 + other.len());
+                all.push(new_first);
+                all.extend(other);
+                let complete = all.iter().all(|c| c.complete);
+                Node {
+                    kind: NodeKind::List,
+                    span: start..end,
+                    text: input[start..end].to_string(),
+                    inner_text: input[start..end].to_string(),
+                    complete,
+                    children: all,
+                    operator: None,
+                }
+            } else {
+                reduce_statements(input, statement, rhs, NodeKind::Pipeline)
+            }
+        }
+        // Statement terminators are handled by stop_here above.
+        Operator::Semi | Operator::Amp | Operator::AmpSemi => statement,
+    }
+}
+
+/// Parse a full shell command-line string into a `Program`-rooted
+/// node tree. The program contains the parsed statements as
+/// children; each statement may itself be a Command, AssignmentList,
+/// CompoundStatement, Subshell, Pipeline, or List.
 pub fn parse(input: &str) -> Node {
+    let (children, _) = parse_statements(input, 0, None, false);
+    let complete = children.iter().all(|c| c.complete);
     Node {
         kind: NodeKind::Program,
         span: 0..input.len(),
         text: input.to_string(),
         inner_text: input.to_string(),
-        complete: true,
-        children: Vec::new(),
+        complete,
+        children,
         operator: None,
     }
 }
@@ -937,6 +1116,9 @@ mod tests {
         let node = parse("git status");
         assert_eq!(node.span, 0..10);
         assert_eq!(node.text, "git status");
+        // Now wired: a non-empty program emits a Command child.
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].kind, NodeKind::Command);
     }
 
     #[test]
@@ -1556,5 +1738,177 @@ mod tests {
         let n = parse_assignment_list_or_command("", 0, None);
         assert_eq!(n.kind, NodeKind::Command);
         assert!(!n.complete);
+    }
+
+    // -- parse (statements + composition) -----------------------------------
+
+    #[test]
+    fn parse_single_command_yields_one_command_statement() {
+        let p = parse("git status");
+        assert_eq!(p.kind, NodeKind::Program);
+        assert_eq!(p.children.len(), 1);
+        assert_eq!(p.children[0].kind, NodeKind::Command);
+        assert_eq!(p.children[0].children.len(), 2);
+    }
+
+    #[test]
+    fn parse_semicolon_sequence_yields_three_statements() {
+        let p = parse("a; b; c");
+        assert_eq!(p.children.len(), 3);
+        for child in &p.children {
+            assert_eq!(child.kind, NodeKind::Command);
+            assert_eq!(child.children.len(), 1);
+        }
+    }
+
+    #[test]
+    fn parse_pipeline_two_commands() {
+        let p = parse("a | b");
+        assert_eq!(p.children.len(), 1);
+        assert_eq!(p.children[0].kind, NodeKind::Pipeline);
+        assert_eq!(p.children[0].children.len(), 2);
+    }
+
+    #[test]
+    fn parse_pipeline_three_commands_flattens() {
+        // a | b | c → single Pipeline with 3 children (not nested).
+        let p = parse("a | b | c");
+        assert_eq!(p.children.len(), 1);
+        let pipe = &p.children[0];
+        assert_eq!(pipe.kind, NodeKind::Pipeline);
+        assert_eq!(pipe.children.len(), 3);
+    }
+
+    #[test]
+    fn parse_list_and_two_commands() {
+        let p = parse("a && b");
+        assert_eq!(p.children.len(), 1);
+        assert_eq!(p.children[0].kind, NodeKind::List);
+        assert_eq!(p.children[0].children.len(), 2);
+    }
+
+    #[test]
+    fn parse_list_or_two_commands() {
+        let p = parse("a || b");
+        assert_eq!(p.children.len(), 1);
+        assert_eq!(p.children[0].kind, NodeKind::List);
+    }
+
+    #[test]
+    fn parse_mixed_pipe_and_and() {
+        // a | b && c → List[Pipeline[a, b], c]
+        let p = parse("a | b && c");
+        assert_eq!(p.children.len(), 1);
+        let list = &p.children[0];
+        assert_eq!(list.kind, NodeKind::List);
+        assert_eq!(list.children.len(), 2);
+        assert_eq!(list.children[0].kind, NodeKind::Pipeline);
+        assert_eq!(list.children[0].children.len(), 2);
+        assert_eq!(list.children[1].kind, NodeKind::Command);
+    }
+
+    #[test]
+    fn parse_compound_statement() {
+        let p = parse("{ a; b; }");
+        assert_eq!(p.children.len(), 1);
+        let cs = &p.children[0];
+        assert_eq!(cs.kind, NodeKind::CompoundStatement);
+        assert_eq!(cs.children.len(), 2);
+        assert!(cs.complete);
+    }
+
+    #[test]
+    fn parse_subshell() {
+        let p = parse("( ls )");
+        assert_eq!(p.children.len(), 1);
+        let ss = &p.children[0];
+        assert_eq!(ss.kind, NodeKind::Subshell);
+        assert_eq!(ss.children.len(), 1);
+        assert!(ss.complete);
+    }
+
+    #[test]
+    fn parse_compound_unterminated_is_incomplete() {
+        let p = parse("{ a;");
+        let cs = &p.children[0];
+        assert_eq!(cs.kind, NodeKind::CompoundStatement);
+        assert!(!cs.complete);
+    }
+
+    #[test]
+    fn parse_subshell_unterminated_is_incomplete() {
+        let p = parse("( a");
+        let ss = &p.children[0];
+        assert_eq!(ss.kind, NodeKind::Subshell);
+        assert!(!ss.complete);
+    }
+
+    #[test]
+    fn parse_command_substitution_now_recurses() {
+        // After chunk 3f the body of $() is parsed via parse_statements.
+        let p = parse("echo $(ls foo)");
+        assert_eq!(p.children.len(), 1);
+        let cmd = &p.children[0];
+        assert_eq!(cmd.kind, NodeKind::Command);
+        // children = [echo, $(ls foo)]
+        assert_eq!(cmd.children.len(), 2);
+        let sub = &cmd.children[1];
+        assert_eq!(sub.kind, NodeKind::CommandSubstitution);
+        assert!(sub.complete);
+        // Inner cmd_sub children should now be a single Command with two args.
+        assert_eq!(sub.children.len(), 1);
+        let inner = &sub.children[0];
+        assert_eq!(inner.kind, NodeKind::Command);
+        assert_eq!(inner.children.len(), 2);
+        assert_eq!(inner.children[0].text, "ls");
+        assert_eq!(inner.children[1].text, "foo");
+    }
+
+    #[test]
+    fn parse_backtick_command_substitution_recurses() {
+        let p = parse("echo `pwd`");
+        let cmd = &p.children[0];
+        let sub = &cmd.children[1];
+        assert_eq!(sub.kind, NodeKind::CommandSubstitution);
+        assert!(sub.complete);
+        assert_eq!(sub.children.len(), 1);
+        assert_eq!(sub.children[0].kind, NodeKind::Command);
+    }
+
+    #[test]
+    fn parse_assignment_with_command_in_program() {
+        let p = parse("FOO=bar cmd arg");
+        assert_eq!(p.children.len(), 1);
+        let stmt = &p.children[0];
+        assert_eq!(stmt.kind, NodeKind::AssignmentList);
+        assert_eq!(stmt.children.len(), 2);
+        assert_eq!(stmt.children[0].kind, NodeKind::Assignment);
+        assert_eq!(stmt.children[1].kind, NodeKind::Command);
+    }
+
+    #[test]
+    fn parse_string_with_command_substitution_inside() {
+        // "$(date)" — String contains CommandSubstitution child.
+        let p = parse("echo \"$(date)\"");
+        let cmd = &p.children[0];
+        let arg = &cmd.children[1];
+        assert_eq!(arg.kind, NodeKind::String);
+        assert!(arg.complete);
+        assert_eq!(arg.children.len(), 1);
+        assert_eq!(arg.children[0].kind, NodeKind::CommandSubstitution);
+    }
+
+    #[test]
+    fn parse_unterminated_string_leaves_string_child_incomplete() {
+        // Completeness lives on the leaf node — a Command whose String
+        // arg never closed is still "structurally a command", so only
+        // the String reports incomplete. (Consumers walk children if
+        // they need a deep "anything unterminated" check.)
+        let p = parse("echo \"hi");
+        let cmd = &p.children[0];
+        assert_eq!(cmd.kind, NodeKind::Command);
+        let arg = &cmd.children[1];
+        assert_eq!(arg.kind, NodeKind::String);
+        assert!(!arg.complete);
     }
 }
