@@ -1,7 +1,8 @@
 # `nerv uninstall` — 인수 기준 명세서
 
-> **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.4 §5.4 정합.
+> **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 §5.4 정합.
 > **출시 차단 요건**: 본 문서의 *모든* 인수 기준이 e2e 자동 테스트에서 통과해야 v1.0 출시.
+> **v0.6 정합**: marker 블록 식별/제거 로직은 `nerv-shell` (자작, 보존) + `nerv-integrations` (← upstream `fig_integrations`, 흡수) 에 분산. uninstall 절차 자체는 변경 없음. nerv-pty (M1 figterm opt-in) 도입 시 PTY shim 바이너리 (`~/.local/bin/nerv-pty`) 가 §2 인벤토리에 8번으로 추가됨 — §11 참조.
 
 ---
 
@@ -33,6 +34,8 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 | 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, formula 메타 | `brew install` | brew 가 처리 |
 
 > **v1.0 비대상**: LaunchAgent (`~/Library/LaunchAgents/sh.nerv.nervd.plist`) — v1.0 은 `nerv start` / `stop` 수동 라이프사이클만. 자동 기동 도입 (v1.x) 시점에 본 인벤토리에 8번으로 추가하고 §4 step 6 도 함께 부활한다.
+>
+> **v1.0 M0 비대상 (M1 도입 예정)**: `nerv-pty` (← upstream figterm) PTY shim 바이너리 — PRD v0.6 §5.8 의 opt-in path 도입 시 `~/.local/bin/nerv-pty` + `pre.sh` 의 `exec -a` 라인이 §2 인벤토리에 추가됨. uninstall 절차도 PTY shim 종료 + 바이너리 삭제 + pre.sh 라인 제거 단계 추가. §11 참조.
 
 > **macOS 경로 일관성 원칙**: 캐시 = `~/Library/Caches/nerv/`, 로그 = `~/Library/Logs/nerv/`, 설정 = `~/.config/nerv/`.
 
@@ -57,6 +60,8 @@ eval "$(/opt/homebrew/bin/nerv init zsh --shell-script)"
 - `Version` / `Installed` 메타 라인은 갱신 시 덮어쓴다.
 - 마커 사이 라인은 `nerv init zsh` 출력으로 *완전 대체* 한다 (사용자 수정 무효).
 - `nerv init zsh` 를 여러 번 실행해도 마커 블록은 **항상 1개만** 존재해야 한다.
+
+**v0.6 구현 매핑**: 마커 블록의 쓰기/탐지/삭제는 `crates/nerv-shell` (자작, 마커 상수 `MARKER_BEGIN` / `MARKER_END` + 4 unit test) 이 권위. `crates/nerv-integrations` (← upstream fig_integrations 흡수) 의 `pre.sh` / `post.zsh` 스크립트가 마커 블록 *내부* 본문을 제공. CLAUDE.md §4 invariant 의 "marker 교체 필수" 행 참조 — 흡수 시 fig 의 마커는 nerv 마커로 전수 교체됐는지 grep 검증.
 
 ---
 
@@ -265,6 +270,32 @@ uninstall 의 모든 단계는 `~/Library/Logs/nerv/uninstall-<timestamp>.log` �
 
 uninstall 자체의 로그는 §4 step 5 ("로그 삭제")에서 제거되지 않는다 — 디버깅을 위해 *남긴다*. 사용자가 직접 정리하거나, 다음 nerv 설치 시 자동 정리.
 
+**v0.6 구현 매핑**: 로그 디렉터리 (`~/Library/Logs/nerv/`) 의 생성/회전은 `crates/nerv-log` (← upstream fig_log 흡수, 경로 재배선) 가 담당. PII 미기록 정책 (§3.5) 은 흡수 후에도 유지 (CLAUDE.md §4 invariant 의 "Q 경로 잔존 금지" 행 참조).
+
+---
+
+## 11. M1 figterm (`nerv-pty`) opt-in 시 인벤토리 추가분
+
+PRD v0.6 §5.8 의 opt-in path 가 활성화되면 (`nerv init zsh --pty`) 본 §2 표에 다음 항목이 추가된다:
+
+| # | 종류 | 경로 / 리소스 | 생성 주체 | `--keep-config` 시 |
+|---|------|---------------|----------|-------------------|
+| 8 | PTY shim 바이너리 | `~/.local/bin/nerv-pty` | `nerv init zsh --pty` | 삭제 |
+| 9 | pre.sh 의 `exec -a "<shell> (nerv-pty)" nerv-pty` 라인 | `~/.zshrc` 의 마커 블록 내부 (또는 `nerv-integrations/pre.sh` 가 sourcing 된 위치) | `nerv init zsh --pty` | 삭제 |
+
+uninstall 절차 (§4) 에 PTY shim 종료 단계 추가:
+
+```
+2.5. PTY shim 종료:
+     a. 모든 활성 zsh 세션에 SIGTERM (사용자 confirm 후, ─force 시 자동)
+        — 또는 pre.sh 의 exec 교체만 제거하고 새 셸부터 ZLE 복귀
+     b. ~/.local/bin/nerv-pty 삭제
+```
+
+ZLE-only 사용자는 본 §11 무관 (인벤토리 §2 그대로). figterm
+opt-in 사용자만 §11 추가분도 검증 대상.
+
 ---
 
 *문서 v1.1 — PLAN.md v0.5 §5.4 인수 기준의 정밀 명세. v1.0 → v1.1 변경: §2 인벤토리에서 LaunchAgent 제거 (v1.0 비대상), §4 절차에서 LaunchAgent 단계 삭제, 단계 번호 9→8 재정렬. 변경 트리거: M0-1 PoC 결과로 데몬 IPC 구조 변경 시, LaunchAgent 자동 기동 도입 (PLAN v?.x) 시.*
+*v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: §2 / §3 / §10 에 v0.6 구현 매핑 행 추가 (nerv-shell + nerv-integrations + nerv-log 흡수 정합), §11 신설 (M1 figterm opt-in 시 인벤토리 추가분 + uninstall 절차 단계 2.5). 본문 인수 기준 자체는 변경 없음 (PRD §5.4 그대로). 변경 트리거: figterm M1 도입 commit, LaunchAgent 자동 기동 도입.*
