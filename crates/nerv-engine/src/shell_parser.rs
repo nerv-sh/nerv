@@ -541,7 +541,176 @@ fn child_at_idx(input: &str, at: usize, in_string: bool, terminators: &[char]) -
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunks 3d–3f land progressively)
+// Command + concatenation (chunk 3d)
+// ---------------------------------------------------------------------------
+
+/// Promote any pending bare-word run into the current argument's
+/// child list. No-op when no word is in progress.
+fn close_word(
+    input: &str,
+    word_start: &mut Option<usize>,
+    argument_children: &mut Vec<Node>,
+    end_idx: usize,
+) {
+    if let Some(ws) = word_start.take() {
+        if ws < end_idx {
+            argument_children.push(build_literal_node(
+                input,
+                ws,
+                end_idx,
+                NodeKind::Word,
+                Vec::new(),
+                true,
+            ));
+        }
+    }
+}
+
+/// Finalise the current argument: close any open word, then wrap the
+/// accumulated children into a single `Word` / literal node when there
+/// is one, or a `Concatenation` node when adjacent literals make up
+/// a single shell argument (e.g. `foo"bar"`).
+fn close_argument(
+    input: &str,
+    args: &mut Vec<Node>,
+    argument_children: &mut Vec<Node>,
+    word_start: &mut Option<usize>,
+    end_idx: usize,
+) {
+    close_word(input, word_start, argument_children, end_idx);
+    if argument_children.is_empty() {
+        return;
+    }
+    let argument = if argument_children.len() == 1 {
+        argument_children.pop().expect("len == 1")
+    } else {
+        let start_idx = argument_children.first().expect("non-empty").span.start;
+        let last = argument_children.last().expect("non-empty");
+        let end_span = last.span.end;
+        let complete = last.complete;
+        let children: Vec<Node> = std::mem::take(argument_children);
+        build_literal_node(
+            input,
+            start_idx,
+            end_span,
+            NodeKind::Concatenation,
+            children,
+            complete,
+        )
+    };
+    args.push(argument);
+}
+
+/// Parse a sequence of shell arguments — bare words, quoted strings,
+/// expansions, command substitutions, or concatenations thereof — until
+/// an operator is seen, the `terminal_char` is reached, or EOF.
+///
+/// Returns the argument list and the byte index where parsing stopped.
+fn parse_concatenation_or_literals(
+    input: &str,
+    start: usize,
+    terminal_char: Option<char>,
+) -> (Vec<Node>, usize) {
+    let mut args: Vec<Node> = Vec::new();
+    let mut argument_children: Vec<Node> = Vec::new();
+    let mut word_start: Option<usize> = None;
+
+    // Terminator set used by nested literal parsers (e.g. parse_string)
+    // so they know when to stop probing for more characters.
+    let mut child_terminators: Vec<char> = vec!['&', '|', ';', '\n', '\'', '"', '`'];
+    if let Some(tc) = terminal_char {
+        child_terminators.push(tc);
+    }
+
+    let bytes = input.as_bytes();
+    let mut i = start;
+    while i < input.len() {
+        let c = bytes[i];
+
+        if parse_operator(input, i).is_some() || Some(c as char) == terminal_char {
+            break;
+        }
+
+        if let Some(child) = child_at_idx(input, i, false, &child_terminators) {
+            close_word(input, &mut word_start, &mut argument_children, i);
+            i = child.span.end;
+            argument_children.push(child);
+            continue;
+        }
+
+        if c == b' ' || c == b'\t' {
+            close_argument(input, &mut args, &mut argument_children, &mut word_start, i);
+            i += 1;
+            continue;
+        }
+
+        // Backslash escape: keep both the `\` and the escaped byte in
+        // the current word; `compute_inner_text` will drop the `\`.
+        if c == b'\\' {
+            if word_start.is_none() {
+                word_start = Some(i);
+            }
+            // Skip the backslash; then skip the escaped char (one UTF-8
+            // scalar). Bail safely on EOF after a lone backslash.
+            i += 1;
+            if i >= input.len() {
+                break;
+            }
+            let step = if bytes[i].is_ascii() {
+                1
+            } else {
+                input[i..]
+                    .chars()
+                    .next()
+                    .map(|ch| ch.len_utf8())
+                    .unwrap_or(1)
+            };
+            i += step;
+            continue;
+        }
+
+        if word_start.is_none() {
+            word_start = Some(i);
+        }
+
+        let step = if bytes[i].is_ascii() {
+            1
+        } else {
+            input[i..]
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(1)
+        };
+        i += step;
+    }
+
+    close_argument(input, &mut args, &mut argument_children, &mut word_start, i);
+    (args, i)
+}
+
+/// Parse a single command (sequence of argument words / literals).
+///
+/// Leading whitespace is skipped. With no actual arguments, the command
+/// node spans to EOF and is marked incomplete so callers can recognise
+/// "user is still typing the first token".
+fn parse_command(input: &str, at: usize, terminal_char: Option<char>) -> Node {
+    let start_idx = next_word_idx(input, at).unwrap_or(at).max(at);
+    let (children, end_idx) = parse_concatenation_or_literals(input, start_idx, terminal_char);
+    let has_children = !children.is_empty();
+    let end = if has_children { end_idx } else { input.len() };
+    build_literal_node(
+        input,
+        start_idx,
+        end,
+        NodeKind::Command,
+        children,
+        has_children,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Entry point (chunks 3e–3f land progressively)
 // ---------------------------------------------------------------------------
 
 /// Parse a shell command-line string into a `Program`-rooted node tree.
@@ -933,5 +1102,144 @@ mod tests {
     #[test]
     fn child_at_idx_returns_none_on_plain_letter() {
         assert!(child_at_idx("abc", 0, false, &[]).is_none());
+    }
+
+    // -- parse_command / parse_concatenation_or_literals --------------------
+
+    #[test]
+    fn parse_command_single_word() {
+        let n = parse_command("git", 0, None);
+        assert_eq!(n.kind, NodeKind::Command);
+        assert!(n.complete);
+        assert_eq!(n.span, 0..3);
+        assert_eq!(n.children.len(), 1);
+        assert_eq!(n.children[0].kind, NodeKind::Word);
+        assert_eq!(n.children[0].text, "git");
+    }
+
+    #[test]
+    fn parse_command_two_words() {
+        let n = parse_command("git status", 0, None);
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[0].text, "git");
+        assert_eq!(n.children[1].text, "status");
+    }
+
+    #[test]
+    fn parse_command_skips_leading_whitespace() {
+        let n = parse_command("   git", 0, None);
+        assert_eq!(n.span.start, 3);
+        assert_eq!(n.children.len(), 1);
+        assert_eq!(n.children[0].text, "git");
+    }
+
+    #[test]
+    fn parse_command_empty_input_is_incomplete() {
+        let n = parse_command("", 0, None);
+        assert!(!n.complete);
+        assert!(n.children.is_empty());
+    }
+
+    #[test]
+    fn parse_command_only_whitespace_is_incomplete() {
+        let n = parse_command("   ", 0, None);
+        assert!(!n.complete);
+        assert!(n.children.is_empty());
+    }
+
+    #[test]
+    fn parse_command_stops_at_operator() {
+        // semicolon is an operator → terminates the command.
+        let n = parse_command("git ; echo", 0, None);
+        assert_eq!(n.children.len(), 1);
+        assert_eq!(n.children[0].text, "git");
+        assert_eq!(n.span.end, 4);
+    }
+
+    #[test]
+    fn parse_command_stops_at_terminal_char() {
+        // Used by command-substitution: `$(ls foo)` → terminal char ')'.
+        let n = parse_command("ls foo)", 0, Some(')'));
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[0].text, "ls");
+        assert_eq!(n.children[1].text, "foo");
+    }
+
+    #[test]
+    fn parse_command_with_double_quoted_arg() {
+        let n = parse_command("git \"hello world\"", 0, None);
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[0].kind, NodeKind::Word);
+        assert_eq!(n.children[0].text, "git");
+        assert_eq!(n.children[1].kind, NodeKind::String);
+        assert_eq!(n.children[1].inner_text, "hello world");
+    }
+
+    #[test]
+    fn parse_command_concatenates_adjacent_literals() {
+        // `foo"bar"` is a single shell argument: Word + String concatenated.
+        let n = parse_command("foo\"bar\"", 0, None);
+        assert_eq!(n.children.len(), 1);
+        let arg = &n.children[0];
+        assert_eq!(arg.kind, NodeKind::Concatenation);
+        assert_eq!(arg.children.len(), 2);
+        assert_eq!(arg.children[0].kind, NodeKind::Word);
+        assert_eq!(arg.children[0].text, "foo");
+        assert_eq!(arg.children[1].kind, NodeKind::String);
+        assert_eq!(arg.children[1].text, "\"bar\"");
+        assert_eq!(arg.inner_text, "foobar");
+    }
+
+    #[test]
+    fn parse_command_concatenates_three_parts() {
+        // pre"mid"post — three adjacent literals.
+        let n = parse_command("pre\"mid\"post", 0, None);
+        assert_eq!(n.children.len(), 1);
+        let arg = &n.children[0];
+        assert_eq!(arg.kind, NodeKind::Concatenation);
+        assert_eq!(arg.children.len(), 3);
+        assert_eq!(arg.inner_text, "premidpost");
+    }
+
+    #[test]
+    fn parse_command_backslash_escapes_space() {
+        // `echo a\ b` — one Word arg whose inner_text is "a b".
+        let n = parse_command("echo a\\ b", 0, None);
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[0].text, "echo");
+        assert_eq!(n.children[1].kind, NodeKind::Word);
+        assert_eq!(n.children[1].text, "a\\ b");
+        assert_eq!(n.children[1].inner_text, "a b");
+    }
+
+    #[test]
+    fn parse_command_trailing_backslash_is_safe() {
+        // Lone trailing `\` (no escaped char) must not panic / overflow.
+        let n = parse_command("echo \\", 0, None);
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[0].text, "echo");
+        assert_eq!(n.children[1].text, "\\");
+    }
+
+    #[test]
+    fn parse_command_word_with_expansion_inside_is_word_plus_expansion() {
+        // `prefix$HOME` → Concatenation of Word + SimpleExpansion.
+        let n = parse_command("prefix$HOME", 0, None);
+        assert_eq!(n.children.len(), 1);
+        let arg = &n.children[0];
+        assert_eq!(arg.kind, NodeKind::Concatenation);
+        assert_eq!(arg.children.len(), 2);
+        assert_eq!(arg.children[0].kind, NodeKind::Word);
+        assert_eq!(arg.children[0].text, "prefix");
+        assert_eq!(arg.children[1].kind, NodeKind::SimpleExpansion);
+        assert_eq!(arg.children[1].text, "$HOME");
+    }
+
+    #[test]
+    fn parse_command_handles_multibyte_utf8_in_word() {
+        // Korean characters should pass through unharmed.
+        let n = parse_command("echo 한글", 0, None);
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[1].text, "한글");
     }
 }
