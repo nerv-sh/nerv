@@ -1,0 +1,71 @@
+{
+  "name": "git",
+  "description": "Distributed version control system",
+  "subcommands": [
+    {
+      "name": "status",
+      "description": "Show the working tree status",
+      "options": [
+        {
+          "names": ["-s", "--short"],
+          "description": "Give the output in the short format"
+        },
+        {
+          "names": ["-b", "--branch"],
+          "description": "Show the branch and tracking info"
+        }
+      ]
+    },
+    {
+      "name": "log",
+      "description": "Show commit logs",
+      "options": [
+        {
+          "names": ["--oneline"],
+          "description": "Pretty-print commits as one line each"
+        },
+        {
+          "names": ["-n"],
+          "description": "Limit to <number> commits",
+          "args": [{ "name": "number" }]
+        }
+      ]
+    },
+    {
+      "name": "checkout",
+      "aliases": ["co"],
+      "description": "Switch branches or restore working tree files",
+      "args": [
+        {
+          "name": "branch",
+          "generators": [
+            {
+              "type": "template",
+              "script": ["git", "branch", "--list"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "commit",
+      "description": "Record changes to the repository",
+      "options": [
+        {
+          "names": ["-m", "--message"],
+          "description": "Commit message",
+          "args": [{ "name": "msg" }]
+        },
+        {
+          "names": ["-a", "--all"],
+          "description": "Stage all tracked, modified files"
+        },
+        {
+          "names": ["-v", "--verbose"],
+          "is_repeatable": true,
+          "description": "Verbose output"
+        }
+      ]
+    }
+  ]
+}
