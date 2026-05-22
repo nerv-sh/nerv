@@ -710,7 +710,178 @@ fn parse_command(input: &str, at: usize, terminal_char: Option<char>) -> Node {
 }
 
 // ---------------------------------------------------------------------------
-// Entry point (chunks 3e–3f land progressively)
+// Assignment lists (chunk 3e)
+// ---------------------------------------------------------------------------
+
+/// Quick LHS check: does the prefix of `s` look like a shell variable
+/// assignment? Recognises `NAME=`, `NAME+=`, and `NAME[index]=` /
+/// `NAME[index]+=` forms. Pure ASCII byte check — no regex dep.
+fn looks_like_assignment(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut saw_lhs_char = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b.is_ascii_alphanumeric() || b == b'_' || b == b'[' || b == b']' {
+            saw_lhs_char = true;
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if !saw_lhs_char {
+        return false;
+    }
+    if i < bytes.len() && bytes[i] == b'+' {
+        i += 1;
+    }
+    i < bytes.len() && bytes[i] == b'='
+}
+
+/// Parse a single `NAME=value` / `NAME+=value` / `NAME[idx]=value` /
+/// `NAME[idx]+=value` assignment beginning at `start`. Caller must
+/// have already confirmed via `looks_like_assignment`.
+fn parse_assignment_node(input: &str, start: usize) -> Node {
+    let bytes = input.as_bytes();
+    let equals_idx = start
+        + bytes[start..]
+            .iter()
+            .position(|&b| b == b'=')
+            .expect("looks_like_assignment guaranteed `=`");
+
+    let (operator, lhs_end) = if equals_idx > start && bytes[equals_idx - 1] == b'+' {
+        (NodeOperator::AppendAssign, equals_idx - 1)
+    } else {
+        (NodeOperator::Assign, equals_idx)
+    };
+
+    // First `[` within the LHS — separates plain `NAME` from `NAME[idx]`.
+    let first_bracket = bytes[start..lhs_end]
+        .iter()
+        .position(|&b| b == b'[')
+        .map(|p| start + p);
+
+    let variable_name = build_literal_node(
+        input,
+        start,
+        first_bracket.unwrap_or(lhs_end),
+        NodeKind::VariableName,
+        Vec::new(),
+        true,
+    );
+
+    let name_node = if let Some(bracket_idx) = first_bracket {
+        // arr[index]  — index is a Word; subscript span includes `]`.
+        let index_node = build_literal_node(
+            input,
+            bracket_idx + 1,
+            lhs_end - 1,
+            NodeKind::Word,
+            Vec::new(),
+            true,
+        );
+        let subscript_end = lhs_end; // `]` is at lhs_end - 1; span ends after it
+        build_literal_node(
+            input,
+            start,
+            subscript_end,
+            NodeKind::Subscript,
+            vec![variable_name, index_node],
+            true,
+        )
+    } else {
+        variable_name
+    };
+
+    // Parse the right-hand value up to the next space (next assignment
+    // or command token starts after the space).
+    let (value_parts, end_idx) = parse_concatenation_or_literals(input, equals_idx + 1, Some(' '));
+
+    let complete = value_parts.last().is_none_or(|c| c.complete);
+
+    let mut children = Vec::with_capacity(1 + value_parts.len());
+    children.push(name_node);
+    children.extend(value_parts);
+
+    Node {
+        kind: NodeKind::Assignment,
+        span: start..end_idx,
+        text: input[start..end_idx].to_string(),
+        inner_text: input[start..end_idx].to_string(),
+        complete,
+        children,
+        operator: Some(operator),
+    }
+}
+
+/// Parse zero or more sequential assignments starting at `start`,
+/// separated by whitespace. Stops at the first token that doesn't
+/// look like an assignment.
+fn parse_assignments(input: &str, start: usize) -> Vec<Node> {
+    let mut assignments: Vec<Node> = Vec::new();
+    let mut cursor = start;
+    while cursor < input.len() {
+        let Some(token_start) = next_word_idx(input, cursor) else {
+            break;
+        };
+        if !looks_like_assignment(&input[token_start..]) {
+            break;
+        }
+        let node = parse_assignment_node(input, token_start);
+        cursor = node.span.end;
+        assignments.push(node);
+    }
+    assignments
+}
+
+/// Parse either an `AssignmentList` (one or more `FOO=bar` prefixed
+/// by zero or more whitespace), optionally followed by a `Command`,
+/// or fall through to a plain `Command` when no leading assignments
+/// are present.
+fn parse_assignment_list_or_command(
+    input: &str,
+    start: usize,
+    terminal_char: Option<char>,
+) -> Node {
+    let assignments = parse_assignments(input, start);
+    if assignments.is_empty() {
+        return parse_command(input, start, terminal_char);
+    }
+
+    let last = assignments.last().expect("non-empty");
+    let after_last = last.span.end;
+    let next_op = next_word_idx(input, after_last).and_then(|idx| parse_operator(input, idx));
+
+    // Append a Command iff the last assignment is complete, no operator
+    // separates it from the next token, and there's actually more input.
+    let mut command: Option<Node> = None;
+    if next_op.is_none() && last.complete && after_last != input.len() {
+        let cmd = parse_command(input, after_last, terminal_char);
+        if !cmd.children.is_empty() {
+            command = Some(cmd);
+        }
+    }
+
+    let end = command.as_ref().map(|c| c.span.end).unwrap_or(after_last);
+    let mut children = assignments;
+    if let Some(cmd) = command {
+        children.push(cmd);
+    }
+    let complete = children.last().is_none_or(|c| c.complete);
+
+    Node {
+        kind: NodeKind::AssignmentList,
+        span: start..end,
+        text: input[start..end].to_string(),
+        inner_text: input[start..end].to_string(),
+        complete,
+        children,
+        operator: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point (chunk 3f wires this into parse())
 // ---------------------------------------------------------------------------
 
 /// Parse a shell command-line string into a `Program`-rooted node tree.
@@ -1241,5 +1412,149 @@ mod tests {
         let n = parse_command("echo 한글", 0, None);
         assert_eq!(n.children.len(), 2);
         assert_eq!(n.children[1].text, "한글");
+    }
+
+    // -- looks_like_assignment ---------------------------------------------
+
+    #[test]
+    fn looks_like_assignment_simple_equals() {
+        assert!(looks_like_assignment("FOO=bar"));
+    }
+
+    #[test]
+    fn looks_like_assignment_append_equals() {
+        assert!(looks_like_assignment("PATH+=:/bin"));
+    }
+
+    #[test]
+    fn looks_like_assignment_subscript() {
+        assert!(looks_like_assignment("arr[0]=x"));
+    }
+
+    #[test]
+    fn looks_like_assignment_rejects_plain_command() {
+        assert!(!looks_like_assignment("git status"));
+    }
+
+    #[test]
+    fn looks_like_assignment_rejects_bare_name() {
+        assert!(!looks_like_assignment("FOO"));
+    }
+
+    #[test]
+    fn looks_like_assignment_rejects_leading_equals() {
+        assert!(!looks_like_assignment("=value"));
+    }
+
+    // -- parse_assignment_node ---------------------------------------------
+
+    #[test]
+    fn parse_assignment_simple() {
+        let n = parse_assignment_node("FOO=bar", 0);
+        assert_eq!(n.kind, NodeKind::Assignment);
+        assert_eq!(n.operator, Some(NodeOperator::Assign));
+        assert_eq!(n.span, 0..7);
+        // children[0] = VariableName, children[1..] = value parts.
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[0].kind, NodeKind::VariableName);
+        assert_eq!(n.children[0].text, "FOO");
+        assert_eq!(n.children[1].kind, NodeKind::Word);
+        assert_eq!(n.children[1].text, "bar");
+    }
+
+    #[test]
+    fn parse_assignment_append() {
+        let n = parse_assignment_node("PATH+=:/bin", 0);
+        assert_eq!(n.operator, Some(NodeOperator::AppendAssign));
+        assert_eq!(n.children[0].kind, NodeKind::VariableName);
+        assert_eq!(n.children[0].text, "PATH");
+        assert_eq!(n.children[1].text, ":/bin");
+    }
+
+    #[test]
+    fn parse_assignment_with_subscript() {
+        let n = parse_assignment_node("arr[0]=x", 0);
+        assert_eq!(n.operator, Some(NodeOperator::Assign));
+        assert_eq!(n.children[0].kind, NodeKind::Subscript);
+        // Subscript children: [VariableName "arr", Word "0"]
+        let subscript = &n.children[0];
+        assert_eq!(subscript.children.len(), 2);
+        assert_eq!(subscript.children[0].kind, NodeKind::VariableName);
+        assert_eq!(subscript.children[0].text, "arr");
+        assert_eq!(subscript.children[1].kind, NodeKind::Word);
+        assert_eq!(subscript.children[1].text, "0");
+    }
+
+    #[test]
+    fn parse_assignment_with_quoted_value() {
+        let n = parse_assignment_node("MSG=\"hello world\"", 0);
+        assert_eq!(n.children.len(), 2);
+        assert_eq!(n.children[0].text, "MSG");
+        assert_eq!(n.children[1].kind, NodeKind::String);
+        assert_eq!(n.children[1].inner_text, "hello world");
+    }
+
+    // -- parse_assignments (list) ------------------------------------------
+
+    #[test]
+    fn parse_assignments_zero() {
+        assert!(parse_assignments("git status", 0).is_empty());
+    }
+
+    #[test]
+    fn parse_assignments_one() {
+        let list = parse_assignments("FOO=bar", 0);
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn parse_assignments_many() {
+        let list = parse_assignments("FOO=bar BAZ=qux QUUX=quux", 0);
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].children[0].text, "FOO");
+        assert_eq!(list[1].children[0].text, "BAZ");
+        assert_eq!(list[2].children[0].text, "QUUX");
+    }
+
+    #[test]
+    fn parse_assignments_stops_at_non_assignment() {
+        // FOO=bar then a plain word — stop after the assignment.
+        let list = parse_assignments("FOO=bar cmd", 0);
+        assert_eq!(list.len(), 1);
+    }
+
+    // -- parse_assignment_list_or_command ----------------------------------
+
+    #[test]
+    fn assignment_list_only_assignments() {
+        let n = parse_assignment_list_or_command("FOO=bar BAZ=qux", 0, None);
+        assert_eq!(n.kind, NodeKind::AssignmentList);
+        assert_eq!(n.children.len(), 2);
+    }
+
+    #[test]
+    fn assignment_list_with_trailing_command() {
+        let n = parse_assignment_list_or_command("FOO=bar cmd arg", 0, None);
+        assert_eq!(n.kind, NodeKind::AssignmentList);
+        assert_eq!(n.children.len(), 2);
+        // children = [Assignment, Command]
+        assert_eq!(n.children[0].kind, NodeKind::Assignment);
+        assert_eq!(n.children[1].kind, NodeKind::Command);
+        assert_eq!(n.children[1].children.len(), 2);
+        assert_eq!(n.children[1].children[0].text, "cmd");
+        assert_eq!(n.children[1].children[1].text, "arg");
+    }
+
+    #[test]
+    fn assignment_list_falls_through_to_command_when_no_assignments() {
+        let n = parse_assignment_list_or_command("git status", 0, None);
+        assert_eq!(n.kind, NodeKind::Command);
+    }
+
+    #[test]
+    fn assignment_list_empty_input_falls_through_to_incomplete_command() {
+        let n = parse_assignment_list_or_command("", 0, None);
+        assert_eq!(n.kind, NodeKind::Command);
+        assert!(!n.complete);
     }
 }
