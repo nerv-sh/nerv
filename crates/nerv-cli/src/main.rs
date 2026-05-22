@@ -165,8 +165,9 @@ fn cmd_stop() -> anyhow::Result<()> {
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
-    // Reads specs-prebuilt/manifest.json (built by `build/spec-transpile`).
-    println!("(no specs yet — run M0-2 to populate specs-prebuilt/)");
+    // M0-6 will read manifest from ~/Library/Caches/nerv/specs/ once
+    // nerv-engine::spec_loader (loadSpec.ts port) lands.
+    println!("(no specs yet — pending M0-6 spec_loader port)");
     Ok(())
 }
 

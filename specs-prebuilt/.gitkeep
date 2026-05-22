@@ -1,2 +1,0 @@
-specs-prebuilt/ — JSON artifacts produced by `cargo run -p nerv-spec-transpile`.
-Contents are not committed (see .gitignore); they are baked into release tarballs.

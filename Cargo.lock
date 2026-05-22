@@ -1631,19 +1631,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerv-spec-transpile"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "nerv-engine",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "nerv-term"
 version = "0.1.0"
 dependencies = [
