@@ -20,10 +20,12 @@ pub mod ipc;
 pub mod parser;
 pub mod paths;
 pub mod ranker;
+pub mod shell_parser;
 pub mod spec;
 
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
 pub use parser::{Position, Token};
+pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};
 
 /// Result type used throughout nerv-engine.
 pub type Result<T> = std::result::Result<T, Error>;
