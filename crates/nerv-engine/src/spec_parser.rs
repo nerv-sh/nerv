@@ -631,10 +631,12 @@ pub fn parse_arguments(spec: &Spec, tokens: &[Annotation], cursor: usize) -> Par
     let mut last_consumed_text: Option<String> = None;
 
     for tok in iter {
-        // Cursor sits inside or before this token → stop consuming so
-        // the partially-typed token doesn't lock the matcher into a
-        // wrong context.
-        if tok.span.start >= cursor {
+        // Cursor sits inside, at the end of, or before this token →
+        // stop consuming so the partially-typed token doesn't lock
+        // the matcher into a wrong context. Treating end-of-token
+        // as partial is what "git co|" should do — the user is mid-
+        // word for completion, not done typing "co".
+        if tok.span.end >= cursor {
             break;
         }
         let kind = step(&mut state, &tok.text, spec);

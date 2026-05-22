@@ -1,7 +1,9 @@
-//! M0-1 e2e: verify the daemon returns stub suggestions over UDS.
+//! M0-6 e2e: verify the daemon returns real-engine suggestions over UDS.
 //!
-//! This test spawns `nervd` as a child process with a temp socket,
-//! sends a Complete request, and asserts the response.
+//! This test spawns `nervd` as a child process with a temp socket and
+//! the workspace `tests/fixtures/specs/` dir as the spec source, sends
+//! a Complete request, and asserts the engine pipeline drives the
+//! response (replaces M0-1 hardcoded stub fixtures).
 
 use nerv_engine::{Request, Response};
 use std::path::PathBuf;
@@ -15,16 +17,35 @@ fn nervd_bin() -> PathBuf {
     path
 }
 
+/// Path to the nerv-engine workspace fixtures dir, used as the
+/// daemon's spec source so the test doesn't touch the real
+/// `~/Library/Caches/nerv/specs/`.
+fn fixture_specs_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("nerv-engine")
+        .join("tests")
+        .join("fixtures")
+        .join("specs")
+}
+
 #[tokio::test]
-async fn complete_returns_stub_suggestions() {
+async fn complete_returns_real_engine_suggestions() {
     let tmp = tempfile::tempdir().expect("create tempdir");
     let sock_path = tmp.path().join("nervd.sock");
     let pid_path = tmp.path().join("nervd.pid");
+    let specs_dir = fixture_specs_dir();
+    assert!(
+        specs_dir.exists(),
+        "fixture specs dir missing: {}",
+        specs_dir.display()
+    );
 
-    // Start nervd with temp socket.
+    // Start nervd with temp socket pointing at fixture specs.
     let mut child = tokio::process::Command::new(nervd_bin())
         .env("NERV_SOCK", &sock_path)
         .env("NERV_PID", &pid_path)
+        .env("NERV_SPECS_DIR", &specs_dir)
         .env("NERV_LOG", "debug")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
@@ -65,11 +86,10 @@ async fn complete_returns_stub_suggestions() {
         let resp: Response = serde_json::from_str(resp_line.trim()).unwrap();
         match resp {
             Response::Suggestions { items } => {
-                assert_eq!(items.len(), 5, "expected 5 stub suggestions (top 5)");
                 let names: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
-                assert!(names.contains(&"commit"));
-                assert!(names.contains(&"clone"));
-                assert!(names.contains(&"checkout"));
+                // git.json fixture has 4 subcommands: status, log, checkout,
+                // commit. Engine emits alphabetically sorted.
+                assert_eq!(names, ["checkout", "commit", "log", "status"]);
             }
             other => panic!("expected Suggestions, got: {other:?}"),
         }
