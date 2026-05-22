@@ -1,5 +1,5 @@
 [package]
-name = "fig_util"
+name = "nerv-util"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
@@ -18,7 +18,7 @@ camino.workspace = true
 cfg-if.workspace = true
 clap.workspace = true
 dirs.workspace = true
-fig_os_shim.workspace = true
+nerv-os.workspace = true
 hex.workspace = true
 indoc.workspace = true
 libc.workspace = true
@@ -36,12 +36,7 @@ tracing.workspace = true
 whoami.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-appkit-nsworkspace-bindings.workspace = true
 core-foundation = "0.10.0"
-macos-utils = { path = "../macos-utils" }
-objc2.workspace = true
-objc2-app-kit = { workspace = true, features = ["NSWorkspace"] }
-objc2-foundation = { workspace = true, features = ["NSURL"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bstr.workspace = true

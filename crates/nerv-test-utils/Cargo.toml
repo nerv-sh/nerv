@@ -1,5 +1,5 @@
 [package]
-name = "fig_test_utils"
+name = "nerv-test-utils"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
@@ -12,8 +12,8 @@ workspace = true
 
 [dependencies]
 bytes.workspace = true
-fig_os_shim.workspace = true
-fig_util.workspace = true
+nerv-os.workspace = true
+nerv-util.workspace = true
 hex.workspace = true
 http.workspace = true
 http-body-util = "0.1.3"

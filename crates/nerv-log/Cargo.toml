@@ -1,5 +1,5 @@
 [package]
-name = "fig_log"
+name = "nerv-log"
 authors.workspace = true
 edition.workspace = true
 homepage.workspace = true
@@ -16,8 +16,8 @@ default = []
 # sentry = ["dep:sentry-tracing"]
 
 [dependencies]
-fig_os_shim.workspace = true
-fig_util.workspace = true
+nerv-os.workspace = true
+nerv-util.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
