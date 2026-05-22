@@ -12,7 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{paths, Request, Response, Suggestion, SuggestionKind};
+use nerv_engine::{Request, Response, Suggestion, SuggestionKind, paths};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
@@ -115,7 +115,7 @@ async fn write_pid_file(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 async fn shutdown_signal() {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("install SIGTERM");
     let mut int = signal(SignalKind::interrupt()).expect("install SIGINT");
     tokio::select! {
@@ -161,8 +161,8 @@ fn stub_complete(line: &str, cursor: usize) -> Response {
     ];
 
     let prefix = match (tokens.len(), trailing_space) {
-        (1, true) => "",                // "git " → show all
-        (2, false) => tokens[1],        // "git co" → filter by "co"
+        (1, true) => "",         // "git " → show all
+        (2, false) => tokens[1], // "git co" → filter by "co"
         _ => return Response::Suggestions { items: vec![] },
     };
 
@@ -182,7 +182,7 @@ fn stub_complete(line: &str, cursor: usize) -> Response {
 }
 
 fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_env("NERV_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = fmt()
         .with_env_filter(filter)

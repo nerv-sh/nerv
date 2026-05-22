@@ -15,7 +15,7 @@
 //! - `nerv _complete`    — IPC bridge for ZLE widget (M0-1 PoC)
 
 use clap::{Parser, Subcommand};
-use nerv_engine::{paths, Response, Suggestion};
+use nerv_engine::{Response, Suggestion, paths};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -105,7 +105,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::{EnvFilter, fmt};
     let filter = EnvFilter::try_from_env("NERV_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
     let _ = fmt()
         .with_env_filter(filter)
