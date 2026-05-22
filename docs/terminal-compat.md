@@ -1,7 +1,8 @@
 # Terminal Compatibility — 명세서
 
-> **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.4 §11 정합.
+> **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 §11 정합.
 > **원칙**: ANSI 시퀀스는 *최소한*만. alternate screen 진입 안 함. tmux 안에서도 안 깨진다.
+> **v0.6 boundary**: 본 문서는 **M0 ZLE path 기준**. M1 의 figterm (`nerv-pty`) opt-in path 는 §6.4 신설 참조.
 
 ---
 
@@ -173,7 +174,9 @@ prompt> git c█           │ ← 사용자 입력 라인     │
 - session detach/attach 후에도 정상 동작.
 - nested tmux (`tmux in tmux`) 는 *베스트에포트*.
 
-### 6.3 tmux 검증 e2e (M0-5)
+### 6.3 tmux 검증 e2e (M0-7)
+
+> v0.6 정합: 본 e2e 는 ZLE path (M0). M1 figterm opt-in 의 tmux 검증은 §6.4 별도.
 
 ```
 GIVEN: tmux 3.2+ 안 iTerm2
@@ -191,6 +194,29 @@ THEN:
 ```
 
 ---
+
+### 6.4 figterm opt-in path (M1) ★ 신설 (v1.2 / PRD §5.8)
+
+M1 에서 `nerv-pty` (← upstream figterm) 가 PTY shim 으로 도입되면
+edit-buffer 인터셉트 방식이 ZLE widget → PTY 가로채기로 바뀐다.
+이때 본 문서 §2–§5 의 ANSI 시퀀스 정책은 *그대로 유지* 되지만,
+다음이 추가된다:
+
+| 항목 | M0 ZLE | M1 figterm |
+|------|--------|-----------|
+| 입력 라인 위치 추론 | zsh `LBUFFER` | `nerv-term` (← alacritty_terminal) screen state — 정확 |
+| prompt 경계 감지 | 없음 | preexec / precmd OSC 697 hooks (post.zsh) |
+| 셸 지원 | zsh 만 | zsh + bash (post.bash) + fish (M1 + 1, opt-in) |
+| PATH 설치 | `~/.zshrc` source | `~/.local/bin/nerv-pty` + `pre.sh` 의 `exec -a` 교체 |
+| 활성화 분기 | 기본 | `NERV_PTY=1` 환경변수 |
+| 코드서명 | 불필요 | **필수** (Apple Developer ID + notarization, M0-8 인프라 재활용) |
+
+ZLE 와 figterm 은 **상호 배타** — `NERV_PTY=1` 감지 시 ZLE widget
+자동 비활성. CLAUDE.md §4 invariant 행 참조.
+
+베스트에포트 3종 (WezTerm/Alacritty/Kitty) 은 alacritty_terminal
+의 screen state 정확도 덕분에 M1 에서 *보장* 등급 격상 검토 (M1
+10주차 dogfooding 결과 기준).
 
 ## 7. 검증 방법론
 
@@ -267,3 +293,4 @@ M0 / 매 마이너 릴리즈마다 다음 체크리스트:
 ---
 
 *문서 v1.1 — PLAN.md v0.5 §11 의 정밀 명세. v1.0 → v1.1 변경: §1 매트릭스에서 Warp / VS Code / JetBrains / Hyper 제거 (Triage 정책으로 대체), §5.1 iTcerm2 오타 수정, §5.4 위치 계산 일반 원칙으로 통합. M0-5 에 zsh-autosuggestions 공존 e2e 시나리오 추가 (PLAN v0.5 정합).*
+*v1.2 — PLAN.md v0.6 정합. PRD §5.8 figterm opt-in 도입으로 §6.4 신설 (M1 nerv-pty path 와 ZLE path 의 차이 + 상호 배타 + Apple 서명 요건 + 베스트에포트 격상 검토). §1 매트릭스 자체는 변경 없음 (M0 기준 유지). 변경 트리거: figterm 의 M1 dogfooding 결과로 베스트에포트 → 보장 격상.*

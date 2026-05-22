@@ -1,7 +1,8 @@
 # Error States — UX 명세서
 
-> **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.4 §5.5 정합.
+> **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 §5.5 정합.
 > **원칙**: *"고장은 조용히 알리고, 고치는 한 줄을 함께 보여준다."*
+> **v0.6 정합**: 5종 에러 카탈로그 (E1–E5) 와 doctor 자동 실행 트리거 (§3.6) 자체는 변경 없음. `nerv doctor` 구현은 v0.5 의 자작 골격에서 `crates/nerv-diag` (← upstream fig_diagnostic 흡수) 의 진단 수집기를 활용하는 형태로 *내부 구조 전환*. spec 경로는 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` 이동 (PRD §8 / §11 보강).
 
 ---
 
@@ -20,7 +21,7 @@
 | ID | 상황 | 감지 시점 | 수단 | 사용자 화면 |
 |----|------|----------|------|------------|
 | **E1** | `nervd` 데몬 미기동 | ZLE widget 첫 키 입력 시 UDS 연결 실패 | `connect(2)` `ECONNREFUSED` 또는 소켓 부재 | 회색 1줄 hint (§3.1) |
-| **E2** | spec 파일 손상 / 파싱 실패 | 데몬 시작 시 + lazy load 시 | JSON parse error | 해당 spec만 비활성, stderr 1줄 (§3.2) |
+| **E2** | spec 파일 손상 / 파싱 실패 | 데몬 시작 시 + lazy load 시 | JSON parse error (`nerv-engine::spec_loader`, M0-6 = upstream `loadSpec.ts` 포팅분) | 해당 spec만 비활성, stderr 1줄 (§3.2) |
 | **E3** | zsh < 5.8 | `nerv init zsh` 실행 시 | `$ZSH_VERSION` 비교 | stderr 경고 + `exit 0`, 자동완성 비활성 (§3.3) |
 | **E4** | ZLE 위젯 충돌 | `nerv init zsh` 실행 시 + 데몬 시작 시 | 환경 변수 / 알려진 시그니처 휴리스틱 | stderr 경고 + URL (§3.4) |
 | **E5** | spec 버전 불일치 | 데몬 시작 시 | `specs-prebuilt/manifest.json` 의 schema 버전 vs 데몬 빌드 버전 | stderr 1줄 + `doctor` (§3.5) |
@@ -68,8 +69,10 @@ THEN:
 
 **감지**:
 
-- 데몬이 `specs-prebuilt/<name>.json` 을 lazy load 할 때 JSON parse error 또는 schema mismatch.
+- 데몬이 `~/Library/Caches/nerv/specs/<name>.json` 을 lazy load 할 때 JSON parse error 또는 schema mismatch.
 - 데몬 시작 시 manifest 와 실제 파일 sha256 mismatch.
+
+  > v0.6: spec 디렉터리 경로가 v0.5 의 `specs-prebuilt/` (저장소 내) → `~/Library/Caches/nerv/specs/` (사용자 캐시) 로 이동. PRD §8 의 저장소 구조 정합.
 
 **사용자 화면**:
 
@@ -89,7 +92,7 @@ THEN:
 **테스트**:
 
 ```
-GIVEN: specs-prebuilt/docker.json 의 마지막 } 를 제거 (의도적 손상)
+GIVEN: ~/Library/Caches/nerv/specs/docker.json 의 마지막 } 를 제거 (의도적 손상)
 WHEN: nervd 시작 + git/docker 자동완성 시도
 THEN:
   - git 자동완성 정상
@@ -192,8 +195,8 @@ THEN:
 
 **감지**:
 
-- 데몬 시작 시 `specs-prebuilt/manifest.json` 의 `schema_version` (예: `2`) 과 데몬 빌드의 supported schema 비교.
-- 사용자가 수동으로 `specs-prebuilt/` 를 다른 버전 nerv 의 것으로 바꿔치기한 경우 발생.
+- 데몬 시작 시 `~/Library/Caches/nerv/specs/manifest.json` 의 `schema_version` (예: `2`) 과 데몬 빌드의 supported schema 비교.
+- 사용자가 수동으로 `~/Library/Caches/nerv/specs/` 를 다른 버전 nerv 의 것으로 바꿔치기한 경우 발생.
 
 **사용자 화면** (stderr, 데몬 로그):
 
@@ -324,6 +327,12 @@ Result: 4 OK, 1 info, 1 warning, 1 error
 
 각 항목은 본 §2 표에 추가 등재 없이 doctor 전용. 자동 표시 없음.
 
+**v0.6 구현 매핑**: 위 점검 항목들은 `crates/nerv-diag` (← upstream
+fig_diagnostic 흡수) 의 진단 수집기가 후보 데이터를 제공하고,
+`crates/nerv-cli` 의 `cmd_doctor()` 가 nerv 도메인 규칙으로 필터링 +
+포맷팅. Q 의 chat/auth/telemetry 진단 항목은 흡수 시 strip (CLAUDE.md
+§4 invariant 의 strip 의존 0 행 참조).
+
 ---
 
 ## 6. 로깅 정책
@@ -357,3 +366,4 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 ---
 
 *문서 v1.1 — PLAN.md §5.5 의 정밀 명세. v1.0 → v1.1 변경: §3.6 doctor 자동 실행 트리거 신설, spec age soft notice 추가, E2 의 잔존 `nerv spec update` 참조 제거 (PLAN GO 조건 ①). 변경 트리거: 새 라이벌 도구 출현, schema v3 도입, doctor 추가 항목 합의 시.*
+*v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: spec 디렉터리 경로 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` (PRD §8 정합), E2 감지 수단에 `nerv-engine::spec_loader` (loadSpec.ts 포팅) 명시, §5.1 에 v0.6 구현 매핑 추가 (nerv-diag 흡수 활용 + cmd_doctor 필터링). 5종 카탈로그 / 메시지 톤 / exit code 규약 모두 무변경. 변경 트리거: figterm path 의 신규 에러 클래스 발견, rquickjs Tier C 실행 실패 시나리오 정의 시 (E6 후보).*
