@@ -1,0 +1,164 @@
+{
+  "name": "cargo",
+  "description": "Rust package manager",
+  "options": [
+    { "names": ["-V", "--version"], "description": "Print version info" },
+    { "names": ["-h", "--help"], "description": "Print help" },
+    { "names": ["--list"], "description": "List installed commands" }
+  ],
+  "subcommands": [
+    {
+      "name": "build",
+      "aliases": ["b"],
+      "description": "Compile the current package",
+      "options": [
+        { "names": ["--release"], "description": "Build optimized artifacts" },
+        { "names": ["--target"], "args": [{ "name": "triple" }] },
+        { "names": ["-p", "--package"], "args": [{ "name": "pkg" }] },
+        { "names": ["--all-features"] },
+        { "names": ["--no-default-features"] },
+        { "names": ["-F", "--features"], "args": [{ "name": "features" }] }
+      ]
+    },
+    {
+      "name": "run",
+      "aliases": ["r"],
+      "description": "Run a binary or example",
+      "options": [
+        { "names": ["--release"] },
+        { "names": ["--bin"], "args": [{ "name": "name" }] },
+        { "names": ["--example"], "args": [{ "name": "name" }] },
+        { "names": ["-p", "--package"], "args": [{ "name": "pkg" }] }
+      ],
+      "args": [{ "name": "args", "is_optional": true, "is_variadic": true }],
+      "requires_double_dash": false
+    },
+    {
+      "name": "test",
+      "aliases": ["t"],
+      "description": "Run the tests",
+      "options": [
+        { "names": ["--release"] },
+        { "names": ["--no-run"] },
+        { "names": ["--workspace"] },
+        { "names": ["--lib"] },
+        { "names": ["--test"], "args": [{ "name": "name" }] },
+        { "names": ["-p", "--package"], "args": [{ "name": "pkg" }] },
+        { "names": ["--", "args"] }
+      ]
+    },
+    {
+      "name": "check",
+      "aliases": ["c"],
+      "description": "Analyze for errors without building",
+      "options": [
+        { "names": ["--workspace"] },
+        { "names": ["--all-targets"] }
+      ]
+    },
+    {
+      "name": "clippy",
+      "description": "Run lint checks",
+      "options": [
+        { "names": ["--fix"], "description": "Apply suggested fixes" },
+        { "names": ["--all-targets"] },
+        { "names": ["--workspace"] }
+      ]
+    },
+    {
+      "name": "fmt",
+      "description": "Format source code",
+      "options": [
+        { "names": ["--all"] },
+        { "names": ["--check"], "description": "Exit non-zero on diff" }
+      ]
+    },
+    {
+      "name": "install",
+      "description": "Install a binary crate",
+      "options": [
+        { "names": ["--locked"] },
+        { "names": ["--force"], "description": "Overwrite existing install" },
+        { "names": ["--path"], "args": [{ "name": "dir", "template": "folders" }] },
+        { "names": ["--git"], "args": [{ "name": "url" }] }
+      ],
+      "args": [{ "name": "crate", "is_optional": true, "is_variadic": true }]
+    },
+    {
+      "name": "publish",
+      "description": "Publish to a registry",
+      "options": [
+        { "names": ["--dry-run"] },
+        { "names": ["--token"], "args": [{ "name": "token" }] },
+        { "names": ["--allow-dirty"] }
+      ]
+    },
+    {
+      "name": "update",
+      "description": "Update dependencies",
+      "options": [
+        { "names": ["-p", "--package"], "args": [{ "name": "pkg" }] }
+      ]
+    },
+    {
+      "name": "add",
+      "description": "Add dependencies to Cargo.toml",
+      "options": [
+        { "names": ["--dev"] },
+        { "names": ["--build"] },
+        { "names": ["--features"], "args": [{ "name": "features" }] },
+        { "names": ["--no-default-features"] }
+      ],
+      "args": [{ "name": "crate", "is_variadic": true }]
+    },
+    {
+      "name": "remove",
+      "aliases": ["rm"],
+      "description": "Remove dependencies from Cargo.toml",
+      "args": [{ "name": "crate", "is_variadic": true }]
+    },
+    {
+      "name": "search",
+      "description": "Search crates.io",
+      "args": [{ "name": "query" }]
+    },
+    {
+      "name": "new",
+      "description": "Create a new cargo package",
+      "options": [
+        { "names": ["--lib"] },
+        { "names": ["--bin"] }
+      ],
+      "args": [{ "name": "path", "template": "folders" }]
+    },
+    {
+      "name": "init",
+      "description": "Initialize a package in the current directory",
+      "options": [
+        { "names": ["--lib"] },
+        { "names": ["--bin"] }
+      ]
+    },
+    {
+      "name": "clean",
+      "description": "Remove the target directory"
+    },
+    {
+      "name": "doc",
+      "aliases": ["d"],
+      "description": "Build documentation",
+      "options": [
+        { "names": ["--open"], "description": "Open after building" },
+        { "names": ["--no-deps"] }
+      ]
+    },
+    {
+      "name": "bench",
+      "description": "Run the benchmarks"
+    },
+    {
+      "name": "tree",
+      "description": "Display dependency tree"
+    }
+  ]
+}

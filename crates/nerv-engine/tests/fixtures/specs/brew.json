@@ -1,0 +1,160 @@
+{
+  "name": "brew",
+  "description": "Homebrew — the missing package manager for macOS",
+  "subcommands": [
+    {
+      "name": "install",
+      "description": "Install a formula or cask",
+      "options": [
+        { "names": ["--cask"], "description": "Install as cask" },
+        { "names": ["--HEAD"], "description": "Install from HEAD" },
+        { "names": ["-v", "--verbose"] },
+        { "names": ["--build-from-source"] },
+        { "names": ["--force"] }
+      ],
+      "args": [{ "name": "formula", "is_variadic": true }]
+    },
+    {
+      "name": "uninstall",
+      "aliases": ["rm", "remove"],
+      "description": "Uninstall a formula or cask",
+      "options": [
+        { "names": ["--cask"] },
+        { "names": ["--force"] },
+        { "names": ["--zap"], "description": "Remove all related files" }
+      ],
+      "args": [{ "name": "formula", "is_variadic": true }]
+    },
+    {
+      "name": "upgrade",
+      "description": "Upgrade outdated packages",
+      "options": [
+        { "names": ["--cask"] },
+        { "names": ["--greedy"] },
+        { "names": ["--dry-run"] }
+      ],
+      "args": [{ "name": "formula", "is_optional": true, "is_variadic": true }]
+    },
+    {
+      "name": "update",
+      "description": "Fetch the newest version of Homebrew"
+    },
+    {
+      "name": "search",
+      "aliases": ["s"],
+      "description": "Search for formulae and casks",
+      "options": [
+        { "names": ["--cask"] },
+        { "names": ["--formula"] },
+        { "names": ["--desc"], "description": "Search descriptions" }
+      ],
+      "args": [{ "name": "query" }]
+    },
+    {
+      "name": "info",
+      "aliases": ["abv"],
+      "description": "Display info on a formula or cask",
+      "options": [
+        { "names": ["--cask"] },
+        { "names": ["--json"] }
+      ],
+      "args": [{ "name": "formula" }]
+    },
+    {
+      "name": "list",
+      "aliases": ["ls"],
+      "description": "List installed formulae and casks",
+      "options": [
+        { "names": ["--cask"] },
+        { "names": ["--formula"] },
+        { "names": ["--versions"] },
+        { "names": ["--full-name"] }
+      ]
+    },
+    {
+      "name": "outdated",
+      "description": "List outdated formulae and casks",
+      "options": [
+        { "names": ["--cask"] },
+        { "names": ["--greedy"] }
+      ]
+    },
+    {
+      "name": "cleanup",
+      "description": "Remove old downloads and versions",
+      "options": [
+        { "names": ["-s"], "description": "Scrub cache" },
+        { "names": ["--prune"], "args": [{ "name": "days" }] },
+        { "names": ["-n", "--dry-run"] }
+      ]
+    },
+    {
+      "name": "doctor",
+      "aliases": ["dr"],
+      "description": "Check the system for potential problems"
+    },
+    {
+      "name": "services",
+      "description": "Manage background services",
+      "subcommands": [
+        { "name": "list", "aliases": ["ls"], "description": "List services" },
+        { "name": "run", "description": "Run a service", "args": [{ "name": "formula" }] },
+        { "name": "start", "description": "Start a service", "args": [{ "name": "formula" }] },
+        { "name": "stop", "description": "Stop a service", "args": [{ "name": "formula" }] },
+        { "name": "restart", "description": "Restart a service", "args": [{ "name": "formula" }] },
+        { "name": "cleanup", "description": "Remove stopped services" }
+      ]
+    },
+    {
+      "name": "tap",
+      "description": "Tap an external repository",
+      "args": [{ "name": "user/repo", "is_optional": true }]
+    },
+    {
+      "name": "untap",
+      "description": "Remove a tapped repository",
+      "args": [{ "name": "user/repo" }]
+    },
+    {
+      "name": "config",
+      "description": "Show Homebrew and system configuration"
+    },
+    {
+      "name": "deps",
+      "description": "Show dependencies for a formula",
+      "options": [
+        { "names": ["--tree"], "description": "Show as tree" },
+        { "names": ["--installed"] }
+      ],
+      "args": [{ "name": "formula" }]
+    },
+    {
+      "name": "leaves",
+      "description": "List installed formulae with no dependents"
+    },
+    {
+      "name": "link",
+      "description": "Symlink installed files",
+      "options": [
+        { "names": ["--force"] },
+        { "names": ["--overwrite"] }
+      ],
+      "args": [{ "name": "formula" }]
+    },
+    {
+      "name": "unlink",
+      "description": "Remove symlinks",
+      "args": [{ "name": "formula" }]
+    },
+    {
+      "name": "pin",
+      "description": "Pin a formula",
+      "args": [{ "name": "formula", "is_variadic": true }]
+    },
+    {
+      "name": "unpin",
+      "description": "Unpin a formula",
+      "args": [{ "name": "formula", "is_variadic": true }]
+    }
+  ]
+}

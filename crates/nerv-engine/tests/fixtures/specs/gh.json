@@ -1,0 +1,132 @@
+{
+  "name": "gh",
+  "description": "GitHub CLI",
+  "subcommands": [
+    {
+      "name": "pr",
+      "description": "Manage pull requests",
+      "subcommands": [
+        {
+          "name": "create",
+          "description": "Create a pull request",
+          "options": [
+            { "names": ["-t", "--title"], "args": [{ "name": "title" }] },
+            { "names": ["-b", "--body"], "args": [{ "name": "body" }] },
+            { "names": ["-B", "--base"], "args": [{ "name": "branch" }] },
+            { "names": ["-d", "--draft"] },
+            { "names": ["-a", "--assignee"], "args": [{ "name": "user" }] },
+            { "names": ["-r", "--reviewer"], "args": [{ "name": "user" }] },
+            { "names": ["-l", "--label"], "args": [{ "name": "label" }] },
+            { "names": ["--web"] }
+          ]
+        },
+        {
+          "name": "list",
+          "aliases": ["ls"],
+          "description": "List pull requests",
+          "options": [
+            { "names": ["-s", "--state"], "args": [{ "name": "state", "suggestions": ["open", "closed", "merged", "all"] }] },
+            { "names": ["-L", "--limit"], "args": [{ "name": "n" }] },
+            { "names": ["-a", "--assignee"], "args": [{ "name": "user" }] },
+            { "names": ["-A", "--author"], "args": [{ "name": "user" }] },
+            { "names": ["-l", "--label"], "args": [{ "name": "label" }] }
+          ]
+        },
+        { "name": "view", "description": "View a PR", "args": [{ "name": "number", "is_optional": true }] },
+        { "name": "checkout", "description": "Checkout a PR locally", "args": [{ "name": "number" }] },
+        { "name": "merge", "description": "Merge a PR", "args": [{ "name": "number", "is_optional": true }] },
+        { "name": "close", "description": "Close a PR", "args": [{ "name": "number" }] },
+        { "name": "reopen", "description": "Reopen a PR", "args": [{ "name": "number" }] },
+        { "name": "diff", "description": "View PR diff", "args": [{ "name": "number", "is_optional": true }] },
+        { "name": "review", "description": "Add a review", "args": [{ "name": "number", "is_optional": true }] },
+        { "name": "status", "description": "Show status of your PRs" }
+      ]
+    },
+    {
+      "name": "issue",
+      "description": "Manage issues",
+      "subcommands": [
+        {
+          "name": "create",
+          "description": "Create an issue",
+          "options": [
+            { "names": ["-t", "--title"], "args": [{ "name": "title" }] },
+            { "names": ["-b", "--body"], "args": [{ "name": "body" }] },
+            { "names": ["-a", "--assignee"], "args": [{ "name": "user" }] },
+            { "names": ["-l", "--label"], "args": [{ "name": "label" }] }
+          ]
+        },
+        { "name": "list", "aliases": ["ls"], "description": "List issues" },
+        { "name": "view", "description": "View an issue", "args": [{ "name": "number" }] },
+        { "name": "close", "description": "Close an issue", "args": [{ "name": "number" }] },
+        { "name": "reopen", "description": "Reopen an issue", "args": [{ "name": "number" }] },
+        { "name": "comment", "description": "Add a comment", "args": [{ "name": "number" }] }
+      ]
+    },
+    {
+      "name": "repo",
+      "description": "Manage repositories",
+      "subcommands": [
+        { "name": "clone", "description": "Clone a repo", "args": [{ "name": "repo" }] },
+        { "name": "create", "description": "Create a new repo", "args": [{ "name": "name", "is_optional": true }] },
+        { "name": "fork", "description": "Fork a repo", "args": [{ "name": "repo", "is_optional": true }] },
+        { "name": "view", "description": "View a repo", "args": [{ "name": "repo", "is_optional": true }] },
+        { "name": "list", "aliases": ["ls"], "description": "List repos" },
+        { "name": "delete", "description": "Delete a repo", "args": [{ "name": "repo" }] }
+      ]
+    },
+    {
+      "name": "auth",
+      "description": "Authenticate gh",
+      "subcommands": [
+        { "name": "login", "description": "Log in" },
+        { "name": "logout", "description": "Log out" },
+        { "name": "status", "description": "Show auth status" },
+        { "name": "refresh", "description": "Refresh credentials" },
+        { "name": "token", "description": "Print the auth token" }
+      ]
+    },
+    {
+      "name": "gist",
+      "description": "Manage gists",
+      "subcommands": [
+        { "name": "create", "description": "Create a gist", "args": [{ "name": "files", "is_variadic": true, "template": "filepaths" }] },
+        { "name": "list", "description": "List gists" },
+        { "name": "view", "description": "View a gist", "args": [{ "name": "id" }] },
+        { "name": "delete", "description": "Delete a gist", "args": [{ "name": "id" }] }
+      ]
+    },
+    {
+      "name": "release",
+      "description": "Manage releases",
+      "subcommands": [
+        { "name": "create", "description": "Create a release", "args": [{ "name": "tag" }] },
+        { "name": "list", "description": "List releases" },
+        { "name": "view", "description": "View a release", "args": [{ "name": "tag", "is_optional": true }] },
+        { "name": "delete", "description": "Delete a release", "args": [{ "name": "tag" }] }
+      ]
+    },
+    {
+      "name": "workflow",
+      "description": "View GitHub Actions workflows",
+      "subcommands": [
+        { "name": "list", "description": "List workflows" },
+        { "name": "view", "description": "View a workflow", "args": [{ "name": "name" }] },
+        { "name": "run", "description": "Run a workflow", "args": [{ "name": "name" }] },
+        { "name": "disable", "description": "Disable a workflow", "args": [{ "name": "name" }] },
+        { "name": "enable", "description": "Enable a workflow", "args": [{ "name": "name" }] }
+      ]
+    },
+    {
+      "name": "run",
+      "description": "View GitHub Actions runs",
+      "subcommands": [
+        { "name": "list", "description": "List recent runs" },
+        { "name": "view", "description": "View a run", "args": [{ "name": "id", "is_optional": true }] },
+        { "name": "watch", "description": "Watch a running workflow", "args": [{ "name": "id", "is_optional": true }] },
+        { "name": "rerun", "description": "Rerun a run", "args": [{ "name": "id" }] },
+        { "name": "cancel", "description": "Cancel a run", "args": [{ "name": "id" }] }
+      ]
+    }
+  ]
+}

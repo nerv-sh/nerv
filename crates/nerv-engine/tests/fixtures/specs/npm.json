@@ -1,0 +1,117 @@
+{
+  "name": "npm",
+  "description": "Node Package Manager",
+  "subcommands": [
+    {
+      "name": "install",
+      "aliases": ["i", "add"],
+      "description": "Install packages",
+      "options": [
+        { "names": ["-D", "--save-dev"], "description": "Save as devDependency" },
+        { "names": ["-S", "--save"], "description": "Save as dependency (default)" },
+        { "names": ["-g", "--global"], "description": "Install globally" },
+        { "names": ["-E", "--save-exact"], "description": "Pin exact version" },
+        { "names": ["-O", "--save-optional"], "description": "Save as optionalDependency" }
+      ],
+      "args": [{ "name": "package", "is_variadic": true, "is_optional": true }]
+    },
+    {
+      "name": "uninstall",
+      "aliases": ["rm", "remove", "un"],
+      "description": "Remove packages",
+      "options": [
+        { "names": ["-g", "--global"] },
+        { "names": ["-S", "--save"] }
+      ],
+      "args": [{ "name": "package", "is_variadic": true }]
+    },
+    {
+      "name": "run",
+      "aliases": ["run-script"],
+      "description": "Run a script defined in package.json",
+      "args": [
+        { "name": "script" },
+        { "name": "args", "is_optional": true, "is_variadic": true }
+      ]
+    },
+    {
+      "name": "test",
+      "aliases": ["t", "tst"],
+      "description": "Run `test` script"
+    },
+    {
+      "name": "start",
+      "description": "Run `start` script"
+    },
+    {
+      "name": "publish",
+      "description": "Publish a package",
+      "options": [
+        { "names": ["--access"], "args": [{ "name": "level", "suggestions": ["public", "restricted"] }] },
+        { "names": ["--tag"], "args": [{ "name": "tag" }] },
+        { "names": ["--dry-run"] }
+      ]
+    },
+    {
+      "name": "init",
+      "description": "Create a package.json",
+      "options": [
+        { "names": ["-y", "--yes"], "description": "Accept all defaults" }
+      ]
+    },
+    {
+      "name": "list",
+      "aliases": ["ls", "la", "ll"],
+      "description": "List installed packages",
+      "options": [
+        { "names": ["-g", "--global"] },
+        { "names": ["--depth"], "args": [{ "name": "n" }] },
+        { "names": ["--json"] }
+      ]
+    },
+    {
+      "name": "audit",
+      "description": "Run a security audit",
+      "options": [
+        { "names": ["fix"], "description": "Apply automatic fixes" },
+        { "names": ["--production"] }
+      ]
+    },
+    {
+      "name": "outdated",
+      "description": "Check for outdated packages"
+    },
+    {
+      "name": "update",
+      "aliases": ["up", "upgrade"],
+      "description": "Update packages",
+      "options": [
+        { "names": ["-g", "--global"] }
+      ],
+      "args": [{ "name": "package", "is_variadic": true, "is_optional": true }]
+    },
+    {
+      "name": "ci",
+      "description": "Clean install from lock file"
+    },
+    {
+      "name": "version",
+      "description": "Bump package version",
+      "args": [
+        {
+          "name": "level",
+          "suggestions": ["major", "minor", "patch", "premajor", "preminor", "prepatch", "prerelease"]
+        }
+      ]
+    },
+    {
+      "name": "view",
+      "aliases": ["info", "show", "v"],
+      "description": "View registry info",
+      "args": [
+        { "name": "package" },
+        { "name": "field", "is_optional": true }
+      ]
+    }
+  ]
+}

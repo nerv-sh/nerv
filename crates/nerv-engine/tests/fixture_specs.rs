@@ -266,6 +266,172 @@ fn kubectl_config_use_context() {
     assert_eq!(r.subcommand_path, vec!["kubectl", "config", "use-context"]);
 }
 
+// ---- Extended fixtures: npm / cargo / gh / brew / make --------------
+
+#[test]
+fn npm_install_with_alias() {
+    let n = fixture("npm");
+    let toks = tokenize("npm i react");
+    let r = parse_arguments(&n, &toks, 999);
+    // `i` is alias for install.
+    assert_eq!(r.subcommand_path, vec!["npm", "install"]);
+    assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg);
+}
+
+#[test]
+fn npm_install_save_dev_flag() {
+    let n = fixture("npm");
+    let toks = tokenize("npm install -D typescript");
+    let r = parse_arguments(&n, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg);
+}
+
+#[test]
+fn npm_run_script_arg() {
+    let n = fixture("npm");
+    let toks = tokenize("npm run test");
+    let r = parse_arguments(&n, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg);
+}
+
+#[test]
+fn npm_version_enum_suggestions_listed() {
+    let n = fixture("npm");
+    // `npm version ` cursor on the arg: parse_arguments resolves to Arg
+    let toks = tokenize("npm version");
+    let r = parse_arguments(&n, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["npm", "version"]);
+    assert_eq!(r.cursor_context, CursorContext::Arg);
+}
+
+#[test]
+fn cargo_build_release_flag() {
+    let c = fixture("cargo");
+    let toks = tokenize("cargo build --release");
+    let r = parse_arguments(&c, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["cargo", "build"]);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+}
+
+#[test]
+fn cargo_test_with_workspace() {
+    let c = fixture("cargo");
+    let toks = tokenize("cargo test --workspace");
+    let r = parse_arguments(&c, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+}
+
+#[test]
+fn cargo_run_alias_r() {
+    let c = fixture("cargo");
+    let toks = tokenize("cargo r --bin nervd");
+    let r = parse_arguments(&c, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["cargo", "run"]);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+    assert_eq!(r.annotations[3].kind, TokenKind::OptionArg);
+}
+
+#[test]
+fn cargo_new_with_lib_flag() {
+    let c = fixture("cargo");
+    let toks = tokenize("cargo new --lib mycrate");
+    let r = parse_arguments(&c, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg);
+}
+
+#[test]
+fn gh_pr_create_nested() {
+    let g = fixture("gh");
+    let toks = tokenize("gh pr create");
+    let r = parse_arguments(&g, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["gh", "pr", "create"]);
+}
+
+#[test]
+fn gh_pr_create_with_title() {
+    let g = fixture("gh");
+    let toks = tokenize("gh pr create --title foo");
+    let r = parse_arguments(&g, &toks, 999);
+    assert_eq!(r.annotations[3].kind, TokenKind::OptionName);
+    assert_eq!(r.annotations[4].kind, TokenKind::OptionArg);
+}
+
+#[test]
+fn gh_issue_list_alias_ls() {
+    let g = fixture("gh");
+    let toks = tokenize("gh issue ls");
+    let r = parse_arguments(&g, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["gh", "issue", "list"]);
+}
+
+#[test]
+fn gh_auth_status_three_deep() {
+    let g = fixture("gh");
+    let toks = tokenize("gh auth status");
+    let r = parse_arguments(&g, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["gh", "auth", "status"]);
+    assert_eq!(r.cursor_context, CursorContext::Done);
+}
+
+#[test]
+fn brew_install_cask() {
+    let b = fixture("brew");
+    let toks = tokenize("brew install --cask iterm2");
+    let r = parse_arguments(&b, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg);
+}
+
+#[test]
+fn brew_services_start_nested() {
+    let b = fixture("brew");
+    let toks = tokenize("brew services start postgresql");
+    let r = parse_arguments(&b, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["brew", "services", "start"]);
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg);
+}
+
+#[test]
+fn brew_uninstall_alias_rm() {
+    let b = fixture("brew");
+    let toks = tokenize("brew rm node");
+    let r = parse_arguments(&b, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["brew", "uninstall"]);
+}
+
+#[test]
+fn make_variadic_targets() {
+    let m = fixture("make");
+    let toks = tokenize("make clean build test");
+    let r = parse_arguments(&m, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["make"]);
+    assert_eq!(r.annotations[1].kind, TokenKind::SubcommandArg);
+    assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg);
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg);
+    assert_eq!(r.cursor_context, CursorContext::Arg);
+}
+
+#[test]
+fn make_root_level_flag_with_arg() {
+    let m = fixture("make");
+    let toks = tokenize("make -j 4");
+    let r = parse_arguments(&m, &toks, 999);
+    assert_eq!(r.annotations[1].kind, TokenKind::OptionName);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionArg);
+}
+
+#[test]
+fn make_directory_flag() {
+    let m = fixture("make");
+    let toks = tokenize("make -C build install");
+    let r = parse_arguments(&m, &toks, 999);
+    assert_eq!(r.annotations[1].kind, TokenKind::OptionName);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionArg);
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg);
+}
+
 #[test]
 fn fixture_path_resolution_via_env_macro() {
     // Sanity: make sure CARGO_MANIFEST_DIR resolves to the crate root.
