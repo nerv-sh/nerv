@@ -155,13 +155,133 @@ fn cmd_doctor() -> anyhow::Result<()> {
 }
 
 fn cmd_start() -> anyhow::Result<()> {
-    // M0-1: spawn nervd. After §3.6 lands, this also triggers the
-    // automatic doctor self-check on success.
-    anyhow::bail!("nerv start: not yet implemented (M0-1)")
+    use anyhow::Context;
+    use std::fs;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    let pid_path = paths::pid_path().context("HOME unset")?;
+    let cache_dir = paths::cache_dir().context("HOME unset")?;
+    let log_path = paths::daemon_log_path().context("HOME unset")?;
+
+    if let Some(pid) = read_pid(&pid_path) {
+        if process_alive(pid) {
+            println!("nervd already running (pid {pid})");
+            return Ok(());
+        }
+        let _ = fs::remove_file(&pid_path);
+    }
+
+    fs::create_dir_all(&cache_dir).with_context(|| format!("mkdir {}", cache_dir.display()))?;
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("open {}", log_path.display()))?;
+    let log_err = log.try_clone()?;
+
+    let bin = resolve_nervd_path()?;
+    Command::new(&bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err))
+        .spawn()
+        .with_context(|| format!("spawn {}", bin.display()))?;
+
+    // Wait briefly for the daemon to write its PID file (signals readiness).
+    for _ in 0..30 {
+        if pid_path.exists() {
+            let pid = read_pid(&pid_path).unwrap_or(0);
+            println!("nervd started (pid {pid})");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    anyhow::bail!(
+        "nervd did not start within 3s (check {})",
+        log_path.display()
+    )
 }
 
 fn cmd_stop() -> anyhow::Result<()> {
-    anyhow::bail!("nerv stop: not yet implemented (M0-1)")
+    use anyhow::Context;
+    use std::fs;
+    use std::time::Duration;
+
+    let pid_path = paths::pid_path().context("HOME unset")?;
+    let Some(pid) = read_pid(&pid_path) else {
+        println!("nervd not running");
+        return Ok(());
+    };
+    if !process_alive(pid) {
+        let _ = fs::remove_file(&pid_path);
+        println!("nervd not running (stale PID file removed)");
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        // SAFETY: SIGTERM to a known PID, no UB.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            anyhow::bail!("kill(SIGTERM, {pid}): {err}");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        anyhow::bail!("nerv stop: only Unix supported in v1.0");
+    }
+
+    for _ in 0..50 {
+        if !process_alive(pid) {
+            println!("nervd stopped (pid {pid})");
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    anyhow::bail!("nervd did not stop within 5s after SIGTERM");
+}
+
+/// Find the `nervd` binary path: $NERV_DAEMON_BIN override, or the
+/// sibling of the current `nerv` executable.
+fn resolve_nervd_path() -> anyhow::Result<std::path::PathBuf> {
+    use anyhow::Context;
+    if let Some(p) = std::env::var_os("NERV_DAEMON_BIN") {
+        return Ok(p.into());
+    }
+    let exe = std::env::current_exe().context("locate nerv binary")?;
+    let dir = exe
+        .parent()
+        .context("nerv binary has no parent directory")?;
+    let candidate = dir.join("nervd");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    anyhow::bail!(
+        "nervd binary not found alongside nerv (looked at {}). \
+         set $NERV_DAEMON_BIN to override.",
+        candidate.display()
+    );
+}
+
+fn read_pid(path: &std::path::Path) -> Option<u32> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    // kill(pid, 0) returns 0 iff the process exists and we can signal
+    // it; errno=ESRCH means no such process.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_alive(_pid: u32) -> bool {
+    false
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
