@@ -472,10 +472,52 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
     let text = String::from_utf8_lossy(&output.stdout);
     let lines: Vec<String> = text
         .lines()
-        .map(|s| s.trim().to_string())
+        .map(sanitize_generator_line)
         .filter(|s| !s.is_empty())
         .collect();
     Some(lines)
+}
+
+/// Trim shell-list cosmetics from a generator output line.
+/// Covers the cases that cost the most to leave raw:
+/// - leading ANSI color escapes (e.g. `\x1b[32malice\x1b[0m`)
+/// - leading whitespace
+/// - leading `* ` (git branch's current-branch marker)
+/// - leading `+ ` (git worktree's locked-worktree marker)
+///
+/// Keeps the rest of the line untouched — anything more aggressive
+/// belongs in a JS post-process hook (Tier C, deferred).
+fn sanitize_generator_line(raw: &str) -> String {
+    let mut s = strip_ansi(raw);
+    s = s.trim().to_string();
+    if let Some(rest) = s.strip_prefix("* ") {
+        s = rest.trim_start().to_string();
+    } else if let Some(rest) = s.strip_prefix("+ ") {
+        s = rest.trim_start().to_string();
+    }
+    s
+}
+
+/// Remove ANSI CSI escape sequences (`\x1b[...m` etc.) without
+/// pulling in a regex dep. Iterates bytes; preserves UTF-8 by
+/// only skipping ESC + bracket-form sequences.
+fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next(); // consume '['
+            // Drain until letter (CSI final byte: 0x40..0x7e).
+            for nc in chars.by_ref() {
+                if ('@'..='~').contains(&nc) {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn name_or_aliases_match(name: &str, aliases: &[String], prefix: &str) -> bool {
@@ -631,6 +673,26 @@ mod tests {
     // not unit-tested — setting/clearing env vars races with parallel
     // tests (cargo's default runner). Manually verified in the daemon
     // smoke-test path. See PRD v0.6 §0.2 for the contract.
+
+    #[test]
+    fn sanitize_strips_git_current_branch_marker() {
+        assert_eq!(sanitize_generator_line("* main"), "main");
+        assert_eq!(sanitize_generator_line("  feature-x"), "feature-x");
+        assert_eq!(sanitize_generator_line("+ wt-locked"), "wt-locked");
+        assert_eq!(sanitize_generator_line("regular"), "regular");
+        assert_eq!(sanitize_generator_line(""), "");
+    }
+
+    #[test]
+    fn sanitize_strips_ansi_color_codes() {
+        // git -c color.branch=always branch outputs something like:
+        let raw = "\x1b[32m* main\x1b[0m";
+        assert_eq!(sanitize_generator_line(raw), "main");
+        let raw2 = "\x1b[31malice\x1b[0m";
+        assert_eq!(sanitize_generator_line(raw2), "alice");
+        let raw3 = "\x1b[1;33;40mfoo\x1b[m";
+        assert_eq!(sanitize_generator_line(raw3), "foo");
+    }
 
     #[test]
     fn template_generator_cached_on_repeat() {
