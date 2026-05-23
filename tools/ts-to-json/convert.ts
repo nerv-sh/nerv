@@ -224,15 +224,77 @@ const convertOpt = (o: FigOpt): NervOpt => {
   };
 };
 
-const convertSpec = (s: FigSpec, fallbackName?: string): NervSpec => {
+type Ctx = {
+  baseDir: string;
+  visited: Set<string>;
+  depth: number;
+};
+
+/// loadSpec inlining depth cap.
+/// depth=0 (current): never inline; subdir specs ship as stub
+///   subcommands. Use cases like `aws ec2 run-instances` won't
+///   complete past the subcommand name.
+/// depth=1+: aws/* etc. get pulled in. aws.json alone blows past
+///   100 MB at depth 4 — proportional value is poor without
+///   parallel improvements (compressed cache format, lazy load
+///   in spec_loader, etc.). Re-enable when those land (M1+).
+const MAX_DEPTH = 0;
+
+const convertSpec = async (
+  s: FigSpec,
+  ctx: Ctx,
+  fallbackName?: string
+): Promise<NervSpec> => {
+  // Inline a referenced subspec when `loadSpec: "<relative/path>"` is
+  // a literal string. Fig's runtime would lazy-load these; for static
+  // JSON we eagerly inline up to MAX_DEPTH. Cycles + over-deep nesting
+  // are detected and skipped (the spec becomes a stub subcommand with
+  // its original name + description but empty subtree).
+  if (typeof s.loadSpec === "string" && ctx.depth < MAX_DEPTH) {
+    const childPath = resolve(ctx.baseDir, `${s.loadSpec}.ts`);
+    if (!ctx.visited.has(childPath)) {
+      try {
+        ctx.visited.add(childPath);
+        const child = await loadOneAt(childPath, {
+          baseDir: dirname(childPath),
+          visited: ctx.visited,
+          depth: ctx.depth + 1,
+        });
+        if (child) {
+          const allNames = namesOf(s.name);
+          const primary = allNames[0] ?? child.name ?? fallbackName ?? "";
+          return {
+            name: primary,
+            aliases: allNames.slice(1),
+            description: s.description ?? child.description,
+            subcommands: child.subcommands,
+            options: child.options,
+            args: child.args,
+            requires_double_dash: false,
+            hidden: s.hidden ?? false,
+          };
+        }
+      } catch (e: any) {
+        // Missing subspec or import failure — fall through to stub.
+        console.error(
+          `[ts-to-json]  loadSpec "${s.loadSpec}" failed: ${e?.message ?? e}`
+        );
+      }
+    }
+  }
+
   const allNames = namesOf(s.name);
   const primary = allNames[0] ?? fallbackName ?? "";
   const aliases = allNames.slice(1);
+  const subcommands: NervSpec[] = [];
+  for (const sc of s.subcommands ?? []) {
+    subcommands.push(await convertSpec(sc, ctx));
+  }
   return {
     name: primary,
     aliases,
     description: s.description ?? null,
-    subcommands: (s.subcommands ?? []).map((sc) => convertSpec(sc)),
+    subcommands,
     options: (s.options ?? []).map(convertOpt),
     args: argsOf(s.args),
     requires_double_dash: false,
@@ -242,14 +304,22 @@ const convertSpec = (s: FigSpec, fallbackName?: string): NervSpec => {
 
 const loadOne = async (file: string): Promise<NervSpec | null> => {
   const abs = resolve(file);
-  const mod = await import(abs);
+  return loadOneAt(abs, {
+    baseDir: dirname(abs),
+    visited: new Set([abs]),
+    depth: 0,
+  });
+};
+
+const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
+  const mod = await import(file);
   const exported = mod.default ?? mod.completionSpec;
   if (!exported) {
     console.error(`[ts-to-json] no default export: ${file}`);
     return null;
   }
   const stem = basename(file, extname(file));
-  return convertSpec(exported as FigSpec, stem);
+  return convertSpec(exported as FigSpec, ctx, stem);
 };
 
 const collectInputs = async (input: string): Promise<string[]> => {
