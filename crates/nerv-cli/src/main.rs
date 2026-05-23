@@ -612,9 +612,238 @@ fn upgrade_tier<'a>(current: char, gens: impl IntoIterator<Item = &'a Generator>
 }
 
 fn cmd_uninstall(keep_config: bool, quiet: bool) -> anyhow::Result<()> {
-    // docs/uninstall-spec.md §4 — 8-step procedure, atomic .zshrc edits.
-    let _ = (keep_config, quiet);
-    anyhow::bail!("nerv uninstall: not yet implemented (M1 13–16주차)")
+    use anyhow::Context;
+    use std::fs;
+    use std::path::PathBuf;
+
+    let mut log = UninstallLog::new(quiet);
+
+    // Step 1-2: stop daemon (best-effort, idempotent)
+    let stopped = stop_daemon_for_uninstall(&mut log);
+    let _ = stopped;
+
+    // Step 3: shell-hook removal (atomic, with timestamped backup)
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let backup_path = match &home {
+        Some(h) => strip_zsh_hooks(h, &mut log)?,
+        None => {
+            log.warn("shell hook", "HOME unset");
+            None
+        }
+    };
+
+    // Step 4: cache dir
+    if let Some(dir) = paths::cache_dir() {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => log.ok("cache", format!("removed {}", dir.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log.ok("cache", "already absent".into());
+            }
+            Err(e) => log.warn("cache", &format!("{e}")),
+        }
+    }
+
+    // Step 5: log dir
+    if let Some(dir) = paths::log_dir() {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => log.ok("logs", format!("removed {}", dir.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log.ok("logs", "already absent".into());
+            }
+            Err(e) => log.warn("logs", &format!("{e}")),
+        }
+    }
+
+    // Step 6: config dir
+    if keep_config {
+        log.ok("config", "preserved (--keep-config)".into());
+    } else if let Some(dir) = paths::config_dir() {
+        match fs::remove_dir_all(&dir) {
+            Ok(()) => log.ok("config", format!("removed {}", dir.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                log.ok("config", "already absent".into());
+            }
+            Err(e) => log.warn("config", &format!("{e}")),
+        }
+    }
+
+    // Step 8: summary
+    log.finish(backup_path.as_deref());
+    if log.warnings() > 0 {
+        std::process::exit(1);
+    }
+    let _ = home; // hush unused on no-HOME branch
+    Ok::<(), anyhow::Error>(()).context("uninstall")
+}
+
+/// Stop the daemon as part of uninstall — SIGTERM with timeout, then
+/// SIGKILL fallback. Logs to the provided UninstallLog.
+fn stop_daemon_for_uninstall(log: &mut UninstallLog) -> bool {
+    use std::time::Duration;
+
+    let Some(pid_path) = paths::pid_path() else {
+        log.warn("daemon", "HOME unset");
+        return false;
+    };
+    let Some(pid) = read_pid(&pid_path) else {
+        log.ok("daemon", "not running".into());
+        return true;
+    };
+    if !process_alive(pid) {
+        log.ok("daemon", format!("stale pid {pid} ignored"));
+        return true;
+    }
+
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        for _ in 0..50 {
+            if !process_alive(pid) {
+                log.ok("daemon", format!("stopped (pid {pid})"));
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // SIGKILL fallback
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        for _ in 0..10 {
+            if !process_alive(pid) {
+                log.ok("daemon", format!("killed (pid {pid})"));
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        log.warn("daemon", &format!("pid {pid} still alive after SIGKILL"));
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        log.warn("daemon", "non-unix not supported");
+        false
+    }
+}
+
+/// Step 3 of uninstall-spec.md: scan zsh init files, strip marker
+/// blocks, write atomically, leave a timestamped backup behind.
+/// Returns the backup path of the first file actually modified.
+fn strip_zsh_hooks(
+    home: &std::path::Path,
+    log: &mut UninstallLog,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    use std::fs;
+
+    let init_files = [".zshrc", ".zshenv", ".zprofile", ".zlogin"];
+    let mut first_backup: Option<std::path::PathBuf> = None;
+    let mut total_blocks_removed = 0usize;
+
+    for name in init_files {
+        let path = home.join(name);
+        if !path.exists() {
+            continue;
+        }
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                log.warn("shell hook", &format!("read {}: {e}", path.display()));
+                continue;
+            }
+        };
+        let count = nerv_shell::count_blocks(&content);
+        if count == 0 {
+            continue;
+        }
+        let stripped = nerv_shell::strip_blocks(&content);
+        let backup = path.with_extension(format!("nerv-backup-{}", chrono_like_timestamp()));
+        if let Err(e) = fs::copy(&path, &backup) {
+            log.warn("shell hook", &format!("backup {}: {e}", backup.display()));
+            continue;
+        }
+        // Atomic: write to temp file in same dir, then rename.
+        let tmp = path.with_extension("nerv-tmp");
+        if let Err(e) = fs::write(&tmp, &stripped) {
+            log.warn("shell hook", &format!("temp write: {e}"));
+            let _ = fs::remove_file(&tmp);
+            continue;
+        }
+        if let Err(e) = fs::rename(&tmp, &path) {
+            log.warn("shell hook", &format!("rename: {e}"));
+            let _ = fs::remove_file(&tmp);
+            continue;
+        }
+        total_blocks_removed += count;
+        if first_backup.is_none() {
+            first_backup = Some(backup);
+        }
+    }
+
+    if total_blocks_removed > 0 {
+        log.ok(
+            "shell hook",
+            format!("removed {total_blocks_removed} block(s)"),
+        );
+    } else {
+        log.ok("shell hook", "no marker blocks found".into());
+    }
+    Ok(first_backup)
+}
+
+/// Minimal timestamp generator: YYYY-MM-DDTHH-MM-SS (filesystem-safe).
+/// Uses SystemTime to avoid pulling chrono in.
+fn chrono_like_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Format as unix-seconds — readable, monotonic, sortable.
+    secs.to_string()
+}
+
+struct UninstallLog {
+    quiet: bool,
+    ok_count: usize,
+    warn_count: usize,
+}
+
+impl UninstallLog {
+    fn new(quiet: bool) -> Self {
+        Self {
+            quiet,
+            ok_count: 0,
+            warn_count: 0,
+        }
+    }
+    fn ok(&mut self, label: &str, detail: String) {
+        self.ok_count += 1;
+        if !self.quiet {
+            println!("  ✓ {label:<14} {detail}");
+        }
+    }
+    fn warn(&mut self, label: &str, detail: &str) {
+        self.warn_count += 1;
+        if !self.quiet {
+            eprintln!("  ⚠ {label:<14} {detail}");
+        }
+    }
+    fn warnings(&self) -> usize {
+        self.warn_count
+    }
+    fn finish(&self, backup: Option<&std::path::Path>) {
+        if self.quiet {
+            return;
+        }
+        if self.warn_count == 0 {
+            match backup {
+                Some(p) => println!("nerv removed. backup: {}", p.display()),
+                None => println!("nerv removed."),
+            }
+        } else {
+            let total = self.ok_count + self.warn_count;
+            let ok = self.ok_count;
+            let warn = self.warn_count;
+            println!("nerv: {ok}/{total} steps OK, {warn} warning — see above");
+        }
+    }
 }
 
 // ---------- internal: _complete (M0-1 IPC bridge) ----------
