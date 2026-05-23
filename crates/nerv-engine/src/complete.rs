@@ -27,10 +27,35 @@ use std::sync::{Arc, RwLock};
 /// `<dir>/<name>.json` from disk and inserts the parsed spec
 /// (or `None` for a negative cache entry) into the cache so the
 /// next lookup is O(1).
-#[derive(Debug, Default)]
+///
+/// Hot-reload: each positive cache entry tracks the file's mtime.
+/// On lookup, the file is stat'd; if mtime has advanced (user
+/// reinstalled / regenerated the spec), the cache entry is dropped
+/// and the spec is re-read. Adds ~1µs per lookup on top of the
+/// HashMap hit (cheap compared to even the fastest UDS roundtrip).
+#[derive(Debug)]
 pub struct SpecRegistry {
     dir: Option<PathBuf>,
-    cache: RwLock<HashMap<String, Option<Arc<Spec>>>>,
+    cache: RwLock<HashMap<String, CacheEntry>>,
+}
+
+impl Default for SpecRegistry {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CacheEntry {
+    /// Last-known mtime of the on-disk file. `None` = negative
+    /// cache entry (file didn't exist last time we looked).
+    mtime: Option<std::time::SystemTime>,
+    /// `None` for negative entries OR parse failures (don't keep
+    /// retrying a broken file every keystroke).
+    spec: Option<Arc<Spec>>,
 }
 
 impl SpecRegistry {
@@ -64,6 +89,7 @@ impl SpecRegistry {
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
                 continue;
             }
+            let mtime = path.metadata().and_then(|m| m.modified()).ok();
             match load_spec_file(&path) {
                 Ok(spec) => {
                     let key = if !spec.name.is_empty() {
@@ -73,7 +99,13 @@ impl SpecRegistry {
                     } else {
                         continue;
                     };
-                    cache.insert(key, Some(Arc::new(spec)));
+                    cache.insert(
+                        key,
+                        CacheEntry {
+                            mtime,
+                            spec: Some(Arc::new(spec)),
+                        },
+                    );
                 }
                 Err(e) => errors.push(e),
             }
@@ -82,42 +114,83 @@ impl SpecRegistry {
         (registry, errors)
     }
 
-    /// Resolve a spec by binary name, loading from disk on first hit.
+    /// Resolve a spec by binary name, loading from disk on first hit
+    /// or when the file's mtime has advanced past the cached value.
     /// Returns `None` if the spec doesn't exist or failed to parse.
     pub fn lookup(&self, name: &str) -> Option<Arc<Spec>> {
-        if let Some(cached) = self.cache.read().ok().and_then(|c| c.get(name).cloned()) {
-            return cached;
+        // Fast path: cache hit + mtime unchanged.
+        let cached = self.cache.read().ok().and_then(|c| c.get(name).cloned());
+        if let Some(entry) = cached {
+            let disk_mtime = self.disk_mtime(name);
+            if entry.mtime == disk_mtime {
+                return entry.spec;
+            }
+            // Mtime advanced (or file gone) — fall through to reload.
         }
-        let loaded = self.load_from_disk(name);
-        // Negative-cache misses too, so we don't reread on each request
-        // for a binary that has no spec.
+        let (mtime, spec) = self.load_from_disk(name);
         if let Ok(mut cache) = self.cache.write() {
-            cache.insert(name.to_string(), loaded.clone());
+            cache.insert(
+                name.to_string(),
+                CacheEntry {
+                    mtime,
+                    spec: spec.clone(),
+                },
+            );
         }
-        loaded
+        spec
     }
 
-    fn load_from_disk(&self, name: &str) -> Option<Arc<Spec>> {
+    /// stat() the file backing `name` (plain or .gz form) and return
+    /// its mtime. `None` if the file doesn't exist or stat fails.
+    fn disk_mtime(&self, name: &str) -> Option<std::time::SystemTime> {
         let dir = self.dir.as_ref()?;
-        // Prefer plain JSON for human inspection; fall back to gzipped
-        // form (build-time compressed cache).
         let plain = dir.join(format!("{name}.json"));
-        if plain.exists() {
-            return load_spec_file(&plain).ok().map(Arc::new);
+        if let Ok(m) = plain.metadata() {
+            return m.modified().ok();
         }
         let gz = dir.join(format!("{name}.json.gz"));
-        if gz.exists() {
-            return load_spec_file(&gz).ok().map(Arc::new);
+        if let Ok(m) = gz.metadata() {
+            return m.modified().ok();
         }
         None
     }
 
+    fn load_from_disk(&self, name: &str) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>) {
+        let Some(dir) = self.dir.as_ref() else {
+            return (None, None);
+        };
+        // Prefer plain JSON for human inspection; fall back to gzipped
+        // form (build-time compressed cache).
+        let plain = dir.join(format!("{name}.json"));
+        if plain.exists() {
+            let mtime = plain.metadata().and_then(|m| m.modified()).ok();
+            let spec = load_spec_file(&plain).ok().map(Arc::new);
+            return (mtime, spec);
+        }
+        let gz = dir.join(format!("{name}.json.gz"));
+        if gz.exists() {
+            let mtime = gz.metadata().and_then(|m| m.modified()).ok();
+            let spec = load_spec_file(&gz).ok().map(Arc::new);
+            return (mtime, spec);
+        }
+        (None, None)
+    }
+
     /// Insert a spec into the cache directly. Used by tests that
-    /// build Specs in code and by future hot-reload paths.
+    /// build Specs in code and by future hot-reload paths. The
+    /// inserted entry has no mtime — so `lookup` will re-stat and
+    /// potentially evict it if the dir is configured AND a file with
+    /// the same name exists on disk.
     pub fn insert(&self, spec: Spec) {
         let key = spec.name.clone();
         if let Ok(mut cache) = self.cache.write() {
-            cache.insert(key, Some(Arc::new(spec)));
+            cache.insert(
+                key,
+                CacheEntry {
+                    mtime: None,
+                    spec: Some(Arc::new(spec)),
+                },
+            );
         }
     }
 
@@ -126,7 +199,7 @@ impl SpecRegistry {
     pub fn len(&self) -> usize {
         self.cache
             .read()
-            .map(|c| c.values().filter(|v| v.is_some()).count())
+            .map(|c| c.values().filter(|v| v.spec.is_some()).count())
             .unwrap_or(0)
     }
 
@@ -144,7 +217,7 @@ impl SpecRegistry {
             .read()
             .map(|c| {
                 c.iter()
-                    .filter(|(_, v)| v.is_some())
+                    .filter(|(_, v)| v.spec.is_some())
                     .map(|(k, _)| k.clone())
                     .collect()
             })
@@ -749,6 +822,32 @@ mod tests {
         let r = complete("x feat", 6, &registry_with(spec));
         let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(names, ["feature-a", "feature-b"]);
+    }
+
+    #[test]
+    fn lookup_hot_reloads_after_mtime_change() {
+        use std::fs;
+        use std::thread::sleep;
+        use std::time::Duration;
+        let tmp = std::env::temp_dir().join(format!("nerv-hot-reload-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("widget.json");
+        fs::write(&path, r#"{"name":"widget","description":"v1"}"#).unwrap();
+
+        let r = SpecRegistry::at_dir(&tmp);
+        let v1 = r.lookup("widget").expect("v1");
+        assert_eq!(v1.description.as_deref(), Some("v1"));
+
+        // Bump mtime by at least 1s (filesystem coarse-grained on some
+        // systems) and rewrite with v2 content.
+        sleep(Duration::from_secs(1));
+        fs::write(&path, r#"{"name":"widget","description":"v2"}"#).unwrap();
+
+        let v2 = r.lookup("widget").expect("v2");
+        assert_eq!(v2.description.as_deref(), Some("v2"));
+
+        fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
