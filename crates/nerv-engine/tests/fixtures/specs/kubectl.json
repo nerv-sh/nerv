@@ -1,0 +1,221 @@
+{
+  "name": "kubectl",
+  "description": "Kubernetes command-line tool",
+  "subcommands": [
+    {
+      "name": "get",
+      "description": "Display one or many resources",
+      "options": [
+        {
+          "names": ["-n", "--namespace"],
+          "description": "Target namespace",
+          "args": [{ "name": "ns" }]
+        },
+        {
+          "names": ["-o", "--output"],
+          "description": "Output format",
+          "args": [
+            {
+              "name": "format",
+              "suggestions": ["json", "yaml", "wide", "name", "go-template"]
+            }
+          ]
+        },
+        { "names": ["-A", "--all-namespaces"], "description": "List in all namespaces" },
+        { "names": ["-w", "--watch"], "description": "Watch for changes" },
+        {
+          "names": ["-l", "--selector"],
+          "description": "Selector to filter on",
+          "args": [{ "name": "selector" }]
+        }
+      ],
+      "args": [
+        {
+          "name": "resource",
+          "suggestions": [
+            "pods", "po", "services", "svc", "deployments", "deploy",
+            "nodes", "no", "namespaces", "ns", "configmaps", "cm",
+            "secrets", "ingresses", "ing", "jobs", "cronjobs",
+            "statefulsets", "sts", "daemonsets", "ds", "replicasets", "rs",
+            "persistentvolumes", "pv", "persistentvolumeclaims", "pvc",
+            "events", "ev", "endpoints", "ep"
+          ]
+        },
+        { "name": "name", "is_optional": true, "is_variadic": true }
+      ]
+    },
+    {
+      "name": "describe",
+      "description": "Show details of a specific resource",
+      "options": [
+        {
+          "names": ["-n", "--namespace"],
+          "args": [{ "name": "ns" }]
+        },
+        { "names": ["-A", "--all-namespaces"] },
+        {
+          "names": ["-l", "--selector"],
+          "args": [{ "name": "selector" }]
+        }
+      ],
+      "args": [
+        {
+          "name": "resource",
+          "suggestions": [
+            "pods", "po", "services", "svc", "deployments", "deploy",
+            "nodes", "no", "namespaces", "ns"
+          ]
+        },
+        { "name": "name", "is_optional": true, "is_variadic": true }
+      ]
+    },
+    {
+      "name": "logs",
+      "description": "Print the logs for a container in a pod",
+      "options": [
+        { "names": ["-f", "--follow"], "description": "Stream logs" },
+        { "names": ["-p", "--previous"], "description": "Previous instance logs" },
+        {
+          "names": ["-c", "--container"],
+          "description": "Container name",
+          "args": [{ "name": "container" }]
+        },
+        {
+          "names": ["--tail"],
+          "description": "Number of lines from end",
+          "args": [{ "name": "n" }]
+        },
+        {
+          "names": ["--since"],
+          "description": "Show logs since duration",
+          "args": [{ "name": "duration" }]
+        },
+        {
+          "names": ["-n", "--namespace"],
+          "args": [{ "name": "ns" }]
+        }
+      ],
+      "args": [{ "name": "pod" }]
+    },
+    {
+      "name": "apply",
+      "description": "Apply a configuration to a resource by file",
+      "options": [
+        {
+          "names": ["-f", "--filename"],
+          "description": "Filename, dir, or URL",
+          "is_repeatable": true,
+          "args": [{ "name": "file", "template": "filepaths" }]
+        },
+        {
+          "names": ["-k", "--kustomize"],
+          "args": [{ "name": "dir", "template": "folders" }]
+        },
+        { "names": ["-R", "--recursive"], "description": "Process directories recursively" },
+        { "names": ["--dry-run"], "args": [{ "name": "mode", "suggestions": ["none", "server", "client"] }] }
+      ]
+    },
+    {
+      "name": "delete",
+      "description": "Delete resources",
+      "options": [
+        {
+          "names": ["-f", "--filename"],
+          "args": [{ "name": "file", "template": "filepaths" }]
+        },
+        {
+          "names": ["-n", "--namespace"],
+          "args": [{ "name": "ns" }]
+        },
+        { "names": ["--all"], "description": "Delete all resources" },
+        { "names": ["--grace-period"], "args": [{ "name": "seconds" }] }
+      ],
+      "args": [
+        { "name": "resource", "is_optional": true },
+        { "name": "name", "is_optional": true, "is_variadic": true }
+      ]
+    },
+    {
+      "name": "exec",
+      "description": "Execute a command in a container",
+      "options": [
+        { "names": ["-i", "--stdin"] },
+        { "names": ["-t", "--tty"] },
+        {
+          "names": ["-c", "--container"],
+          "args": [{ "name": "container" }]
+        },
+        {
+          "names": ["-n", "--namespace"],
+          "args": [{ "name": "ns" }]
+        }
+      ],
+      "args": [
+        { "name": "pod" },
+        { "name": "command", "is_variadic": true }
+      ]
+    },
+    {
+      "name": "port-forward",
+      "description": "Forward one or more local ports to a pod",
+      "args": [
+        { "name": "resource" },
+        { "name": "ports", "is_variadic": true }
+      ]
+    },
+    {
+      "name": "rollout",
+      "description": "Manage the rollout of a resource",
+      "subcommands": [
+        { "name": "status", "description": "Show the status of the rollout" },
+        { "name": "history", "description": "View rollout history" },
+        { "name": "undo", "description": "Undo a previous rollout" },
+        { "name": "restart", "description": "Restart a resource" },
+        { "name": "pause", "description": "Pause a resource" },
+        { "name": "resume", "description": "Resume a paused resource" }
+      ]
+    },
+    {
+      "name": "scale",
+      "description": "Set a new size for a deployment, replica set, etc.",
+      "options": [
+        {
+          "names": ["--replicas"],
+          "is_required": true,
+          "args": [{ "name": "count" }]
+        }
+      ],
+      "args": [{ "name": "resource" }]
+    },
+    {
+      "name": "config",
+      "description": "Modify kubeconfig files",
+      "subcommands": [
+        { "name": "view", "description": "Display merged kubeconfig" },
+        { "name": "current-context", "description": "Display the current-context" },
+        { "name": "get-contexts", "description": "List the contexts" },
+        { "name": "use-context", "description": "Set the current-context" },
+        { "name": "set-context", "description": "Set a context entry" }
+      ]
+    },
+    {
+      "name": "version",
+      "description": "Print the client and server version information",
+      "options": [
+        { "names": ["--client"], "description": "Client version only" },
+        {
+          "names": ["-o", "--output"],
+          "args": [{ "name": "format", "suggestions": ["json", "yaml"] }]
+        }
+      ]
+    },
+    {
+      "name": "cluster-info",
+      "description": "Display cluster info"
+    },
+    {
+      "name": "api-resources",
+      "description": "Print the supported API resources on the server"
+    }
+  ]
+}
