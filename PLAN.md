@@ -318,7 +318,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 
 **M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
 
-**현재 상태 (2026-05-23)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 모두 통과, hand-rolled fixture 9종 + 43 integration test. CLI 표면 5/5 완성. **TS→JSON 변환 파이프라인 + loadSpec depth=1 inlining 동작** (`tools/ts-to-json/` bun-based): 715 spec 변환 (440 Tier A / 6 B / 246 C), `aws ec2 <verb>` 같은 nested 자동완성까지 커버. **SpecRegistry lazy load + gzip 압축 캐시** (10× 압축, 715 spec 풀세트 10MB 디스크): daemon 즉시 기동, 메모리 사용은 사용분만. 에러 UX E1-E4 shell-side 구현 (E5 manifest 도입 후). M1 0-4주차 작업의 약 70% 가 M0 단계에서 선행 완료 — M1 5-10주차 (rquickjs Tier C / figterm opt-in) 만 남음.
+**현재 상태 (2026-05-23)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 통과, hand-rolled fixture 9종 + 43 integration test. CLI 5/5 완성. **TS→JSON 변환 + loadSpec depth=1 동작** (715 spec, 440 Tier A / 6 B / 246 C, `aws ec2 <verb>` 등 nested 커버). **SpecRegistry lazy + mtime hot-reload + gzip 압축 (10×)** — daemon 즉시 기동, spec 재설치 시 재시작 불필요, 10MB 풀세트 디스크. **Tier B generator 실행** — 정적 shell command spawn (`git branch --list` 등) + TTL 5s LRU 64 cache + ANSI/git-marker line sanitization. 에러 UX E1-E4 구현. Rquickjs Tier C 는 closure JSON 미직렬화로 영구 deferred (Fig 원본 closure body 가 vendored TS 안에만 존재; PRD §0.2 의 deno_core 금지와 정합). M1 0-10주차 작업 대부분 선행 완료 — figterm opt-in (M1 5-10주차) + 서명/공증 인프라 (M0-8) 만 남음.
 
 **M0-2 Fig 흡수 결과 의사결정 트리**:
 
