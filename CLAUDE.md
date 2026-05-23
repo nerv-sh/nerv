@@ -38,12 +38,19 @@
 **보너스 진척 (M0 산출물 외 — M1 0-4주차 작업 일부 선행)**:
 - ✅ CLI 5/5 표면 완성: `nerv init` / `start` / `stop` / `spec list` / `doctor` / `uninstall` (uninstall-spec.md §4 8-step atomic 포함)
 - ✅ nerv-engine::complete flag-prefix override (cursor at `-` → emit options 우선)
+- ✅ fixture pack 9종 hand-rolled (git/echo/docker/kubectl/npm/cargo/gh/brew/make) + 43 integration test
+- ✅ TS→JSON 변환 파이프라인 `tools/ts-to-json/` (bun 기반, 715 spec 변환, 0 failure)
+  - Tier A 440 / B 6 / C 246 자동 분류
+  - daemon 로드 가능 707 spec (registry HashMap dedup 후)
+  - loadSpec 재귀 인라인 인프라 + cycle-safe (MAX_DEPTH=0 default; M1 lazy-load 도입 후 활성)
+- ✅ 에러 UX shell-side: E1 widget hint (이전), E2 daemon log format, E3 zsh<5.8 check, E4 widget conflict 감지 (E5 spec manifest 도입 후)
+- ✅ widget UX: popup auto-size + description 잘림 수정
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
-- M1 진입: TS→JSON 변환 파이프라인 / rquickjs Tier C / 에러 UX 5종 shell-side / widget UX 폴리시
+- M1 본격: rquickjs Tier C (246 spec 회복) / spec cache 압축 + lazy load / loadSpec depth 활성 / E5 manifest
 
 ## 4. 절대 깨면 안 되는 불변식
 
@@ -88,11 +95,20 @@ cargo run -p nerv-cli -- stop               # daemon 종료 (SIGTERM)
 cargo run -p nerv-cli -- uninstall          # 마커블록 + 캐시/로그/설정 atomic 제거
                                              # --keep-config 로 ~/.config/nerv/ 보존
 
-# spec JSON 빌드 (M0-6 — TS→JSON 변환 자체는 외부 단계)
+# TS→JSON 변환 (M1, bun 필요) — vendor/withfig-autocomplete/ → JSON
+cd tools/ts-to-json
+bun install
+bun run convert:all                            # 715 spec → fixtures/converted/
+cd -
+
+# JSON validate + canonicalize (M0-6)
 cargo run -p nerv-engine --bin build-specs -- \
-    --input vendor/withfig-autocomplete/src/ \
+    --input crates/nerv-engine/tests/fixtures/converted/ \
     --output ~/Library/Caches/nerv/specs/ \
-    --only git --only docker --only kubectl
+    --only git --only docker --only kubectl    # --only repeatable, 없으면 전체
+
+# 또는 직접 copy
+cp crates/nerv-engine/tests/fixtures/converted/*.json ~/Library/Caches/nerv/specs/
 
 # Latency bench (M0-7 acceptance)
 cargo test --release -p nerv-daemon --test bench_latency \
@@ -113,7 +129,8 @@ crates/
   nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
   nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader / complete / ipc / paths / ranker)
                    #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer)
-                   #   + tests/fixtures/specs/{git,echo,docker,kubectl}.json (Go/No-Go 시나리오)
+                   #   + tests/fixtures/specs/{git,echo,docker,kubectl,npm,cargo,gh,brew,make}.json (9 hand-rolled)
+                   #   + tests/fixtures/converted/ (.gitignore; bun 변환 결과 715 spec, 45MB)
   nerv-shell/      # 마커 블록 init_block / strip_blocks (테스트 4종)
 
   # M0-2 신규 (filter-repo 흡수)
@@ -129,6 +146,7 @@ crates/
   nerv-diag/       # ← fig_diagnostic
 
 shell-integrations/zsh/_nerv.zsh     # ZLE widget (M0 유지, M1 figterm 도입 시 deprecate)
+tools/ts-to-json/                    # bun-based TS→JSON 변환 (M1 entry; 715 spec 자동 변환)
 vendor/withfig-autocomplete/         # subtree, ISC, pin = aef52acf… (TS specs 1,484)
 vendor/aws-autocomplete/             # M0-1 subtree, Apache+MIT, 미수정 mirror (drift 감지)
 vendor-patches/{upstream,self}/      # cherry-pick 보관소 (M1)

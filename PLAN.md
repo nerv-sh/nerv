@@ -318,7 +318,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 
 **M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
 
-**현재 상태 (2026-05-23)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 (git / echo / docker / kubectl) 모두 fixture + 24 integration test 통과. 1,484 spec 전체 TS→JSON 변환은 M1 본격 진입과 함께. CLI 표면 5/5 도 함께 완성 (init / doctor / start / stop / spec list / uninstall — M1 0-4주차 작업 일부 선행).
+**현재 상태 (2026-05-23)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 모두 통과, hand-rolled fixture 9종 + 43 integration test. CLI 표면 5/5 완성 (init / doctor / start / stop / spec list / uninstall). **TS→JSON 변환 파이프라인 동작** (`tools/ts-to-json/` bun-based): 715 spec 변환 성공 (440 Tier A / 6 B / 246 C), daemon 로드 707 spec. loadSpec 재귀 인라인 인프라 존재 (depth=0 default — cache 압축 + lazy load 도입 후 활성). 에러 UX E1-E4 shell-side 구현 (E5 manifest 도입 후). 결과적으로 M1 0-4주차 작업의 약 70% 가 M0 단계에서 선행 완료.
 
 **M0-2 Fig 흡수 결과 의사결정 트리**:
 
