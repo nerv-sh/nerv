@@ -142,16 +142,250 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
 }
 
 fn cmd_doctor() -> anyhow::Result<()> {
-    // docs/error-states.md §5 — output format is fixed.
+    let report = build_doctor_report();
     println!("nerv doctor");
     println!();
-    if let Some(d) = paths::cache_dir() {
-        println!("  ⌛ pending implementation (M1 7–12주차)");
-        println!("     cache dir: {}", d.display());
-    } else {
-        println!("  ✗ HOME unset — cannot resolve nerv paths");
+    for entry in &report.entries {
+        let prefix = match entry.level {
+            DoctorLevel::Ok => "✓",
+            DoctorLevel::Warn => "⚠",
+            DoctorLevel::Err => "✗",
+        };
+        println!("  {prefix} {:<22} {}", entry.label, entry.detail);
+        if let Some(hint) = &entry.hint {
+            println!("                           → {hint}");
+        }
+    }
+    println!();
+    let (ok, warn, err) = report.counts();
+    println!("Result: {ok} OK, {warn} warning, {err} error");
+    if err > 0 {
+        std::process::exit(1);
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DoctorLevel {
+    Ok,
+    Warn,
+    Err,
+}
+
+#[derive(Debug, Clone)]
+struct DoctorEntry {
+    level: DoctorLevel,
+    label: String,
+    detail: String,
+    hint: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct DoctorReport {
+    entries: Vec<DoctorEntry>,
+}
+
+impl DoctorReport {
+    fn push(&mut self, level: DoctorLevel, label: &str, detail: String, hint: Option<String>) {
+        self.entries.push(DoctorEntry {
+            level,
+            label: label.into(),
+            detail,
+            hint,
+        });
+    }
+
+    fn counts(&self) -> (usize, usize, usize) {
+        let mut o = 0;
+        let mut w = 0;
+        let mut e = 0;
+        for entry in &self.entries {
+            match entry.level {
+                DoctorLevel::Ok => o += 1,
+                DoctorLevel::Warn => w += 1,
+                DoctorLevel::Err => e += 1,
+            }
+        }
+        (o, w, e)
+    }
+}
+
+fn build_doctor_report() -> DoctorReport {
+    let mut r = DoctorReport::default();
+    check_zsh_version(&mut r);
+    check_shell_hook(&mut r);
+    check_daemon(&mut r);
+    check_specs(&mut r);
+    r
+}
+
+/// E3: zsh version ≥ 5.8.
+fn check_zsh_version(r: &mut DoctorReport) {
+    use std::process::Command;
+    let out = match Command::new("zsh").arg("--version").output() {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            r.push(
+                DoctorLevel::Err,
+                "zsh version",
+                "zsh not found on PATH".into(),
+                Some("install zsh (5.8+)".into()),
+            );
+            return;
+        }
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let version = text.split_whitespace().nth(1).unwrap_or("?").to_string();
+    let (major, minor) = parse_zsh_version(&version);
+    if major > 5 || (major == 5 && minor >= 8) {
+        r.push(
+            DoctorLevel::Ok,
+            "zsh version",
+            format!("{version} (>= 5.8)"),
+            None,
+        );
+    } else {
+        r.push(
+            DoctorLevel::Err,
+            "zsh version",
+            format!("{version} (< 5.8)"),
+            Some("upgrade: brew upgrade zsh".into()),
+        );
+    }
+}
+
+fn parse_zsh_version(s: &str) -> (u32, u32) {
+    let mut it = s.split('.');
+    let major = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let minor = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    (major, minor)
+}
+
+/// Marker block in ~/.zshrc.
+fn check_shell_hook(r: &mut DoctorReport) {
+    let Some(home) = std::env::var_os("HOME") else {
+        r.push(DoctorLevel::Err, "shell hook", "HOME unset".into(), None);
+        return;
+    };
+    let zshrc = std::path::PathBuf::from(home).join(".zshrc");
+    if !zshrc.exists() {
+        r.push(
+            DoctorLevel::Warn,
+            "shell hook",
+            "~/.zshrc not found".into(),
+            Some("run: nerv init zsh >> ~/.zshrc".into()),
+        );
+        return;
+    }
+    let content = match std::fs::read_to_string(&zshrc) {
+        Ok(c) => c,
+        Err(e) => {
+            r.push(
+                DoctorLevel::Err,
+                "shell hook",
+                format!("read failed: {e}"),
+                None,
+            );
+            return;
+        }
+    };
+    let count = nerv_shell::count_blocks(&content);
+    match count {
+        0 => r.push(
+            DoctorLevel::Warn,
+            "shell hook",
+            "no nerv marker block in ~/.zshrc".into(),
+            Some("run: nerv init zsh >> ~/.zshrc".into()),
+        ),
+        1 => r.push(
+            DoctorLevel::Ok,
+            "shell hook",
+            "~/.zshrc marker block 1개 (멱등 OK)".into(),
+            None,
+        ),
+        n => r.push(
+            DoctorLevel::Warn,
+            "shell hook",
+            format!("{n} marker blocks (should be 1)"),
+            Some("run: nerv uninstall && nerv init zsh >> ~/.zshrc".into()),
+        ),
+    }
+}
+
+/// E1: nervd running.
+fn check_daemon(r: &mut DoctorReport) {
+    let Some(pid_path) = paths::pid_path() else {
+        r.push(DoctorLevel::Err, "daemon", "HOME unset".into(), None);
+        return;
+    };
+    let Some(pid) = read_pid(&pid_path) else {
+        r.push(
+            DoctorLevel::Err,
+            "daemon",
+            "nervd not running".into(),
+            Some("run: nerv start".into()),
+        );
+        return;
+    };
+    if process_alive(pid) {
+        r.push(
+            DoctorLevel::Ok,
+            "daemon",
+            format!("nervd running (pid {pid})"),
+            None,
+        );
+    } else {
+        r.push(
+            DoctorLevel::Err,
+            "daemon",
+            format!("stale PID file (pid {pid} not alive)"),
+            Some("run: nerv start".into()),
+        );
+    }
+}
+
+/// E2 + E5: specs loaded + parse errors.
+fn check_specs(r: &mut DoctorReport) {
+    let specs_dir = match std::env::var_os("NERV_SPECS_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(paths::specs_dir)
+    {
+        Some(d) => d,
+        None => {
+            r.push(DoctorLevel::Err, "specs", "HOME unset".into(), None);
+            return;
+        }
+    };
+    if !specs_dir.exists() {
+        r.push(
+            DoctorLevel::Warn,
+            "specs",
+            format!("dir missing: {}", specs_dir.display()),
+            Some("populate via build-specs or homebrew install".into()),
+        );
+        return;
+    }
+    let (registry, errs) = SpecRegistry::load_dir(&specs_dir);
+    let count = registry.len();
+    let err_count = errs.len();
+    if err_count == 0 && count == 0 {
+        r.push(
+            DoctorLevel::Warn,
+            "specs",
+            "0 specs loaded".into(),
+            Some(format!("populate {}", specs_dir.display())),
+        );
+        return;
+    }
+    if err_count > 0 {
+        r.push(
+            DoctorLevel::Err,
+            "spec health",
+            format!("{err_count} disabled: {}", errs[0]),
+            Some("run: brew reinstall nerv".into()),
+        );
+    }
+    r.push(DoctorLevel::Ok, "specs", format!("{count} loaded"), None);
 }
 
 fn cmd_start() -> anyhow::Result<()> {
