@@ -345,6 +345,8 @@ fn emit_arg_candidates(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
     let Some(arg) = node.args.first() else {
         return vec![];
     };
+
+    // Static suggestions list (Tier A).
     let mut out: Vec<Suggestion> = arg
         .suggestions
         .iter()
@@ -356,8 +358,81 @@ fn emit_arg_candidates(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
             kind: SuggestionKind::Argument,
         })
         .collect();
+
+    // Tier B: spawn `Generator::Template` scripts and parse stdout
+    // lines as candidates. Skipped under NERV_NO_GENERATORS=1 (tests,
+    // sandboxed environments).
+    if std::env::var_os("NERV_NO_GENERATORS").is_none() {
+        for g in &arg.generators {
+            if let crate::spec_parser::Generator::Template { script } = g {
+                if let Some(lines) = execute_template_generator(script) {
+                    out.extend(
+                        lines
+                            .into_iter()
+                            .filter(|s| s.starts_with(prefix))
+                            .map(|line| Suggestion {
+                                insertion: line.clone(),
+                                display: line,
+                                description: None,
+                                kind: SuggestionKind::Argument,
+                            }),
+                    );
+                }
+            }
+        }
+    }
+
     out.sort_by(|a, b| a.display.cmp(&b.display));
+    out.dedup_by(|a, b| a.display == b.display);
     out
+}
+
+/// Run a Tier B template generator script and return its stdout lines.
+/// Hard-capped at 200ms wall time to keep the IPC roundtrip under the
+/// 25ms p95 budget even on a busy machine — any longer means the
+/// shell command itself is the bottleneck, not the engine.
+fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    if script.is_empty() {
+        return None;
+    }
+    let bin = script.first()?;
+    let args = &script[1..];
+    let mut child = Command::new(bin)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    // Polling wait — std::process::Child doesn't have async wait.
+    // For 200ms total we sleep in 10ms increments (max 20 polls).
+    let deadline = std::time::Instant::now() + Duration::from_millis(200);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<String> = text
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Some(lines)
 }
 
 fn name_or_aliases_match(name: &str, aliases: &[String], prefix: &str) -> bool {
@@ -488,6 +563,68 @@ mod tests {
         ] {
             assert!(r.lookup(name).is_some(), "fixture missing: {name}");
         }
+    }
+
+    #[test]
+    fn template_generator_emits_stdout_lines() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("opt".into()),
+                generators: vec![Generator::Template {
+                    script: vec!["/usr/bin/printf".into(), "alpha\nbeta\ngamma\n".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(names, ["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn template_generator_disabled_by_env() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        // SAFETY: single-threaded test, no observers.
+        unsafe { std::env::set_var("NERV_NO_GENERATORS", "1") };
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("opt".into()),
+                generators: vec![Generator::Template {
+                    script: vec!["/bin/echo".into(), "should-not-run".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        unsafe { std::env::remove_var("NERV_NO_GENERATORS") };
+        assert!(r.items.is_empty(), "expected no items with env disabled");
+    }
+
+    #[test]
+    fn template_generator_filters_by_prefix() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("opt".into()),
+                generators: vec![Generator::Template {
+                    script: vec![
+                        "/usr/bin/printf".into(),
+                        "main\ndev\nfeature-a\nfeature-b\n".into(),
+                    ],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x feat", 6, &registry_with(spec));
+        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(names, ["feature-a", "feature-b"]);
     }
 
     #[test]
