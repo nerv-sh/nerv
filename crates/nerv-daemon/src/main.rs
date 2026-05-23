@@ -12,7 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{Request, Response, SpecLoadError, SpecRegistry, complete, paths};
+use nerv_engine::{Request, Response, SpecRegistry, complete, paths};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
@@ -34,19 +34,13 @@ async fn main() -> anyhow::Result<()> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| paths::specs_dir().expect("HOME present (just checked)"));
 
-    let (registry, load_errors) = SpecRegistry::load_dir(&specs_dir);
-    for err in &load_errors {
-        // E2 (docs/error-states.md §3.2): per-spec failures are
-        // soft. Daemon stays up; user-facing nerv doctor reports
-        // the disabled list.
-        warn!("{}", format_e2_load_error(err));
-    }
+    // Lazy registry: no upfront disk scan. Specs are read on first
+    // lookup and cached. Startup stays O(1) even with 700+ specs.
+    let registry = Arc::new(SpecRegistry::at_dir(&specs_dir));
     info!(
         specs_dir = %specs_dir.display(),
-        loaded = registry.len(),
-        "spec registry initialized"
+        "spec registry initialized (lazy)"
     );
-    let registry = Arc::new(registry);
 
     write_pid_file(&pid_path).await?;
 
@@ -152,27 +146,12 @@ async fn shutdown_signal() {
     }
 }
 
-/// Format a [`SpecLoadError`] using the docs/error-states.md §3.2
-/// E2 message style: `[nerv] spec disabled: <name> — <reason>`.
-fn format_e2_load_error(err: &SpecLoadError) -> String {
-    match err {
-        SpecLoadError::Parse { path, source } => {
-            let stem = std::path::Path::new(path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or(path);
-            format!(
-                "[nerv] spec disabled: {stem} — invalid JSON: {source} (run `nerv doctor` for details)"
-            )
-        }
-        SpecLoadError::Io { path, source } => {
-            format!("[nerv] spec disabled: {path} — io error: {source}")
-        }
-        SpecLoadError::NotFound(p) => {
-            format!("[nerv] spec not found: {p}")
-        }
-    }
-}
+// E2 (docs/error-states.md §3.2) reporting moves entirely into
+// `nerv doctor`, which scans the spec dir eagerly and prints
+// parse errors in the diagnostic table. The lazy daemon now
+// emits a generic "no spec for X" reason — sufficient for the
+// widget's E1 hint path; precise per-spec error attribution is
+// `nerv doctor`'s responsibility.
 
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};

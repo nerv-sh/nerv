@@ -87,6 +87,14 @@ enum Shell {
 
 fn main() -> anyhow::Result<()> {
     init_tracing();
+    // Rust's runtime ignores SIGPIPE by default, which turns
+    // `nerv spec list | head` into a panic. Restore Unix default
+    // so the CLI exits silently when its stdout closes mid-write.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
     match cli.command {
         Command::Init {
@@ -426,6 +434,8 @@ fn check_specs(r: &mut DoctorReport) {
         );
         return;
     }
+    // Doctor eager-scans (load_dir) so it can report parse errors up
+    // front, rather than waiting for a user keystroke to surface E2.
     let (registry, errs) = SpecRegistry::load_dir(&specs_dir);
     let count = registry.len();
     let err_count = errs.len();
@@ -592,22 +602,21 @@ fn cmd_spec_list() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (registry, errs) = SpecRegistry::load_dir(&specs_dir);
-    for e in &errs {
-        eprintln!("[nerv] {e}");
-    }
-    if registry.is_empty() {
+    let registry = SpecRegistry::at_dir(&specs_dir);
+    let names = registry.dir_listing();
+    if names.is_empty() {
         println!("(no specs found in {})", specs_dir.display());
         return Ok(());
     }
 
-    let mut names: Vec<&str> = registry.names().collect();
-    names.sort();
     println!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS");
     for name in names {
-        let spec = registry.get(name).expect("just enumerated");
-        let (subs, opts) = count_tree(spec);
-        let tier = compute_tier(spec);
+        let Some(spec) = registry.lookup(&name) else {
+            eprintln!("  ⚠ {name}: load error (run nerv doctor)");
+            continue;
+        };
+        let (subs, opts) = count_tree(spec.as_ref());
+        let tier = compute_tier(spec.as_ref());
         println!("{name:<18} {subs:>5} {opts:>5}  {tier}");
     }
     Ok(())
