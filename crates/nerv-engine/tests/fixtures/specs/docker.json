@@ -1,0 +1,184 @@
+{
+  "name": "docker",
+  "description": "A self-sufficient runtime for containers",
+  "subcommands": [
+    {
+      "name": "ps",
+      "description": "List containers",
+      "options": [
+        { "names": ["-a", "--all"], "description": "Show all containers" },
+        { "names": ["-q", "--quiet"], "description": "Only display container IDs" },
+        { "names": ["-s", "--size"], "description": "Display total file sizes" },
+        { "names": ["-l", "--latest"], "description": "Show the latest created container" },
+        {
+          "names": ["-f", "--filter"],
+          "description": "Filter output based on conditions",
+          "args": [{ "name": "filter" }]
+        },
+        {
+          "names": ["-n", "--last"],
+          "description": "Show n last created containers",
+          "args": [{ "name": "n" }]
+        }
+      ]
+    },
+    {
+      "name": "run",
+      "description": "Run a command in a new container",
+      "options": [
+        { "names": ["-d", "--detach"], "description": "Run container in background" },
+        { "names": ["-i", "--interactive"], "description": "Keep STDIN open" },
+        { "names": ["-t", "--tty"], "description": "Allocate a pseudo-TTY" },
+        { "names": ["--rm"], "description": "Remove container when it exits" },
+        {
+          "names": ["--name"],
+          "description": "Assign a name to the container",
+          "args": [{ "name": "name" }]
+        },
+        {
+          "names": ["-p", "--publish"],
+          "description": "Publish a container's port to the host",
+          "is_repeatable": true,
+          "args": [{ "name": "port" }]
+        },
+        {
+          "names": ["-v", "--volume"],
+          "description": "Bind mount a volume",
+          "is_repeatable": true,
+          "args": [{ "name": "volume" }]
+        },
+        {
+          "names": ["-e", "--env"],
+          "description": "Set environment variables",
+          "is_repeatable": true,
+          "args": [{ "name": "var" }]
+        }
+      ],
+      "args": [
+        { "name": "image" },
+        { "name": "command", "is_optional": true, "is_variadic": true }
+      ]
+    },
+    {
+      "name": "build",
+      "description": "Build an image from a Dockerfile",
+      "options": [
+        {
+          "names": ["-t", "--tag"],
+          "description": "Name and optionally a tag",
+          "args": [{ "name": "tag" }]
+        },
+        {
+          "names": ["-f", "--file"],
+          "description": "Name of the Dockerfile",
+          "args": [{ "name": "file", "template": "filepaths" }]
+        },
+        { "names": ["--no-cache"], "description": "Do not use cache when building" },
+        { "names": ["--pull"], "description": "Always attempt to pull a newer image" },
+        {
+          "names": ["--build-arg"],
+          "description": "Set build-time variables",
+          "is_repeatable": true,
+          "args": [{ "name": "arg" }]
+        }
+      ],
+      "args": [{ "name": "path", "template": "folders" }]
+    },
+    {
+      "name": "exec",
+      "description": "Run a command in a running container",
+      "options": [
+        { "names": ["-i", "--interactive"], "description": "Keep STDIN open" },
+        { "names": ["-t", "--tty"], "description": "Allocate a pseudo-TTY" },
+        { "names": ["-d", "--detach"], "description": "Detached mode" }
+      ],
+      "args": [
+        { "name": "container" },
+        { "name": "command", "is_variadic": true }
+      ]
+    },
+    {
+      "name": "logs",
+      "description": "Fetch the logs of a container",
+      "options": [
+        { "names": ["-f", "--follow"], "description": "Follow log output" },
+        { "names": ["-t", "--timestamps"], "description": "Show timestamps" },
+        {
+          "names": ["--tail"],
+          "description": "Number of lines to show from end",
+          "args": [{ "name": "n" }]
+        },
+        {
+          "names": ["--since"],
+          "description": "Show logs since timestamp",
+          "args": [{ "name": "time" }]
+        }
+      ],
+      "args": [{ "name": "container" }]
+    },
+    {
+      "name": "stop",
+      "description": "Stop one or more running containers",
+      "args": [{ "name": "container", "is_variadic": true }]
+    },
+    {
+      "name": "rm",
+      "description": "Remove one or more containers",
+      "options": [
+        { "names": ["-f", "--force"], "description": "Force removal" },
+        { "names": ["-v", "--volumes"], "description": "Remove anonymous volumes" }
+      ],
+      "args": [{ "name": "container", "is_variadic": true }]
+    },
+    {
+      "name": "rmi",
+      "description": "Remove one or more images",
+      "options": [
+        { "names": ["-f", "--force"], "description": "Force removal" }
+      ],
+      "args": [{ "name": "image", "is_variadic": true }]
+    },
+    {
+      "name": "pull",
+      "description": "Download an image from a registry",
+      "args": [{ "name": "image" }]
+    },
+    {
+      "name": "push",
+      "description": "Upload an image to a registry",
+      "args": [{ "name": "image" }]
+    },
+    {
+      "name": "images",
+      "description": "List images",
+      "options": [
+        { "names": ["-a", "--all"], "description": "Show all images" },
+        { "names": ["-q", "--quiet"], "description": "Only show image IDs" }
+      ]
+    },
+    {
+      "name": "inspect",
+      "description": "Return low-level information on Docker objects",
+      "options": [
+        {
+          "names": ["-f", "--format"],
+          "description": "Format the output",
+          "args": [{ "name": "template" }]
+        }
+      ],
+      "args": [{ "name": "object", "is_variadic": true }]
+    },
+    {
+      "name": "compose",
+      "description": "Docker Compose",
+      "subcommands": [
+        { "name": "up", "description": "Create and start containers" },
+        { "name": "down", "description": "Stop and remove containers" },
+        { "name": "build", "description": "Build or rebuild services" },
+        { "name": "logs", "description": "View output from containers" },
+        { "name": "ps", "description": "List containers" },
+        { "name": "restart", "description": "Restart services" }
+      ]
+    }
+  ]
+}

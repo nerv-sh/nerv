@@ -123,11 +123,22 @@ pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteR
     let result = parse_arguments(spec, &tokens, cursor);
     let current = walk_to_current(spec, &result.subcommand_path).unwrap_or(spec);
 
-    let items = match result.cursor_context {
-        CursorContext::Subcommand => emit_subcommands(current, &prefix),
-        CursorContext::OptionName => emit_options(current, &prefix),
-        CursorContext::Arg => emit_arg_candidates(current, &prefix),
-        CursorContext::Done => vec![],
+    // When the partial token starts with `-` and the current subcommand
+    // has options, emit options regardless of cursor_context. The state
+    // machine doesn't see the partial token (it's after the cursor) so
+    // it may report Arg/Subcommand while the user is clearly asking for
+    // a flag. This mirrors the TS reference's surface-form override.
+    let prefix_is_option = prefix.starts_with('-') && !current.options.is_empty();
+
+    let items = if prefix_is_option {
+        emit_options(current, &prefix)
+    } else {
+        match result.cursor_context {
+            CursorContext::Subcommand => emit_subcommands(current, &prefix),
+            CursorContext::OptionName => emit_options(current, &prefix),
+            CursorContext::Arg => emit_arg_candidates(current, &prefix),
+            CursorContext::Done => vec![],
+        }
     };
 
     CompleteResult {
@@ -373,6 +384,8 @@ mod tests {
         assert!(errs.is_empty(), "fixture load errors: {errs:?}");
         assert!(r.get("git").is_some());
         assert!(r.get("echo").is_some());
+        assert!(r.get("docker").is_some());
+        assert!(r.get("kubectl").is_some());
     }
 
     #[test]

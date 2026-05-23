@@ -143,6 +143,129 @@ fn cursor_after_option_name_expects_arg_for_options_with_args() {
     assert_eq!(r.cursor_context, CursorContext::Arg);
 }
 
+// ---- M0 Go/No-Go: docker scenarios -----------------------------------
+
+#[test]
+fn docker_ps_subcommand_chain() {
+    let d = fixture("docker");
+    let toks = tokenize("docker ps");
+    let r = parse_arguments(&d, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["docker", "ps"]);
+    assert_eq!(r.cursor_context, CursorContext::OptionName);
+}
+
+#[test]
+fn docker_ps_flag_binding() {
+    let d = fixture("docker");
+    let toks = tokenize("docker ps --all");
+    let r = parse_arguments(&d, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName);
+}
+
+#[test]
+fn docker_run_with_name_and_image() {
+    let d = fixture("docker");
+    let toks = tokenize("docker run --name myapp nginx");
+    let r = parse_arguments(&d, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName); // --name
+    assert_eq!(r.annotations[3].kind, TokenKind::OptionArg); // myapp
+    assert_eq!(r.annotations[4].kind, TokenKind::SubcommandArg); // nginx
+}
+
+#[test]
+fn docker_run_repeatable_publish() {
+    let d = fixture("docker");
+    let toks = tokenize("docker run -p 80:80 -p 443:443 nginx");
+    let r = parse_arguments(&d, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName); // -p
+    assert_eq!(r.annotations[4].kind, TokenKind::OptionName); // -p (repeatable)
+    assert_eq!(r.annotations[6].kind, TokenKind::SubcommandArg); // nginx
+}
+
+#[test]
+fn docker_build_with_tag_and_path() {
+    let d = fixture("docker");
+    let toks = tokenize("docker build -t myimage:latest .");
+    let r = parse_arguments(&d, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName); // -t
+    assert_eq!(r.annotations[3].kind, TokenKind::OptionArg); // myimage:latest
+    assert_eq!(r.annotations[4].kind, TokenKind::SubcommandArg); // .
+}
+
+#[test]
+fn docker_compose_nested_subcommands() {
+    let d = fixture("docker");
+    let toks = tokenize("docker compose up");
+    let r = parse_arguments(&d, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["docker", "compose", "up"]);
+}
+
+// ---- M0 Go/No-Go: kubectl scenarios ----------------------------------
+
+#[test]
+fn kubectl_get_pods() {
+    let k = fixture("kubectl");
+    let toks = tokenize("kubectl get pods");
+    let r = parse_arguments(&k, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["kubectl", "get"]);
+    assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg);
+}
+
+#[test]
+fn kubectl_get_namespace_short_alias() {
+    let k = fixture("kubectl");
+    let toks = tokenize("kubectl get po -n default");
+    let r = parse_arguments(&k, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg); // po
+    assert_eq!(r.annotations[3].kind, TokenKind::OptionName); // -n
+    assert_eq!(r.annotations[4].kind, TokenKind::OptionArg); // default
+}
+
+#[test]
+fn kubectl_describe_with_namespace() {
+    let k = fixture("kubectl");
+    let toks = tokenize("kubectl describe pods my-pod -n prod");
+    let r = parse_arguments(&k, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["kubectl", "describe"]);
+    assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg); // pods
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg); // my-pod (variadic)
+    assert_eq!(r.annotations[4].kind, TokenKind::OptionName); // -n
+}
+
+#[test]
+fn kubectl_logs_follow() {
+    let k = fixture("kubectl");
+    let toks = tokenize("kubectl logs -f my-pod");
+    let r = parse_arguments(&k, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName); // -f
+    assert_eq!(r.annotations[3].kind, TokenKind::SubcommandArg); // my-pod
+}
+
+#[test]
+fn kubectl_apply_with_filename() {
+    let k = fixture("kubectl");
+    let toks = tokenize("kubectl apply -f deployment.yaml");
+    let r = parse_arguments(&k, &toks, 999);
+    assert_eq!(r.annotations[2].kind, TokenKind::OptionName); // -f
+    assert_eq!(r.annotations[3].kind, TokenKind::OptionArg); // deployment.yaml
+}
+
+#[test]
+fn kubectl_rollout_status_nested() {
+    let k = fixture("kubectl");
+    let toks = tokenize("kubectl rollout status");
+    let r = parse_arguments(&k, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["kubectl", "rollout", "status"]);
+}
+
+#[test]
+fn kubectl_config_use_context() {
+    let k = fixture("kubectl");
+    let toks = tokenize("kubectl config use-context");
+    let r = parse_arguments(&k, &toks, 999);
+    assert_eq!(r.subcommand_path, vec!["kubectl", "config", "use-context"]);
+}
+
 #[test]
 fn fixture_path_resolution_via_env_macro() {
     // Sanity: make sure CARGO_MANIFEST_DIR resolves to the crate root.
