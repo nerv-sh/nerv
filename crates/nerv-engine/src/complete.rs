@@ -87,6 +87,11 @@ impl SpecRegistry {
     pub fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
+
+    /// Iterate over loaded binary names (unspecified order).
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.specs.keys().map(|s| s.as_str())
+    }
 }
 
 /// Pipeline result: completion candidates at the cursor.

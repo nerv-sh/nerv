@@ -15,7 +15,7 @@
 //! - `nerv _complete`    — IPC bridge for ZLE widget (M0-1 PoC)
 
 use clap::{Parser, Subcommand};
-use nerv_engine::{Response, Suggestion, paths};
+use nerv_engine::{Generator, Response, SpecRegistry, Subcommand as SpecNode, Suggestion, paths};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -285,10 +285,96 @@ fn process_alive(_pid: u32) -> bool {
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
-    // M0-6 will read manifest from ~/Library/Caches/nerv/specs/ once
-    // nerv-engine::spec_loader (loadSpec.ts port) lands.
-    println!("(no specs yet — pending M0-6 spec_loader port)");
+    use std::path::PathBuf;
+
+    let specs_dir = std::env::var_os("NERV_SPECS_DIR")
+        .map(PathBuf::from)
+        .or_else(paths::specs_dir)
+        .ok_or_else(|| anyhow::anyhow!("HOME unset and NERV_SPECS_DIR not set"))?;
+
+    if !specs_dir.exists() {
+        println!("(no specs at {})", specs_dir.display());
+        return Ok(());
+    }
+
+    let (registry, errs) = SpecRegistry::load_dir(&specs_dir);
+    for e in &errs {
+        eprintln!("[nerv] {e}");
+    }
+    if registry.is_empty() {
+        println!("(no specs found in {})", specs_dir.display());
+        return Ok(());
+    }
+
+    let mut names: Vec<&str> = registry.names().collect();
+    names.sort();
+    println!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS");
+    for name in names {
+        let spec = registry.get(name).expect("just enumerated");
+        let (subs, opts) = count_tree(spec);
+        let tier = compute_tier(spec);
+        println!("{name:<18} {subs:>5} {opts:>5}  {tier}");
+    }
     Ok(())
+}
+
+/// Recursive count of subcommands + options across the whole spec tree.
+/// `subs` excludes the root itself.
+fn count_tree(node: &SpecNode) -> (usize, usize) {
+    let mut subs = 0;
+    let mut opts = node.options.len();
+    for child in &node.subcommands {
+        subs += 1;
+        let (cs, co) = count_tree(child);
+        subs += cs;
+        opts += co;
+    }
+    (subs, opts)
+}
+
+/// Classify a spec by the heaviest generator it contains. Static
+/// specs are Tier A. Static + Template generator (shell command) is
+/// Tier B (limited). Anything requiring a JS closure (Custom, or
+/// Script with post-process) is Tier C — M1 rquickjs only.
+fn compute_tier(node: &SpecNode) -> &'static str {
+    let mut tier = 'A';
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        for opt in &n.options {
+            for arg in &opt.args {
+                tier = upgrade_tier(tier, arg.generators.iter());
+            }
+        }
+        for arg in &n.args {
+            tier = upgrade_tier(tier, arg.generators.iter());
+        }
+        for child in &n.subcommands {
+            stack.push(child);
+        }
+    }
+    match tier {
+        'A' => "A",
+        'B' => "B (limited)",
+        _ => "C (M1)",
+    }
+}
+
+fn upgrade_tier<'a>(current: char, gens: impl IntoIterator<Item = &'a Generator>) -> char {
+    let mut t = current;
+    for g in gens {
+        let g_tier = match g {
+            Generator::Template { .. } => 'B',
+            Generator::Script {
+                has_post_process: false,
+                ..
+            } => 'B',
+            Generator::Script { .. } | Generator::Custom { .. } => 'C',
+        };
+        if (g_tier == 'B' && t == 'A') || g_tier == 'C' {
+            t = g_tier;
+        }
+    }
+    t
 }
 
 fn cmd_uninstall(keep_config: bool, quiet: bool) -> anyhow::Result<()> {
