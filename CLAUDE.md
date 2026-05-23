@@ -35,16 +35,19 @@
 - ✅ M0-7: ZLE → CLI → UDS → 실엔진 wire-up + latency bench. IPC p95 0.052 ms, CLI cold-start p95 4.07 ms (25 ms 예산 대비 16%). `_nerv.zsh` widget 포맷 호환 확인
 - ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건** — 인프라 의존)
 
-**보너스 진척 (M0 산출물 외 — M1 0-4주차 작업 일부 선행)**:
+**보너스 진척 (M0 산출물 외 — M1 0-4주차 작업의 ~70% 선행 완료)**:
 - ✅ CLI 5/5 표면 완성: `nerv init` / `start` / `stop` / `spec list` / `doctor` / `uninstall` (uninstall-spec.md §4 8-step atomic 포함)
-- ✅ nerv-engine::complete flag-prefix override (cursor at `-` → emit options 우선)
+- ✅ nerv-engine::complete cursor-context override 2종: flag prefix → options 우선, word prefix + node has subs → subcommands 우선 (`git ` 같은 root with positional fallback 처리)
 - ✅ fixture pack 9종 hand-rolled (git/echo/docker/kubectl/npm/cargo/gh/brew/make) + 43 integration test
 - ✅ TS→JSON 변환 파이프라인 `tools/ts-to-json/` (bun 기반, 715 spec 변환, 0 failure)
   - Tier A 440 / B 6 / C 246 자동 분류
-  - daemon 로드 가능 707 spec (registry HashMap dedup 후)
-  - loadSpec 재귀 인라인 인프라 + cycle-safe (MAX_DEPTH=0 default; M1 lazy-load 도입 후 활성)
-- ✅ 에러 UX shell-side: E1 widget hint (이전), E2 daemon log format, E3 zsh<5.8 check, E4 widget conflict 감지 (E5 spec manifest 도입 후)
+  - **loadSpec depth=1 활성**: `aws ec2 <verb>`, `aws s3 <verb>`, `gcloud compute instances <verb>` 등 nested 자동완성 동작
+  - cycle-safe (visited Set + MAX_DEPTH gate)
+- ✅ **SpecRegistry lazy load**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. negative cache 로 누락 binary 재시도 방지.
+- ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
+- ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지 (E5 manifest 도입 후)
 - ✅ widget UX: popup auto-size + description 잘림 수정
+- ✅ SIGPIPE → SIG_DFL: `nerv spec list | head` panic 제거
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
@@ -101,14 +104,20 @@ bun install
 bun run convert:all                            # 715 spec → fixtures/converted/
 cd -
 
-# JSON validate + canonicalize (M0-6)
+# gzip 압축 + 설치 (10× 압축, 10MB 디스크)
+cargo run --release -p nerv-engine --bin build-specs -- \
+    --input crates/nerv-engine/tests/fixtures/converted/ \
+    --output ~/Library/Caches/nerv/specs/ \
+    --compress                                  # *.json.gz 출력
+
+# 비압축 설치 (45MB 디스크, 인간 검사 용이)
+cp crates/nerv-engine/tests/fixtures/converted/*.json ~/Library/Caches/nerv/specs/
+
+# 일부만
 cargo run -p nerv-engine --bin build-specs -- \
     --input crates/nerv-engine/tests/fixtures/converted/ \
     --output ~/Library/Caches/nerv/specs/ \
-    --only git --only docker --only kubectl    # --only repeatable, 없으면 전체
-
-# 또는 직접 copy
-cp crates/nerv-engine/tests/fixtures/converted/*.json ~/Library/Caches/nerv/specs/
+    --only git --only aws --only kubectl --compress
 
 # Latency bench (M0-7 acceptance)
 cargo test --release -p nerv-daemon --test bench_latency \
@@ -127,10 +136,10 @@ crates/
   # 기존 보존
   nerv-cli/        # `nerv` 바이너리 (clap, 5 cmd + hidden _complete IPC bridge)
   nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
-  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader / complete / ipc / paths / ranker)
-                   #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer)
+  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / paths / ranker)
+                   #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer, --compress 플래그)
                    #   + tests/fixtures/specs/{git,echo,docker,kubectl,npm,cargo,gh,brew,make}.json (9 hand-rolled)
-                   #   + tests/fixtures/converted/ (.gitignore; bun 변환 결과 715 spec, 45MB)
+                   #   + tests/fixtures/converted/ (.gitignore; bun 변환 결과 715 spec; depth=1, 176MB plain or 10MB gzipped)
   nerv-shell/      # 마커 블록 init_block / strip_blocks (테스트 4종)
 
   # M0-2 신규 (filter-repo 흡수)

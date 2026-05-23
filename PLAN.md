@@ -318,7 +318,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 
 **M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
 
-**현재 상태 (2026-05-23)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 모두 통과, hand-rolled fixture 9종 + 43 integration test. CLI 표면 5/5 완성 (init / doctor / start / stop / spec list / uninstall). **TS→JSON 변환 파이프라인 동작** (`tools/ts-to-json/` bun-based): 715 spec 변환 성공 (440 Tier A / 6 B / 246 C), daemon 로드 707 spec. loadSpec 재귀 인라인 인프라 존재 (depth=0 default — cache 압축 + lazy load 도입 후 활성). 에러 UX E1-E4 shell-side 구현 (E5 manifest 도입 후). 결과적으로 M1 0-4주차 작업의 약 70% 가 M0 단계에서 선행 완료.
+**현재 상태 (2026-05-23)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 모두 통과, hand-rolled fixture 9종 + 43 integration test. CLI 표면 5/5 완성. **TS→JSON 변환 파이프라인 + loadSpec depth=1 inlining 동작** (`tools/ts-to-json/` bun-based): 715 spec 변환 (440 Tier A / 6 B / 246 C), `aws ec2 <verb>` 같은 nested 자동완성까지 커버. **SpecRegistry lazy load + gzip 압축 캐시** (10× 압축, 715 spec 풀세트 10MB 디스크): daemon 즉시 기동, 메모리 사용은 사용분만. 에러 UX E1-E4 shell-side 구현 (E5 manifest 도입 후). M1 0-4주차 작업의 약 70% 가 M0 단계에서 선행 완료 — M1 5-10주차 (rquickjs Tier C / figterm opt-in) 만 남음.
 
 **M0-2 Fig 흡수 결과 의사결정 트리**:
 
