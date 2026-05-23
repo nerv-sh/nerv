@@ -119,7 +119,18 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
     match shell {
         Shell::Zsh => {
             if shell_script {
-                // Emit NERV_BIN so the widget knows where we are.
+                // Inner hook — called from inside the marker block at zsh
+                // startup. Validate environment + warn on conflicts here,
+                // since this is the moment we actually have ZSH_VERSION set.
+                if let Err(msg) = check_zsh_env_compat() {
+                    // E3 (error-states §3.3): zsh < 5.8 or no zsh. Exit 0
+                    // with empty stdout so `eval` doesn't break the user's
+                    // shell, but write the warning to stderr.
+                    eprintln!("{msg}");
+                    return Ok(());
+                }
+                warn_widget_conflicts(); // E4 — non-blocking notices
+
                 let bin = std::env::current_exe()?.to_string_lossy().into_owned();
                 println!("export NERV_BIN={bin:?}");
                 print!(
@@ -128,6 +139,9 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 );
                 Ok(())
             } else {
+                // Outer block: just emit the ~/.zshrc marker. The inner
+                // shell_script invocation does the env validation each
+                // session, where ZSH_VERSION etc. are actually set.
                 let bin = std::env::current_exe()?.to_string_lossy().into_owned();
                 let block = nerv_shell::init_block(
                     &bin,
@@ -137,6 +151,53 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 print!("{block}");
                 Ok(())
             }
+        }
+    }
+}
+
+/// E3 (error-states.md §3.3): require zsh ≥ 5.8. Returns an error
+/// message ready for stderr if the environment is wrong.
+fn check_zsh_env_compat() -> Result<(), String> {
+    let ver = std::env::var("ZSH_VERSION").unwrap_or_default();
+    if ver.is_empty() {
+        return Err("[nerv] zsh required (no ZSH_VERSION env var detected).\n\
+             nerv init zsh must be sourced from inside an interactive zsh session."
+            .into());
+    }
+    let (major, minor) = parse_zsh_version_compat(&ver);
+    if major > 5 || (major == 5 && minor >= 8) {
+        return Ok(());
+    }
+    Err(format!(
+        "[nerv] zsh 5.8+ required (current: {ver}) — please upgrade.\n\
+         Suggested: brew install zsh && chsh -s $(brew --prefix)/bin/zsh\n\
+         Autocomplete will be disabled until zsh is upgraded."
+    ))
+}
+
+fn parse_zsh_version_compat(s: &str) -> (u32, u32) {
+    let mut it = s.split('.');
+    let major = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let minor = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    (major, minor)
+}
+
+/// E4 (error-states.md §3.4): scan env for known widget-conflict
+/// markers and emit one stderr line per detection. Non-blocking —
+/// the hook installs normally; user can decide to coexist.
+fn warn_widget_conflicts() {
+    let candidates: &[(&str, &str)] = &[
+        ("ZSH_AUTOSUGGEST_USE_ASYNC", "zsh-autosuggestions"),
+        ("_FZF_COMPLETION_DIR", "fzf completion"),
+        ("FZF_DEFAULT_OPTS", "fzf (general)"),
+        ("STARSHIP_SHELL", "starship prompt (no conflict, info only)"),
+    ];
+    for (env_var, tool) in candidates {
+        if std::env::var_os(env_var).is_some() {
+            eprintln!(
+                "[nerv] detected {tool} — Nerv runs alongside but key bindings may conflict.\n\
+                 See: https://nerv.sh/docs/conflicts"
+            );
         }
     }
 }
