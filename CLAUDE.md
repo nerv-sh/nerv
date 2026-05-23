@@ -24,22 +24,26 @@
 **M0 흡수 스파이크 (v0.6 재정의)** — 산출물 8개 중 7개 완료:
 
 - ✅ M0-9 (v0.5 산출물): `withfig/autocomplete` subtree pin (`aef52acf…`, 1,484 TS spec, ISC)
-- ✅ cargo workspace 스캐폴딩 (16 crates, 412 workspace test 통과)
+- ✅ cargo workspace 스캐폴딩 (16 active crates, 450 workspace test 통과)
 - ✅ NOTICE / LICENSE / `.github/workflows/{ci,upstream-monitor}.yml`
 - ✅ M0-1: `vendor/aws-autocomplete/` subtree add + NOTICE Apache+MIT
-- ✅ M0-2: `git filter-repo` 로 10개 crate 추출 (figterm, alacritty_terminal, fig_ipc, fig_proto, fig_integrations, fig_util, fig_settings, fig_os_shim, fig_log, fig_diagnostic) → `crates/nerv-{pty,term,ipc,proto,integrations,util,settings,os,log,diag}/` rename + strip. nerv-pty (figterm) 는 M1 opt-in 으로 workspace.members 보류
+- ✅ M0-2: `git filter-repo` 로 10개 crate 추출 → `crates/nerv-{pty,term,ipc,proto,integrations,util,settings,os,log,diag}/`. chunk 3d 완료로 nerv-pty 도 workspace 합류 (런타임 opt-in 은 NERV_PTY=1, M1)
 - ✅ M0-3: Rust edition 2024 bump (workspace + 모든 crate + rust-toolchain.toml)
 - ✅ M0-4: `shell-parser/parser.ts` (20 KB) → `nerv-engine::shell_parser` Rust 포팅 (124 test)
 - ✅ M0-5: `parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅 (chunks 1-5, 174 test) — types + static helpers + state machine + token classifier + matcher
-- ✅ M0-6: `loadSpec.ts` → `nerv-engine::spec_loader` + JSON 직렬화 + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체는 M1 (또는 외부 node 스크립트). hand-rolled fixture (git, echo) + 11 integration test 통과
+- ✅ M0-6: `loadSpec.ts` → `nerv-engine::spec_loader` + JSON 직렬화 + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체는 M1 (또는 외부 node 스크립트). hand-rolled fixture (git, echo, docker, kubectl) + 24 integration test 통과
 - ✅ M0-7: ZLE → CLI → UDS → 실엔진 wire-up + latency bench. IPC p95 0.052 ms, CLI cold-start p95 4.07 ms (25 ms 예산 대비 16%). `_nerv.zsh` widget 포맷 호환 확인
 - ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건** — 인프라 의존)
+
+**보너스 진척 (M0 산출물 외 — M1 0-4주차 작업 일부 선행)**:
+- ✅ CLI 5/5 표면 완성: `nerv init` / `start` / `stop` / `spec list` / `doctor` / `uninstall` (uninstall-spec.md §4 8-step atomic 포함)
+- ✅ nerv-engine::complete flag-prefix override (cursor at `-` → emit options 우선)
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
-- M1 진입: TS→JSON 변환 파이프라인 / rquickjs Tier C / nerv-pty strip 마무리
+- M1 진입: TS→JSON 변환 파이프라인 / rquickjs Tier C / 에러 UX 5종 shell-side / widget UX 폴리시
 
 ## 4. 절대 깨면 안 되는 불변식
 
@@ -73,11 +77,16 @@ cargo test --workspace
 cargo test -p nerv-engine
 cargo test -p nerv-shell
 
-# nerv-cli / nervd 로컬 실행
-cargo run -p nerv-cli -- init zsh
+# nerv-cli / nervd 로컬 실행 (CLI 5/5 모두 구현됨)
+cargo run -p nerv-cli -- init zsh           # ~/.zshrc 에 추가할 블록 출력
 NERV_SPECS_DIR=$(pwd)/crates/nerv-engine/tests/fixtures/specs \
-    cargo run -p nerv-daemon                # fixture specs 로 daemon 기동
-cargo run -p nerv-cli -- _complete "git co" 6   # CLI bridge 수동 테스트
+    cargo run -p nerv-cli -- start          # daemon 백그라운드 기동 + PID 파일
+cargo run -p nerv-cli -- doctor             # 환경 진단 (zsh / hook / daemon / specs)
+cargo run -p nerv-cli -- spec list          # 로드된 spec 표 (NAME/SUBS/OPTS/TIER)
+cargo run -p nerv-cli -- _complete "git co" 6   # IPC bridge 수동 테스트
+cargo run -p nerv-cli -- stop               # daemon 종료 (SIGTERM)
+cargo run -p nerv-cli -- uninstall          # 마커블록 + 캐시/로그/설정 atomic 제거
+                                             # --keep-config 로 ~/.config/nerv/ 보존
 
 # spec JSON 빌드 (M0-6 — TS→JSON 변환 자체는 외부 단계)
 cargo run -p nerv-engine --bin build-specs -- \
@@ -104,7 +113,7 @@ crates/
   nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
   nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader / complete / ipc / paths / ranker)
                    #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer)
-                   #   + tests/fixtures/specs/{git,echo}.json (M0-6 chunk 3)
+                   #   + tests/fixtures/specs/{git,echo,docker,kubectl}.json (Go/No-Go 시나리오)
   nerv-shell/      # 마커 블록 init_block / strip_blocks (테스트 4종)
 
   # M0-2 신규 (filter-repo 흡수)

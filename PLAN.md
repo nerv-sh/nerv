@@ -318,7 +318,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 
 **M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
 
-**현재 상태 (2026-05-22)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). 4-6 에서 `git status / log / commit / checkout` 시나리오는 fixture+integration test 로 통과. `docker / kubectl` fixture 는 M1 진입과 함께 (TS→JSON 변환 파이프라인 확립 후 1,484 spec 전체로 확장).
+**현재 상태 (2026-05-23)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 (git / echo / docker / kubectl) 모두 fixture + 24 integration test 통과. 1,484 spec 전체 TS→JSON 변환은 M1 본격 진입과 함께. CLI 표면 5/5 도 함께 완성 (init / doctor / start / stop / spec list / uninstall — M1 0-4주차 작업 일부 선행).
 
 **M0-2 Fig 흡수 결과 의사결정 트리**:
 
