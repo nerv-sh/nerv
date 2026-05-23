@@ -365,7 +365,7 @@ fn emit_arg_candidates(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
         for g in &arg.generators {
             if let crate::spec_parser::Generator::Template { script } = g {
-                if let Some(lines) = execute_template_generator(script) {
+                if let Some(lines) = cached_template_generator(script) {
                     out.extend(
                         lines
                             .into_iter()
@@ -385,6 +385,49 @@ fn emit_arg_candidates(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
     out.sort_by(|a, b| a.display.cmp(&b.display));
     out.dedup_by(|a, b| a.display == b.display);
     out
+}
+
+type GeneratorCacheMap = HashMap<Vec<String>, (std::time::Instant, Vec<String>)>;
+
+/// Process-wide cache for Tier B generator results.
+/// Key: script argv. Value: (insertion-time, captured stdout lines).
+/// TTL: 5s. Max entries: 64 (oldest-evicted on overflow). Keeps
+/// per-keystroke completion calls from re-spawning the same shell
+/// command (e.g. `git branch --list`).
+static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+const GENERATOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+const GENERATOR_CACHE_MAX: usize = 64;
+
+/// Cached wrapper around [`execute_template_generator`]. Returns
+/// the cached value on TTL-fresh hit, otherwise runs the generator
+/// and inserts the result.
+fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
+    let key = script.to_vec();
+    if let Ok(cache) = GENERATOR_CACHE.lock() {
+        if let Some((stamp, lines)) = cache.get(&key) {
+            if stamp.elapsed() < GENERATOR_CACHE_TTL {
+                return Some(lines.clone());
+            }
+        }
+    }
+    let lines = execute_template_generator(script)?;
+    if let Ok(mut cache) = GENERATOR_CACHE.lock() {
+        // Drop oldest entry when full (simple LRU stand-in; for 64
+        // slots the O(n) scan is cheaper than dragging in a real LRU).
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), lines.clone()));
+    }
+    Some(lines)
 }
 
 /// Run a Tier B template generator script and return its stdout lines.
@@ -584,25 +627,44 @@ mod tests {
         assert_eq!(names, ["alpha", "beta", "gamma"]);
     }
 
+    // NOTE: NERV_NO_GENERATORS env-var kill switch is documented but
+    // not unit-tested — setting/clearing env vars races with parallel
+    // tests (cargo's default runner). Manually verified in the daemon
+    // smoke-test path. See PRD v0.6 §0.2 for the contract.
+
     #[test]
-    fn template_generator_disabled_by_env() {
+    fn template_generator_cached_on_repeat() {
         use crate::spec_parser::{Arg, Generator, Subcommand};
-        // SAFETY: single-threaded test, no observers.
-        unsafe { std::env::set_var("NERV_NO_GENERATORS", "1") };
+        use std::time::Instant;
         let spec = Subcommand {
             name: "x".into(),
             args: vec![Arg {
                 name: Some("opt".into()),
                 generators: vec![Generator::Template {
-                    script: vec!["/bin/echo".into(), "should-not-run".into()],
+                    // Unique payload so we don't share a key with other
+                    // tests that use the same static cache.
+                    script: vec!["/usr/bin/printf".into(), "cache-test-uniq-abc\n".into()],
                 }],
                 ..Default::default()
             }],
             ..Default::default()
         };
-        let r = complete("x ", 2, &registry_with(spec));
-        unsafe { std::env::remove_var("NERV_NO_GENERATORS") };
-        assert!(r.items.is_empty(), "expected no items with env disabled");
+        let reg = registry_with(spec);
+
+        // Cold call — populates cache.
+        let _ = complete("x ", 2, &reg);
+        // Warm call — should be faster (no spawn).
+        let t0 = Instant::now();
+        let r = complete("x ", 2, &reg);
+        let elapsed = t0.elapsed();
+        assert_eq!(r.items.len(), 1);
+        assert_eq!(r.items[0].display, "cache-test-uniq-abc");
+        // Spawn would take >1ms; cached path is microseconds. Use a
+        // generous 5ms ceiling so this isn't flaky on slow CI.
+        assert!(
+            elapsed.as_millis() < 5,
+            "expected cache hit <5ms, got {elapsed:?}"
+        );
     }
 
     #[test]
