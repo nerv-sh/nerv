@@ -22,17 +22,41 @@ __nerv_show_popup() {
   local -a items=("$@")
   local count=${#items}
   (( count > 5 )) && count=5
-  local W=$__NERV_WIDTH
 
   local sel_line="${items[$__NERV_SELECTED]}"
   local sel_desc="${sel_line#*	}"; sel_desc="${sel_desc#*	}"
+
+  # Auto-size: measure max display + max desc across visible items.
+  local i max_disp=0 max_desc=0
+  for (( i=1; i<=count; i++ )); do
+    local line="${items[$i]}"
+    local rest="${line#*	}"
+    local d="${rest%%	*}"
+    local desc_full="${rest#*	}"
+    (( ${#d} > max_disp )) && max_disp=${#d}
+    (( ${#desc_full} > max_desc )) && max_desc=${#desc_full}
+  done
+
+  # Hard caps so a long description doesn't blow the popup off-screen.
+  (( max_disp > 24 )) && max_disp=24
+  local term_cols=${COLUMNS:-80}
+  local cap=$(( term_cols * 8 / 10 ))
+  (( cap < 30 )) && cap=30
+
+  # Layout: " $ "(4) + display + gap(2) + desc + " "(1)
+  local W=$(( 4 + max_disp + 2 + max_desc + 1 ))
+  (( W > cap )) && W=$cap
+  (( W < __NERV_WIDTH )) && W=$__NERV_WIDTH
+
+  # desc gets whatever's left after the display column.
+  local desc_avail=$(( W - 4 - max_disp - 2 - 1 ))
+  (( desc_avail < 0 )) && desc_avail=0
 
   local hbar=""
   local j; for (( j=0; j<W; j++ )); do hbar+="─"; done
 
   # --- Build plain-text lines for zle -R (space reservation) ---
   local -a plain=()
-  # Use spaces matching the width so zle -R allocates correct space
   local blank=""
   for (( j=0; j<W+4; j++ )); do blank+=" "; done
   local total=$(( count + 4 ))
@@ -49,29 +73,37 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}╭${hbar}╮${R}")
 
-  local i
   for (( i=1; i<=count; i++ )); do
     local line="${items[$i]}"
     local rest="${line#*	}"
     local display="${rest%%	*}"
     local desc="${rest#*	}"
-    (( ${#display} > 18 )) && display="${display:0:18}"
-    (( ${#desc} > 20 )) && desc="${desc:0:20}"
+    (( ${#display} > max_disp )) && display="${display:0:$max_disp}"
+    (( ${#desc} > desc_avail )) && desc="${desc:0:$desc_avail}"
 
-    local vis_len=$(( 4 + ${#display} + ${#desc} + 2 ))
-    local gap=$(( W - vis_len ))
-    (( gap < 1 )) && gap=1
-    local pad=""; for (( j=0; j<gap; j++ )); do pad+=" "; done
+    # Right-pad display to max_disp so descriptions align across rows.
+    local disp_pad=""
+    local disp_gap=$(( max_disp - ${#display} ))
+    (( disp_gap > 0 )) && for (( j=0; j<disp_gap; j++ )); do disp_pad+=" "; done
+
+    # Right-pad desc to desc_avail so the right border lines up.
+    local desc_pad=""
+    local d_gap=$(( desc_avail - ${#desc} ))
+    (( d_gap > 0 )) && for (( j=0; j<d_gap; j++ )); do desc_pad+=" "; done
 
     if (( i == __NERV_SELECTED )); then
-      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}\$${SELFG} ${display}${pad}${desc} ${BDR}│${R}")
+      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}\$${SELFG} ${display}${disp_pad}  ${desc}${desc_pad} ${BDR}│${R}")
     else
-      colored+=("  ${BG}${BDR}│${BG} ${ICON}\$${ITEM} ${display}${pad}${DESC}${desc} ${BDR}│${R}")
+      colored+=("  ${BG}${BDR}│${BG} ${ICON}\$${ITEM} ${display}${disp_pad}  ${DESC}${desc}${desc_pad} ${BDR}│${R}")
     fi
   done
 
   colored+=("  ${BG}${BDR}├${hbar}┤${R}")
 
+  # Footer shows the full selected description, line-wrapped via truncation
+  # to W-2 (leading + trailing space).
+  local sel_avail=$(( W - 2 ))
+  (( ${#sel_desc} > sel_avail )) && sel_desc="${sel_desc:0:$sel_avail}"
   local fvis=" ${sel_desc} "
   local fpad=$(( W - ${#fvis} ))
   (( fpad < 0 )) && fpad=0
