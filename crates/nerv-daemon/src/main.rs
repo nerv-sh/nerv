@@ -12,7 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{Request, Response, SpecRegistry, complete, paths};
+use nerv_engine::{Request, Response, SpecLoadError, SpecRegistry, complete, paths};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
@@ -36,7 +36,10 @@ async fn main() -> anyhow::Result<()> {
 
     let (registry, load_errors) = SpecRegistry::load_dir(&specs_dir);
     for err in &load_errors {
-        warn!(error = %err, "spec load error");
+        // E2 (docs/error-states.md §3.2): per-spec failures are
+        // soft. Daemon stays up; user-facing nerv doctor reports
+        // the disabled list.
+        warn!("{}", format_e2_load_error(err));
     }
     info!(
         specs_dir = %specs_dir.display(),
@@ -146,6 +149,28 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = term.recv() => {},
         _ = int.recv() => {},
+    }
+}
+
+/// Format a [`SpecLoadError`] using the docs/error-states.md §3.2
+/// E2 message style: `[nerv] spec disabled: <name> — <reason>`.
+fn format_e2_load_error(err: &SpecLoadError) -> String {
+    match err {
+        SpecLoadError::Parse { path, source } => {
+            let stem = std::path::Path::new(path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path);
+            format!(
+                "[nerv] spec disabled: {stem} — invalid JSON: {source} (run `nerv doctor` for details)"
+            )
+        }
+        SpecLoadError::Io { path, source } => {
+            format!("[nerv] spec disabled: {path} — io error: {source}")
+        }
+        SpecLoadError::NotFound(p) => {
+            format!("[nerv] spec not found: {p}")
+        }
     }
 }
 
