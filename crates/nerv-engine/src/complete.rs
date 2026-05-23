@@ -5,8 +5,9 @@
 //! `spec_parser` (run the matcher to get cursor context), then emit
 //! ranked [`Suggestion`]s based on the cursor context.
 //!
-//! v0.6 / M0-6 chunk 4: eager load of all *.json under a specs
-//! directory at registry construction; lazy load arrives in M1.
+//! v0.6 / M0-6 chunk 4 + M1 lazy: SpecRegistry now reads specs from
+//! disk on first lookup and caches Arc<Spec> in a RwLock. Eager bulk
+//! load is gone — startup is O(1), memory grows with use.
 //!
 //! Refs: PLAN.md §10 M0-6, docs/first-5-min.md §1-5
 
@@ -18,12 +19,18 @@ use crate::spec_parser::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
-/// Eagerly-loaded spec set, keyed by binary name (the spec's root
-/// `name` field — typically also the file stem on disk).
+/// Lazy spec set, keyed by binary name.
+///
+/// On lookup, checks the in-memory cache first; on miss, reads
+/// `<dir>/<name>.json` from disk and inserts the parsed spec
+/// (or `None` for a negative cache entry) into the cache so the
+/// next lookup is O(1).
 #[derive(Debug, Default)]
 pub struct SpecRegistry {
-    specs: HashMap<String, Spec>,
+    dir: Option<PathBuf>,
+    cache: RwLock<HashMap<String, Option<Arc<Spec>>>>,
 }
 
 impl SpecRegistry {
@@ -32,19 +39,26 @@ impl SpecRegistry {
         Self::default()
     }
 
-    /// Load every `*.json` under `dir` into the registry.
-    ///
-    /// Returns the registry even if some files fail to parse — the
-    /// vector of errors lets the caller log them without aborting
-    /// daemon startup. A missing directory yields an empty registry
-    /// with no errors (first-run case).
+    /// Build a registry rooted at `dir`. Disk reads are lazy.
+    pub fn at_dir(dir: &Path) -> Self {
+        Self {
+            dir: Some(dir.to_path_buf()),
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Build a registry rooted at `dir` and eagerly scan it for parse
+    /// errors. Useful at daemon startup so problems show up in logs
+    /// without waiting for a user keystroke. Returns the registry +
+    /// every error encountered during the scan; positive results are
+    /// kept in the cache so subsequent lookups are O(1).
     pub fn load_dir(dir: &Path) -> (Self, Vec<SpecLoadError>) {
-        let mut registry = Self::empty();
+        let registry = Self::at_dir(dir);
         let mut errors = Vec::new();
-        let entries = match fs::read_dir(dir) {
-            Ok(e) => e,
-            Err(_) => return (registry, errors), // Missing dir = empty registry.
+        let Ok(entries) = fs::read_dir(dir) else {
+            return (registry, errors);
         };
+        let mut cache = registry.cache.write().expect("cache poisoned");
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("json") {
@@ -59,38 +73,102 @@ impl SpecRegistry {
                     } else {
                         continue;
                     };
-                    registry.specs.insert(key, spec);
+                    cache.insert(key, Some(Arc::new(spec)));
                 }
                 Err(e) => errors.push(e),
             }
         }
+        drop(cache);
         (registry, errors)
     }
 
-    /// Look up a spec by binary name.
-    pub fn get(&self, name: &str) -> Option<&Spec> {
-        self.specs.get(name)
+    /// Resolve a spec by binary name, loading from disk on first hit.
+    /// Returns `None` if the spec doesn't exist or failed to parse.
+    pub fn lookup(&self, name: &str) -> Option<Arc<Spec>> {
+        if let Some(cached) = self.cache.read().ok().and_then(|c| c.get(name).cloned()) {
+            return cached;
+        }
+        let loaded = self.load_from_disk(name);
+        // Negative-cache misses too, so we don't reread on each request
+        // for a binary that has no spec.
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(name.to_string(), loaded.clone());
+        }
+        loaded
     }
 
-    /// Replace or insert a spec — for tests + future hot-reload.
-    pub fn insert(&mut self, spec: Spec) {
+    fn load_from_disk(&self, name: &str) -> Option<Arc<Spec>> {
+        let dir = self.dir.as_ref()?;
+        let path = dir.join(format!("{name}.json"));
+        if !path.exists() {
+            return None;
+        }
+        load_spec_file(&path).ok().map(Arc::new)
+    }
+
+    /// Insert a spec into the cache directly. Used by tests that
+    /// build Specs in code and by future hot-reload paths.
+    pub fn insert(&self, spec: Spec) {
         let key = spec.name.clone();
-        self.specs.insert(key, spec);
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(key, Some(Arc::new(spec)));
+        }
     }
 
-    /// Number of loaded specs.
+    /// Count of positive cache entries. Does not include negative hits
+    /// or specs that have not been looked up yet (lazy).
     pub fn len(&self) -> usize {
-        self.specs.len()
+        self.cache
+            .read()
+            .map(|c| c.values().filter(|v| v.is_some()).count())
+            .unwrap_or(0)
     }
 
-    /// `true` when no specs are loaded.
+    /// `true` when no positive specs are cached. Lazy registries
+    /// can report empty until first lookup — use `dir_listing` to
+    /// see what is actually available on disk.
     pub fn is_empty(&self) -> bool {
-        self.specs.is_empty()
+        self.len() == 0
     }
 
-    /// Iterate over loaded binary names (unspecified order).
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.specs.keys().map(|s| s.as_str())
+    /// Names currently in the in-memory positive cache. Does not
+    /// reflect disk contents — see [`Self::dir_listing`] for that.
+    pub fn cached_names(&self) -> Vec<String> {
+        self.cache
+            .read()
+            .map(|c| {
+                c.iter()
+                    .filter(|(_, v)| v.is_some())
+                    .map(|(k, _)| k.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Walk the spec dir and return file-stem names of every
+    /// `*.json` present. Used by `nerv spec list` so the table
+    /// reflects what's installed even before any lookup.
+    pub fn dir_listing(&self) -> Vec<String> {
+        let Some(dir) = self.dir.as_ref() else {
+            return self.cached_names();
+        };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                if p.extension().and_then(|s| s.to_str()) != Some("json") {
+                    return None;
+                }
+                p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+        out.sort();
+        out
     }
 }
 
@@ -118,15 +196,16 @@ pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteR
     let prefix = current_prefix(&line[..cursor]);
     let binary = tokens[0].text.as_str();
 
-    let Some(spec) = registry.get(binary) else {
+    let Some(spec) = registry.lookup(binary) else {
         return CompleteResult {
             items: vec![],
             reason: Some(format!("no spec for {binary}")),
         };
     };
+    let spec_ref: &Spec = spec.as_ref();
 
-    let result = parse_arguments(spec, &tokens, cursor);
-    let current = walk_to_current(spec, &result.subcommand_path).unwrap_or(spec);
+    let result = parse_arguments(spec_ref, &tokens, cursor);
+    let current = walk_to_current(spec_ref, &result.subcommand_path).unwrap_or(spec_ref);
 
     // When the partial token starts with `-` and the current subcommand
     // has options, emit options regardless of cursor_context. The state
@@ -321,7 +400,7 @@ mod tests {
     }
 
     fn registry_with(spec: Spec) -> SpecRegistry {
-        let mut r = SpecRegistry::empty();
+        let r = SpecRegistry::empty();
         r.insert(spec);
         r
     }
@@ -390,8 +469,22 @@ mod tests {
         for name in [
             "git", "echo", "docker", "kubectl", "npm", "cargo", "gh", "brew", "make",
         ] {
-            assert!(r.get(name).is_some(), "fixture missing: {name}");
+            assert!(r.lookup(name).is_some(), "fixture missing: {name}");
         }
+    }
+
+    #[test]
+    fn lazy_lookup_reads_from_disk_on_miss() {
+        let dir = workspace_fixture_specs_dir();
+        let r = SpecRegistry::at_dir(&dir);
+        assert!(r.is_empty(), "registry should start empty (lazy)");
+        // First lookup reads from disk + caches.
+        let git = r.lookup("git").expect("git fixture should load");
+        assert_eq!(git.name, "git");
+        assert!(!r.is_empty(), "cache should populate after lookup");
+        // Negative cache: missing binary stays missing without retry.
+        assert!(r.lookup("nonexistent-binary").is_none());
+        assert!(r.lookup("nonexistent-binary").is_none()); // 2nd hit ok too
     }
 
     #[test]
