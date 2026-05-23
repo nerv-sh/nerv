@@ -231,14 +231,16 @@ type Ctx = {
 };
 
 /// loadSpec inlining depth cap.
-/// depth=0 (current): never inline; subdir specs ship as stub
-///   subcommands. Use cases like `aws ec2 run-instances` won't
-///   complete past the subcommand name.
-/// depth=1+: aws/* etc. get pulled in. aws.json alone blows past
-///   100 MB at depth 4 — proportional value is poor without
-///   parallel improvements (compressed cache format, lazy load
-///   in spec_loader, etc.). Re-enable when those land (M1+).
-const MAX_DEPTH = 0;
+/// depth=0: never inline; subdir specs ship as stub subcommands.
+/// depth=1 (current): top-level loadSpec strings resolved. e.g.
+///   `aws ec2 <verb>` works; `aws ec2 run-instances <flag>` still
+///   stops at the verb's options without going into nested loadSpec.
+///   Pairs with the spec_loader gzip path so the resulting 100MB+
+///   plain JSON shrinks to ~10MB on disk.
+/// depth=2+: very large output (aws hit 100 MB at depth 4 even
+///   with cycle detection). Defer until lazy-eviction lands so
+///   memory doesn't grow with the cache.
+const MAX_DEPTH = 1;
 
 const convertSpec = async (
   s: FigSpec,
