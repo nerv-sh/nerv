@@ -1,0 +1,24 @@
+{
+  "name": "make",
+  "description": "GNU Make — utility for directing compilation",
+  "options": [
+    {
+      "names": ["-f", "--file", "--makefile"],
+      "description": "Read FILE as a makefile",
+      "args": [{ "name": "file", "template": "filepaths" }]
+    },
+    { "names": ["-j", "--jobs"], "description": "Allow N parallel jobs", "args": [{ "name": "n", "is_optional": true }] },
+    { "names": ["-n", "--just-print", "--dry-run", "--recon"], "description": "Print commands without executing" },
+    { "names": ["-k", "--keep-going"], "description": "Continue after errors" },
+    { "names": ["-s", "--silent", "--quiet"], "description": "Don't echo commands" },
+    { "names": ["-B", "--always-make"], "description": "Always make all targets" },
+    { "names": ["-C", "--directory"], "description": "Change to DIR before doing anything", "args": [{ "name": "dir", "template": "folders" }] },
+    { "names": ["-i", "--ignore-errors"], "description": "Ignore errors from recipes" },
+    { "names": ["-q", "--question"], "description": "Run no commands" },
+    { "names": ["-r", "--no-builtin-rules"], "description": "Disable built-in implicit rules" },
+    { "names": ["-d", "--debug"], "description": "Print debug information" },
+    { "names": ["-v", "--version"], "description": "Print version info" },
+    { "names": ["-h", "--help"], "description": "Print help" }
+  ],
+  "args": [{ "name": "target", "is_optional": true, "is_variadic": true }]
+}

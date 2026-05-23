@@ -387,10 +387,11 @@ mod tests {
         let dir = workspace_fixture_specs_dir();
         let (r, errs) = SpecRegistry::load_dir(&dir);
         assert!(errs.is_empty(), "fixture load errors: {errs:?}");
-        assert!(r.get("git").is_some());
-        assert!(r.get("echo").is_some());
-        assert!(r.get("docker").is_some());
-        assert!(r.get("kubectl").is_some());
+        for name in [
+            "git", "echo", "docker", "kubectl", "npm", "cargo", "gh", "brew", "make",
+        ] {
+            assert!(r.get(name).is_some(), "fixture missing: {name}");
+        }
     }
 
     #[test]
