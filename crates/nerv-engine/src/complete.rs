@@ -99,11 +99,17 @@ impl SpecRegistry {
 
     fn load_from_disk(&self, name: &str) -> Option<Arc<Spec>> {
         let dir = self.dir.as_ref()?;
-        let path = dir.join(format!("{name}.json"));
-        if !path.exists() {
-            return None;
+        // Prefer plain JSON for human inspection; fall back to gzipped
+        // form (build-time compressed cache).
+        let plain = dir.join(format!("{name}.json"));
+        if plain.exists() {
+            return load_spec_file(&plain).ok().map(Arc::new);
         }
-        load_spec_file(&path).ok().map(Arc::new)
+        let gz = dir.join(format!("{name}.json.gz"));
+        if gz.exists() {
+            return load_spec_file(&gz).ok().map(Arc::new);
+        }
+        None
     }
 
     /// Insert a spec into the cache directly. Used by tests that
@@ -146,8 +152,9 @@ impl SpecRegistry {
     }
 
     /// Walk the spec dir and return file-stem names of every
-    /// `*.json` present. Used by `nerv spec list` so the table
-    /// reflects what's installed even before any lookup.
+    /// `*.json` or `*.json.gz` present. Used by `nerv spec list` so
+    /// the table reflects what's installed even before any lookup.
+    /// Deduplicates if both forms exist (plain wins).
     pub fn dir_listing(&self) -> Vec<String> {
         let Some(dir) = self.dir.as_ref() else {
             return self.cached_names();
@@ -155,20 +162,17 @@ impl SpecRegistry {
         let Ok(entries) = fs::read_dir(dir) else {
             return Vec::new();
         };
-        let mut out: Vec<String> = entries
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension().and_then(|s| s.to_str()) != Some("json") {
-                    return None;
-                }
-                p.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-        out.sort();
-        out
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let stem = match path.file_name().and_then(|s| s.to_str()) {
+                Some(s) if s.ends_with(".json.gz") => &s[..s.len() - 8],
+                Some(s) if s.ends_with(".json") => &s[..s.len() - 5],
+                _ => continue,
+            };
+            seen.insert(stem.to_string());
+        }
+        seen.into_iter().collect()
     }
 }
 
@@ -207,15 +211,28 @@ pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteR
     let result = parse_arguments(spec_ref, &tokens, cursor);
     let current = walk_to_current(spec_ref, &result.subcommand_path).unwrap_or(spec_ref);
 
-    // When the partial token starts with `-` and the current subcommand
-    // has options, emit options regardless of cursor_context. The state
-    // machine doesn't see the partial token (it's after the cursor) so
-    // it may report Arg/Subcommand while the user is clearly asking for
-    // a flag. This mirrors the TS reference's surface-form override.
+    // Surface-form overrides — the state machine doesn't see the
+    // partial token (it's after the cursor), so we adjust based on
+    // what the user just typed:
+    //
+    // - prefix starts with `-` → emit options (TS reference behavior)
+    // - prefix is empty/word AND current node has subcommands AND no
+    //   positional arg consumed yet → emit subcommands. This handles
+    //   roots like `git` that have BOTH subcommands AND a fallback
+    //   `<alias>` positional — typing `git ` should suggest
+    //   subcommands, not the alias arg's (empty) suggestion list.
     let prefix_is_option = prefix.starts_with('-') && !current.options.is_empty();
+    let prefer_subcommands = !prefix.starts_with('-')
+        && !current.subcommands.is_empty()
+        && matches!(
+            result.cursor_context,
+            CursorContext::Subcommand | CursorContext::Arg
+        );
 
     let items = if prefix_is_option {
         emit_options(current, &prefix)
+    } else if prefer_subcommands {
+        emit_subcommands(current, &prefix)
     } else {
         match result.cursor_context {
             CursorContext::Subcommand => emit_subcommands(current, &prefix),

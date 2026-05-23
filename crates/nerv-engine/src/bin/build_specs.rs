@@ -34,6 +34,10 @@ struct Cli {
     /// Repeatable. If empty, all *.json files are processed.
     #[arg(long, value_name = "NAME")]
     only: Vec<String>,
+    /// Gzip-compress the output: write `<stem>.json.gz` instead of
+    /// `<stem>.json`. SpecRegistry lookup auto-detects either form.
+    #[arg(long)]
+    compress: bool,
     /// Print one line per spec, including skipped + errored.
     #[arg(long)]
     verbose: bool,
@@ -87,7 +91,7 @@ fn process_directory(cli: &Cli) -> Result<Summary> {
             summary.skipped += 1;
             continue;
         }
-        match process_one(&path, &cli.output, &stem) {
+        match process_one(&path, &cli.output, &stem, cli.compress) {
             Ok(()) => {
                 summary.loaded += 1;
                 if cli.verbose {
@@ -103,10 +107,11 @@ fn process_directory(cli: &Cli) -> Result<Summary> {
     Ok(summary)
 }
 
-fn process_one(input: &Path, output_dir: &Path, stem: &str) -> Result<()> {
+fn process_one(input: &Path, output_dir: &Path, stem: &str, compress: bool) -> Result<()> {
     let spec: Spec =
         load_spec_file(input).with_context(|| format!("loading {}", input.display()))?;
-    let out_path = output_dir.join(format!("{stem}.json"));
+    let ext = if compress { "json.gz" } else { "json" };
+    let out_path = output_dir.join(format!("{stem}.{ext}"));
     write_spec_file(&spec, &out_path).with_context(|| format!("writing {}", out_path.display()))?;
     Ok(())
 }

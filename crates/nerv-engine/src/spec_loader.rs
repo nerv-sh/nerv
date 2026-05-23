@@ -18,7 +18,11 @@
 //! PRD v0.6 §10 M0-6.
 
 use crate::spec_parser::Spec;
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::Path;
 
 /// Errors surfaced by the spec loader.
@@ -43,7 +47,8 @@ pub enum SpecLoadError {
     },
 }
 
-/// Load a single spec from a JSON file on disk.
+/// Load a single spec from disk. Recognizes plain `*.json` and
+/// gzip-compressed `*.json.gz` by file extension.
 ///
 /// Returns [`SpecLoadError::NotFound`] when the path doesn't exist,
 /// distinguishing it from generic I/O so callers can fall back to
@@ -52,10 +57,26 @@ pub fn load_spec_file(path: &Path) -> Result<Spec, SpecLoadError> {
     if !path.exists() {
         return Err(SpecLoadError::NotFound(path.display().to_string()));
     }
-    let text = fs::read_to_string(path).map_err(|e| SpecLoadError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
+    let text = if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+        let file = fs::File::open(path).map_err(|e| SpecLoadError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        let mut decoder = GzDecoder::new(file);
+        let mut s = String::new();
+        decoder
+            .read_to_string(&mut s)
+            .map_err(|e| SpecLoadError::Io {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+        s
+    } else {
+        fs::read_to_string(path).map_err(|e| SpecLoadError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?
+    };
     parse_spec_str(&text, path)
 }
 
@@ -78,7 +99,8 @@ pub fn write_spec_str(spec: &Spec) -> Result<String, SpecLoadError> {
 }
 
 /// Write a spec to disk as JSON. Creates parent directories as
-/// needed so callers don't have to pre-`mkdir -p`.
+/// needed so callers don't have to pre-`mkdir -p`. If `path` ends
+/// in `.gz`, the output is gzip-compressed.
 pub fn write_spec_file(spec: &Spec, path: &Path) -> Result<(), SpecLoadError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| SpecLoadError::Io {
@@ -87,6 +109,24 @@ pub fn write_spec_file(spec: &Spec, path: &Path) -> Result<(), SpecLoadError> {
         })?;
     }
     let text = write_spec_str(spec)?;
+    if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+        let file = fs::File::create(path).map_err(|e| SpecLoadError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        let mut encoder = GzEncoder::new(file, Compression::default());
+        encoder
+            .write_all(text.as_bytes())
+            .map_err(|e| SpecLoadError::Io {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+        encoder.finish().map_err(|e| SpecLoadError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+        return Ok(());
+    }
     fs::write(path, text).map_err(|e| SpecLoadError::Io {
         path: path.display().to_string(),
         source: e,
@@ -154,6 +194,25 @@ mod tests {
         let _ = fs::remove_file(&tmp);
         let spec = git_minimal();
         write_spec_file(&spec, &tmp).unwrap();
+        let restored = load_spec_file(&tmp).unwrap();
+        assert_eq!(spec, restored);
+        fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn round_trip_via_gzipped_tempfile() {
+        let tmp = std::env::temp_dir().join("nerv-spec-loader-round-trip.json.gz");
+        let _ = fs::remove_file(&tmp);
+        let spec = git_minimal();
+        write_spec_file(&spec, &tmp).unwrap();
+        // Disk should be smaller than the in-memory JSON string.
+        let raw = write_spec_str(&spec).unwrap();
+        let on_disk = fs::metadata(&tmp).unwrap().len() as usize;
+        assert!(
+            on_disk < raw.len(),
+            "gzipped {on_disk} should be smaller than raw {} bytes",
+            raw.len()
+        );
         let restored = load_spec_file(&tmp).unwrap();
         assert_eq!(spec, restored);
         fs::remove_file(&tmp).ok();
