@@ -1,0 +1,21 @@
+{
+  "name": "@nerv/ts-to-json",
+  "private": true,
+  "type": "module",
+  "description": "Convert withfig/autocomplete TypeScript specs into Nerv JSON",
+  "scripts": {
+    "convert": "NODE_PATH=$PWD/node_modules bun convert.ts",
+    "convert:one": "NODE_PATH=$PWD/node_modules bun convert.ts --input ../../vendor/withfig-autocomplete/src/hostname.ts --output /tmp/hostname.json",
+    "convert:all": "NODE_PATH=$PWD/node_modules bun convert.ts --input ../../vendor/withfig-autocomplete/src/ --output ../../crates/nerv-engine/tests/fixtures/converted/ --verbose"
+  },
+  "devDependencies": {
+    "@withfig/autocomplete-types": "^1.31.0"
+  },
+  "dependencies": {
+    "@fig/autocomplete-generators": "^2.4.0",
+    "@fig/autocomplete-helpers": "^2.0.0",
+    "semver": "^7.8.1",
+    "strip-json-comments": "^5.0.3",
+    "yaml": "^2.9.0"
+  }
+}
