@@ -216,10 +216,18 @@ __nerv_line_finish() {
 }
 zle -N accept-line __nerv_line_finish
 
-# Tab: select if popup, else default completion
+# Tab: cycle DOWN through popup items (Fig-style). Enter accepts.
+# When no popup is active, defer to zsh's expand-or-complete (the
+# user's normal Tab behavior is preserved outside Nerv's UX).
 __nerv_accept() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
-    __nerv_insert_selected
+    local max=${#__NERV_ITEMS}; (( max > 5 )) && max=5
+    if (( __NERV_SELECTED < max )); then
+      (( __NERV_SELECTED++ ))
+    else
+      __NERV_SELECTED=1  # cycle wrap
+    fi
+    __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle expand-or-complete
   fi
@@ -227,7 +235,25 @@ __nerv_accept() {
 zle -N __nerv_accept
 bindkey '^I' __nerv_accept
 
-# Arrow keys
+# Shift-Tab: cycle UP. Falls back to reverse-menu-complete outside Nerv.
+__nerv_accept_back() {
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+    local max=${#__NERV_ITEMS}; (( max > 5 )) && max=5
+    if (( __NERV_SELECTED > 1 )); then
+      (( __NERV_SELECTED-- ))
+    else
+      __NERV_SELECTED=$max  # cycle wrap
+    fi
+    __nerv_show_popup "${__NERV_ITEMS[@]}"
+  else
+    zle reverse-menu-complete 2>/dev/null || zle expand-or-complete
+  fi
+}
+zle -N __nerv_accept_back
+bindkey '^[[Z' __nerv_accept_back
+
+# Arrow keys: same navigation, NO cycle wrap (matches Fig — arrows
+# stop at the edges, Tab cycles).
 __nerv_select_down() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
     local max=${#__NERV_ITEMS}; (( max > 5 )) && max=5
