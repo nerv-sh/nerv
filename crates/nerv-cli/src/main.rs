@@ -165,11 +165,23 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
 
 /// E3 (error-states.md §3.3): require zsh ≥ 5.8. Returns an error
 /// message ready for stderr if the environment is wrong.
+///
+/// `$ZSH_VERSION` is a zsh-internal special parameter — NOT exported
+/// to child processes by default. So when the user does
+/// `eval "$(nerv init zsh)"`, we get an empty value even though
+/// we're being sourced from a perfectly fine zsh. Fall back to
+/// asking zsh directly via `$SHELL --version`.
 fn check_zsh_env_compat() -> Result<(), String> {
-    let ver = std::env::var("ZSH_VERSION").unwrap_or_default();
+    let ver = std::env::var("ZSH_VERSION")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(detect_zsh_version_via_shell)
+        .unwrap_or_default();
     if ver.is_empty() {
-        return Err("[nerv] zsh required (no ZSH_VERSION env var detected).\n\
-             nerv init zsh must be sourced from inside an interactive zsh session."
+        return Err("[nerv] zsh required (no ZSH_VERSION env var detected,\n\
+                    and $SHELL did not point to a usable zsh).\n\
+                    nerv init zsh must be sourced from inside an interactive zsh session,\n\
+                    or run: ZSH_VERSION=\"$ZSH_VERSION\" eval \"$(nerv init zsh)\""
             .into());
     }
     let (major, minor) = parse_zsh_version_compat(&ver);
@@ -181,6 +193,25 @@ fn check_zsh_env_compat() -> Result<(), String> {
          Suggested: brew install zsh && chsh -s $(brew --prefix)/bin/zsh\n\
          Autocomplete will be disabled until zsh is upgraded."
     ))
+}
+
+/// Fallback for the `eval "$(nerv init zsh)"` case where $ZSH_VERSION
+/// isn't exported. If $SHELL ends in `zsh`, exec it with `--version`
+/// and parse the output. `zsh --version` prints: `zsh 5.9 (arm-...)`
+fn detect_zsh_version_via_shell() -> Option<String> {
+    let shell = std::env::var("SHELL").ok()?;
+    if !shell.ends_with("/zsh") && shell != "zsh" {
+        return None;
+    }
+    let out = std::process::Command::new(&shell)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().nth(1).map(|s| s.to_string())
 }
 
 fn parse_zsh_version_compat(s: &str) -> (u32, u32) {
