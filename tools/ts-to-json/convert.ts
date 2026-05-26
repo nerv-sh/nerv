@@ -23,6 +23,41 @@
 import { readdir, mkdir, stat } from "node:fs/promises";
 import { resolve, basename, extname, dirname, join } from "node:path";
 
+/**
+ * Detect whether a Fig generator object came from `filepaths()` or
+ * `folders()` in `@fig/autocomplete-generators`. Both build a custom
+ * async closure that ends up running `ls -1ApL` to list directory
+ * entries — that exact flag set is a stable signature across the
+ * package's history.
+ *
+ * Returns:
+ *   - { kind: "filepaths", foldersOnly: true } for folders() OR
+ *     filepaths({ showFolders: "only" }) (detected by inspecting
+ *     the closure source for `"only"`).
+ *   - { kind: "filepaths", foldersOnly: false } for the rest.
+ *   - null if the generator isn't a filepaths/folders variant.
+ *
+ * False-positive risk is low: `"-1ApL"` is rare outside this lib.
+ */
+const detectFilepathsGenerator = (
+  g: any,
+): { kind: "filepaths"; foldersOnly: boolean } | null => {
+  if (g == null || typeof g !== "object") return null;
+  if (typeof g.custom !== "function") return null;
+  let src: string;
+  try {
+    src = g.custom.toString();
+  } catch {
+    return null;
+  }
+  if (!src.includes('"-1ApL"') && !src.includes("'-1ApL'")) return null;
+  // showFolders gets baked into the closure as a literal string compare
+  // in the filter step. The "only" variant is what cd uses.
+  const foldersOnly =
+    src.includes('"only"') || src.includes("'only'") || src.includes("=== \"only\"");
+  return { kind: "filepaths", foldersOnly };
+};
+
 type FigArg = {
   name?: string | string[];
   description?: string;
@@ -93,7 +128,8 @@ type NervGenerator =
   | { type: "template"; script: string[] }
   | { type: "script"; script: string[]; has_post_process: boolean }
   | { type: "custom"; description_hint: string | null }
-  | { type: "package_json_scripts" };
+  | { type: "package_json_scripts" }
+  | { type: "filepaths"; folders_only: boolean };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -134,6 +170,11 @@ const convertGenerators = (g: any | any[] | undefined): NervGenerator[] => {
 };
 
 const convertOneGenerator = (g: any): NervGenerator | null => {
+  // Well-known: filepaths / folders from @fig/autocomplete-generators.
+  // Detected by the unique `ls -1ApL` signature their closures emit.
+  const fp = detectFilepathsGenerator(g);
+  if (fp) return { type: "filepaths", folders_only: fp.foldersOnly };
+
   if (typeof g === "function") {
     // Custom generator function — Tier C, deferred to M1 rquickjs.
     return { type: "custom", description_hint: null };

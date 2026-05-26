@@ -703,9 +703,10 @@ fn upgrade_tier<'a>(current: char, gens: impl IntoIterator<Item = &'a Generator>
                 has_post_process: false,
                 ..
             } => 'B',
-            // PackageJsonScripts is a well-known Tier C recovered to
-            // Tier B by a native Rust path (see complete.rs).
+            // PackageJsonScripts + Filepaths are well-known Tier C
+            // recovered to Tier B by a native Rust path (see complete.rs).
             Generator::PackageJsonScripts => 'B',
+            Generator::Filepaths { .. } => 'B',
             Generator::Script { .. } | Generator::Custom { .. } => 'C',
         };
         if (g_tier == 'B' && t == 'A') || g_tier == 'C' {
