@@ -73,6 +73,7 @@ async fn complete_returns_real_engine_suggestions() {
         let req = Request::Complete {
             line: "git ".to_string(),
             cursor: 4,
+            cwd: None,
         };
         let mut json = serde_json::to_string(&req).unwrap();
         json.push('\n');

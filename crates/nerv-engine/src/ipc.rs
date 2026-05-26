@@ -14,6 +14,13 @@ pub enum Request {
         line: String,
         /// Byte offset of the cursor in `line`.
         cursor: usize,
+        /// Client's working directory at request time. Used by
+        /// filesystem-aware generators (e.g. `package.json` script
+        /// discovery). Optional for backwards-compat with older
+        /// widget builds; daemon falls back to its own cwd when
+        /// absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// Health check (used by `nerv doctor`).
     Ping,

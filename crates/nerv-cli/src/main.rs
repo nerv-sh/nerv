@@ -703,6 +703,9 @@ fn upgrade_tier<'a>(current: char, gens: impl IntoIterator<Item = &'a Generator>
                 has_post_process: false,
                 ..
             } => 'B',
+            // PackageJsonScripts is a well-known Tier C recovered to
+            // Tier B by a native Rust path (see complete.rs).
+            Generator::PackageJsonScripts => 'B',
             Generator::Script { .. } | Generator::Custom { .. } => 'C',
         };
         if (g_tier == 'B' && t == 'A') || g_tier == 'C' {
@@ -966,6 +969,13 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
         let req = nerv_engine::Request::Complete {
             line: line.to_string(),
             cursor,
+            // Capture the client's cwd so filesystem-aware generators
+            // (package.json scripts, etc.) see the user's working dir,
+            // not the daemon's. Falls back to None on error so the
+            // daemon picks its own cwd as a last resort.
+            cwd: std::env::current_dir()
+                .ok()
+                .and_then(|p| p.to_str().map(|s| s.to_string())),
         };
         let mut json = serde_json::to_string(&req)?;
         json.push('\n');
