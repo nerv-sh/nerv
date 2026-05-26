@@ -479,6 +479,27 @@ fn emit_arg_candidates(
         })
         .collect();
 
+    // `template:` field on the arg (separate from `generators:`).
+    // Covers `cat`, `vim`, `ls`, `man`, etc. — most unix command
+    // specs declare `template: filepaths` or `template: folders`
+    // instead of a generator. The filesystem walker is the same
+    // path used by Generator::Filepaths. History / Help templates
+    // have no native handler yet — left for a future commit.
+    if let Some(folders_only) = match arg.template {
+        Some(crate::spec_parser::TemplateKind::Folders) => Some(true),
+        Some(crate::spec_parser::TemplateKind::Filepaths) => Some(false),
+        _ => None,
+    } {
+        if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
+            out.extend(paths.into_iter().map(|(insertion, display)| Suggestion {
+                insertion,
+                display,
+                description: None,
+                kind: SuggestionKind::Argument,
+            }));
+        }
+    }
+
     // Tier B: spawn `Generator::Template` scripts and parse stdout
     // lines as candidates. Skipped under NERV_NO_GENERATORS=1 (tests,
     // sandboxed environments).

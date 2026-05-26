@@ -113,5 +113,21 @@ fn process_one(input: &Path, output_dir: &Path, stem: &str, compress: bool) -> R
     let ext = if compress { "json.gz" } else { "json" };
     let out_path = output_dir.join(format!("{stem}.{ext}"));
     write_spec_file(&spec, &out_path).with_context(|| format!("writing {}", out_path.display()))?;
+    // Defensive cleanup: SpecRegistry::load_from_disk prefers a plain
+    // `<stem>.json` over the `<stem>.json.gz` form when both exist.
+    // A prior install of an older / smaller fixture (e.g. the bundled
+    // 4-subcommand `git.json` test fixture) would otherwise shadow
+    // the freshly-written gzipped spec and only its subset would be
+    // returned by `complete()`. Symmetric: writing plain also clears
+    // the .gz so users don't get confused stale data either way.
+    let stale = if compress {
+        output_dir.join(format!("{stem}.json"))
+    } else {
+        output_dir.join(format!("{stem}.json.gz"))
+    };
+    if stale.exists() {
+        std::fs::remove_file(&stale)
+            .with_context(|| format!("removing stale {}", stale.display()))?;
+    }
     Ok(())
 }
