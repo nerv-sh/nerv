@@ -46,6 +46,9 @@ async fn complete_returns_real_engine_suggestions() {
         .env("NERV_SOCK", &sock_path)
         .env("NERV_PID", &pid_path)
         .env("NERV_SPECS_DIR", &specs_dir)
+        // Suppress the user's real frecency history so test ordering
+        // is deterministic regardless of local accept counts.
+        .env("NERV_FRECENCY_FILE", "-")
         .env("NERV_LOG", "debug")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())

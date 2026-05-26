@@ -80,9 +80,12 @@ impl FrecencyStore {
         }
     }
 
-    /// Return the score for one suggestion. `0.0` when not seen.
-    /// Score = `count / (1 + age_days)` — monotone in count, decays
-    /// linearly per day so a long-unused entry naturally drops.
+    /// Return the score for one suggestion. `0.0` when not seen
+    /// *or* seen exactly once — a single accidental pick should not
+    /// be enough to override the alpha order. Multi-pick entries
+    /// score `(count - 1) / (1 + age_days)`: monotone in count, with
+    /// linear decay so a long-unused entry naturally drops back into
+    /// the no-boost band.
     pub fn score(&self, spec: &str, insertion: &str) -> f64 {
         let table = match self.table.lock() {
             Ok(t) => t,
@@ -92,9 +95,12 @@ impl FrecencyStore {
         let Some(entry) = table.get(&key) else {
             return 0.0;
         };
+        if entry.count < 2 {
+            return 0.0;
+        }
         let now = now_unix();
         let age_days = (now.saturating_sub(entry.last_unix)) as f64 / 86_400.0;
-        (entry.count as f64) / (1.0 + age_days)
+        ((entry.count - 1) as f64) / (1.0 + age_days)
     }
 
     /// Write the in-memory table back to disk if it's been mutated
@@ -187,12 +193,36 @@ mod tests {
     }
 
     #[test]
-    fn record_then_score_is_positive() {
+    fn single_pick_returns_zero() {
+        // Threshold: single pick is treated as accidental and gets
+        // no boost — only multi-picks earn a non-zero score.
+        let s = FrecencyStore::empty();
+        s.record("git", "checkout");
+        assert_eq!(s.score("git", "checkout"), 0.0);
+    }
+
+    #[test]
+    fn two_picks_gives_score_one() {
         let s = FrecencyStore::empty();
         s.record("git", "checkout");
         s.record("git", "checkout");
         let sc = s.score("git", "checkout");
-        assert!(sc >= 1.5, "expected score >= 1.5 after 2 hits, got {sc}");
+        // (count - 1) / (1 + age=0) = 1.
+        assert!(
+            (0.99..=1.01).contains(&sc),
+            "expected ~1.0 after 2 hits, got {sc}"
+        );
+    }
+
+    #[test]
+    fn more_picks_score_higher() {
+        let s = FrecencyStore::empty();
+        for _ in 0..5 {
+            s.record("git", "checkout");
+        }
+        s.record("git", "status");
+        s.record("git", "status");
+        assert!(s.score("git", "checkout") > s.score("git", "status"));
     }
 
     #[test]
@@ -212,11 +242,13 @@ mod tests {
         let s1 = FrecencyStore::load(&tmp);
         s1.record("git", "checkout");
         s1.record("git", "checkout");
+        s1.record("git", "checkout");
         s1.record("git", "status");
         s1.flush_if_dirty();
 
         let s2 = FrecencyStore::load(&tmp);
-        assert!(s2.score("git", "checkout") >= s2.score("git", "status"));
+        // checkout (3 picks) > status (1 pick, no boost).
+        assert!(s2.score("git", "checkout") > s2.score("git", "status"));
         assert_eq!(s2.len(), 2);
         let _ = std::fs::remove_file(&tmp);
     }

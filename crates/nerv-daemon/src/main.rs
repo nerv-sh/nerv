@@ -44,8 +44,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Frecency: per-spec usage history that nudges repeat picks to
     // the top of suggestion lists. Persisted as a TSV next to specs.
-    let frecency_path = cache_dir.join("frecency.tsv");
-    let frecency = Arc::new(FrecencyStore::load(&frecency_path));
+    // NERV_FRECENCY_FILE=- disables loading (tests / sandboxed
+    // benchmarks that don't want the user's real history bleeding in).
+    let frecency_path = std::env::var_os("NERV_FRECENCY_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| cache_dir.join("frecency.tsv"));
+    let frecency = if frecency_path == std::path::PathBuf::from("-") {
+        Arc::new(FrecencyStore::empty())
+    } else {
+        Arc::new(FrecencyStore::load(&frecency_path))
+    };
     info!(
         path = %frecency_path.display(),
         entries = frecency.len(),

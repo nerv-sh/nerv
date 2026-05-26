@@ -524,9 +524,19 @@ fn emit_arg_candidates(
                 }
                 crate::spec_parser::Generator::ZoxideQuery => {
                     if let Some(rows) = zoxide_query() {
+                        // z / zoxide are fuzzy by design — `z claud`
+                        // should match `~/.claude` even though the
+                        // folder name is `.claude`. Filter by
+                        // substring (case-insensitive) on either the
+                        // folder name OR the full path.
+                        let needle = prefix.to_lowercase();
                         out.extend(
                             rows.into_iter()
-                                .filter(|(name, _, _)| name.starts_with(prefix))
+                                .filter(|(name, path, _)| {
+                                    needle.is_empty()
+                                        || name.to_lowercase().contains(&needle)
+                                        || path.to_lowercase().contains(&needle)
+                                })
                                 .map(|(name, path, score)| Suggestion {
                                     insertion: name.clone(),
                                     display: name,
