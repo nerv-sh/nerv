@@ -512,6 +512,16 @@ fn emit_arg_candidates(
                         );
                     }
                 }
+                crate::spec_parser::Generator::Filepaths { folders_only } => {
+                    if let Some(paths) = filepaths_at(cwd, prefix, *folders_only) {
+                        out.extend(paths.into_iter().map(|(insertion, display)| Suggestion {
+                            insertion,
+                            display,
+                            description: None,
+                            kind: SuggestionKind::Argument,
+                        }));
+                    }
+                }
                 _ => {}
             }
         }
@@ -668,6 +678,82 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
         c -= 1;
     }
     c
+}
+
+// ---------------------------------------------------------------------------
+// Well-known generator: filepaths / folders (cd, cat, ls, …)
+// ---------------------------------------------------------------------------
+
+/// List directory entries matching the trailing-basename portion of
+/// `prefix`. Honours `folders_only` (e.g. `cd` uses showFolders=only).
+/// Returns `(insertion, display)` pairs — insertion preserves the
+/// user's typed directory prefix so the widget's word-level replace
+/// doesn't lose context (`cd ./fo<Tab>` → `cd ./encl/`, not `cd encl/`).
+fn filepaths_at(
+    cwd: Option<&std::path::Path>,
+    prefix: &str,
+    folders_only: bool,
+) -> Option<Vec<(String, String)>> {
+    // Split prefix into (dir_part_preserve_trailing_slash, basename_filter).
+    let (dir_part, filter) = match prefix.rfind('/') {
+        Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+        None => ("", prefix),
+    };
+    let resolved = resolve_filepaths_root(cwd, dir_part)?;
+    let entries = std::fs::read_dir(&resolved).ok()?;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for e in entries.flatten() {
+        let name_os = e.file_name();
+        let Some(name) = name_os.to_str() else {
+            continue;
+        };
+        if !name.starts_with(filter) {
+            continue;
+        }
+        // Skip dotfiles unless user explicitly typed a leading dot.
+        if name.starts_with('.') && !filter.starts_with('.') {
+            continue;
+        }
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if folders_only && !is_dir {
+            continue;
+        }
+        let trailing = if is_dir { "/" } else { "" };
+        let insertion = format!("{dir_part}{name}{trailing}");
+        let display = format!("{name}{trailing}");
+        out.push((insertion, display));
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    Some(out)
+}
+
+/// Resolve a (possibly relative, possibly tilde-prefixed) directory
+/// string against the client's cwd. Returns the canonical filesystem
+/// path to read, or `None` if neither cwd nor `HOME` is known.
+fn resolve_filepaths_root(
+    cwd: Option<&std::path::Path>,
+    dir_part: &str,
+) -> Option<std::path::PathBuf> {
+    if dir_part.is_empty() {
+        return cwd
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok());
+    }
+    if dir_part.starts_with('/') {
+        return Some(std::path::PathBuf::from(dir_part));
+    }
+    if let Some(rest) = dir_part.strip_prefix("~/") {
+        let home = std::env::var("HOME").ok()?;
+        return Some(std::path::PathBuf::from(home).join(rest));
+    }
+    if dir_part == "~" {
+        let home = std::env::var("HOME").ok()?;
+        return Some(std::path::PathBuf::from(home));
+    }
+    let base = cwd
+        .map(|p| p.to_path_buf())
+        .or_else(|| std::env::current_dir().ok())?;
+    Some(base.join(dir_part))
 }
 
 fn find_package_json(start: &std::path::Path) -> Option<std::path::PathBuf> {

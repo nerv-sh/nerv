@@ -153,6 +153,15 @@ pub enum Generator {
     /// parses it, and emits the `scripts` keys as completions —
     /// avoiding the postProcess closure (which is otherwise Tier C).
     PackageJsonScripts,
+    /// Well-known: `filepaths()` / `folders()` from
+    /// `@fig/autocomplete-generators`. Reused by `cd`, `cat`, `ls`,
+    /// etc. The Rust engine lists entries in the directory implied by
+    /// the current token, filtering on the trailing basename and on
+    /// `folders_only`.
+    Filepaths {
+        #[serde(default)]
+        folders_only: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
