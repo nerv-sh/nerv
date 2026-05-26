@@ -26,35 +26,34 @@ dim()   { printf '\033[2m%s\033[0m\n' "$*"; }
 warn()  { printf '\033[33m%s\033[0m\n' "$*"; }
 fail()  { printf '\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
-# 1. Build binary if missing.
+# 1. Build binary (always — the widget script is include_str!'d into
+#    the binary, so a `_nerv.zsh` edit needs a fresh build even when
+#    the Rust source mtime is older than target/release/nerv. Cargo
+#    is fast enough on incremental that an unconditional rebuild
+#    costs ~1s when there's nothing to do).
 if [ -z "${NERV_SKIP_BUILD:-}" ]; then
-  if [ ! -x "$BIN" ] || [ "$REPO_ROOT/crates/nerv-cli/src/main.rs" -nt "$BIN" ]; then
-    bold "[1/5] Building nerv (release) …"
-    (cd "$REPO_ROOT" && cargo build --release -p nerv-cli -p nerv-daemon)
-  else
-    dim "[1/5] Binary already up-to-date — skipping build."
-  fi
+  bold "[1/5] Building nerv + nervd (release) …"
+  (cd "$REPO_ROOT" && cargo build --release -p nerv-cli -p nerv-daemon)
 else
   dim "[1/5] Skipped build (NERV_SKIP_BUILD=1)."
 fi
 [ -x "$BIN" ] || fail "binary missing after build: $BIN"
 
-# 2. Rebuild spec cache (715 specs, gzip-compressed) if directory empty.
+# 2. Reinstall the spec cache. Always re-runs build-specs to pick up
+#    any new well-known recoveries in the converter pipeline. Source
+#    dir missing → fall back to the 9 hand-rolled fixtures (cache
+#    stays empty, daemon serves bare-minimum specs).
 if [ -z "${NERV_SKIP_SPECS:-}" ]; then
-  if [ ! -d "$SPEC_DST" ] || [ -z "$(ls -A "$SPEC_DST" 2>/dev/null)" ]; then
-    if [ -d "$SPEC_SRC" ]; then
-      bold "[2/5] Installing gzipped spec cache to $SPEC_DST …"
-      mkdir -p "$SPEC_DST"
-      (cd "$REPO_ROOT" && cargo run --release -q -p nerv-engine --bin build-specs -- \
-        --input "$SPEC_SRC" \
-        --output "$SPEC_DST" \
-        --compress)
-    else
-      warn "[2/5] No converted specs at $SPEC_SRC — only hand-rolled fixtures will load."
-      warn "       Run: cd tools/ts-to-json && bun run convert:all"
-    fi
+  if [ -d "$SPEC_SRC" ] && [ -n "$(ls -A "$SPEC_SRC" 2>/dev/null)" ]; then
+    bold "[2/5] Installing gzipped spec cache to $SPEC_DST …"
+    mkdir -p "$SPEC_DST"
+    (cd "$REPO_ROOT" && cargo run --release -q -p nerv-engine --bin build-specs -- \
+      --input "$SPEC_SRC" \
+      --output "$SPEC_DST" \
+      --compress)
   else
-    dim "[2/5] Spec cache already populated — skipping rebuild."
+    warn "[2/5] No converted specs at $SPEC_SRC — only hand-rolled fixtures will load."
+    warn "       Run: cd tools/ts-to-json && bun run convert:all"
   fi
 else
   dim "[2/5] Skipped spec install (NERV_SKIP_SPECS=1)."
