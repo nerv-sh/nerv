@@ -17,6 +17,32 @@ typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
 typeset -gi __NERV_WIDTH=46
 typeset -gi __NERV_PASTING=0
+typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
+
+__nerv_reset_state() {
+  __NERV_ACTIVE=0
+  __NERV_SELECTED=1
+  __NERV_ITEMS=()
+  zle -R ""
+}
+
+__nerv_cycle_next() {
+  local max=${#__NERV_ITEMS}
+  if (( __NERV_SELECTED < max )); then
+    (( __NERV_SELECTED++ ))
+  else
+    __NERV_SELECTED=1
+  fi
+}
+
+__nerv_cycle_prev() {
+  local max=${#__NERV_ITEMS}
+  if (( __NERV_SELECTED > 1 )); then
+    (( __NERV_SELECTED-- ))
+  else
+    __NERV_SELECTED=$max
+  fi
+}
 
 __nerv_show_popup() {
   local -a items=("$@")
@@ -83,14 +109,14 @@ __nerv_show_popup() {
   local hbar=""
   local hbar_n=$(( W - 2 ))
   (( hbar_n < 0 )) && hbar_n=0
-  local j; for (( j=0; j<hbar_n; j++ )); do hbar+="─"; done
+  repeat $hbar_n; do hbar+="─"; done
 
   # --- Build plain-text lines for zle -R (space reservation) ---
   local -a plain=()
   local blank=""
-  for (( j=0; j<W+4; j++ )); do blank+=" "; done
+  repeat $(( W + 4 )); do blank+=" "; done
   local plain_rows=$(( visible + 4 ))
-  for (( j=0; j<plain_rows; j++ )); do plain+=("$blank"); done
+  repeat $plain_rows; do plain+=("$blank"); done
 
   # --- Build colored lines ---
   local R=$'\e[0m'
@@ -120,7 +146,7 @@ __nerv_show_popup() {
     local pad_n=$(( row_body - visible_chars ))
     (( pad_n < 0 )) && pad_n=0
     local row_pad=""
-    for (( j=0; j<pad_n; j++ )); do row_pad+=" "; done
+    repeat $pad_n; do row_pad+=" "; done
 
     if (( i == __NERV_SELECTED )); then
       colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}\$${SELFG} ${display}${row_pad}${BDR}│${R}")
@@ -144,7 +170,7 @@ __nerv_show_popup() {
   (( ${#sel_desc} > sel_avail )) && sel_desc="${sel_desc:0:$sel_avail}"
   local fpad=$(( W - 4 - ${#sel_desc} - ${#counter} ))
   (( fpad < 0 )) && fpad=0
-  local fps=""; for (( j=0; j<fpad; j++ )); do fps+=" "; done
+  local fps=""; repeat $fpad; do fps+=" "; done
   colored+=("  ${BG}${BDR}│${DESC} ${sel_desc}${fps}${counter} ${BDR}│${R}")
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
@@ -166,11 +192,8 @@ __nerv_show_popup() {
 __nerv_hide_popup() {
   (( ! __NERV_ACTIVE )) && return
   # Clear raw ANSI remnants, then let ZLE clean up status lines
-  printf '%s' $'\e7\e[B\e[G\e[J\e8'
-  __NERV_ACTIVE=0
-  __NERV_SELECTED=1
-  __NERV_ITEMS=()
-  zle -R ""
+  printf '%s' "$__NERV_CLEAR_ESC"
+  __nerv_reset_state
 }
 
 __nerv_insert_selected() {
@@ -215,12 +238,9 @@ __nerv_insert_selected() {
   fi
 
   # Clear popup area + reset internal state.
-  printf '%s' $'\e7\e[B\e[G\e[J\e8'
+  printf '%s' "$__NERV_CLEAR_ESC"
   __NERV_PREV_LBUFFER="$LBUFFER"
-  __NERV_ACTIVE=0
-  __NERV_SELECTED=1
-  __NERV_ITEMS=()
-  zle -R ""
+  __nerv_reset_state
   zle reset-prompt 2>/dev/null
   zle redisplay 2>/dev/null
   return 0
@@ -300,12 +320,7 @@ __nerv_accept() {
       __nerv_insert_selected
       return
     fi
-    local max=${#__NERV_ITEMS}
-    if (( __NERV_SELECTED < max )); then
-      (( __NERV_SELECTED++ ))
-    else
-      __NERV_SELECTED=1  # cycle wrap
-    fi
+    __nerv_cycle_next
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle expand-or-complete
@@ -317,12 +332,7 @@ bindkey '^I' __nerv_accept
 # Shift-Tab: cycle UP. Falls back to reverse-menu-complete outside Nerv.
 __nerv_accept_back() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
-    local max=${#__NERV_ITEMS}
-    if (( __NERV_SELECTED > 1 )); then
-      (( __NERV_SELECTED-- ))
-    else
-      __NERV_SELECTED=$max  # cycle wrap
-    fi
+    __nerv_cycle_prev
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle reverse-menu-complete 2>/dev/null || zle expand-or-complete
@@ -336,12 +346,7 @@ bindkey '^[[Z' __nerv_accept_back
 # behavior (which stopped at edges) per direct user feedback.
 __nerv_select_down() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
-    local max=${#__NERV_ITEMS}
-    if (( __NERV_SELECTED < max )); then
-      (( __NERV_SELECTED++ ))
-    else
-      __NERV_SELECTED=1
-    fi
+    __nerv_cycle_next
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle down-line-or-history
@@ -351,12 +356,7 @@ zle -N __nerv_select_down
 
 __nerv_select_up() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
-    local max=${#__NERV_ITEMS}
-    if (( __NERV_SELECTED > 1 )); then
-      (( __NERV_SELECTED-- ))
-    else
-      __NERV_SELECTED=$max
-    fi
+    __nerv_cycle_prev
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle up-line-or-history
