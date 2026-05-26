@@ -138,42 +138,52 @@ __nerv_hide_popup() {
 
 __nerv_insert_selected() {
   (( ${#__NERV_ITEMS} == 0 )) && return 1
-  local sel_line="${__NERV_ITEMS[$__NERV_SELECTED]}"
+  local sel_idx=$__NERV_SELECTED
+  (( sel_idx < 1 )) && sel_idx=1
+  (( sel_idx > ${#__NERV_ITEMS} )) && sel_idx=1
+  local sel_line="${__NERV_ITEMS[$sel_idx]}"
   local insertion="${sel_line%%	*}"
+  [[ -z "$insertion" ]] && return 1
 
-  # LBUFFER side: replace the trailing partial word with the insertion.
-  local prefix="${LBUFFER% *}"
-  if [[ "$prefix" == "$LBUFFER" ]]; then
-    LBUFFER="$insertion "
+  # Compute new BUFFER + CURSOR from scratch. Avoid LBUFFER/RBUFFER
+  # split because some plugins (zsh-autosuggestions) wrap those
+  # accessors and the assignments don't always propagate.
+  local before="$LBUFFER"
+  local after="$RBUFFER"
+
+  # Strip trailing partial word from `before` (the word the user
+  # was completing).
+  local pre
+  if [[ "$before" == *' '* ]]; then
+    pre="${before% *} "
   else
-    LBUFFER="$prefix $insertion "
+    pre=""
   fi
 
-  # RBUFFER side: when cursor is mid-token, swallow the leading
-  # partial word so we don't end up with `git commit▮it -m ...`.
-  # The first run of non-whitespace bytes is the rest of the word
-  # the user was completing — anything from the first whitespace
-  # onward is preserved.
-  if [[ -n "$RBUFFER" && "${RBUFFER[1]}" != ' ' && "${RBUFFER[1]}" != $'\t' ]]; then
-    local rest_word="${RBUFFER%%[[:space:]]*}"
-    RBUFFER="${RBUFFER#$rest_word}"
+  # Strip leading partial word from `after` (rest of the same word
+  # when cursor is mid-token).
+  local post="$after"
+  if [[ -n "$after" && "$after[1]" != ' ' && "$after[1]" != $'\t' ]]; then
+    local rest="${after%%[[:space:]]*}"
+    post="${after#$rest}"
   fi
 
-  # Clear ghost text from zsh-autosuggestions (if loaded) so the
-  # user sees the actual line buffer, not a stale overlay.
-  unset POSTDISPLAY 2>/dev/null
-  typeset -g POSTDISPLAY=''
+  # Build full BUFFER and place CURSOR right after the insertion+space.
+  BUFFER="${pre}${insertion} ${post# }"
+  CURSOR=$(( ${#pre} + ${#insertion} + 1 ))
 
-  # Clear raw ANSI popup first
+  # Best-effort: clear zsh-autosuggestions ghost overlay.
+  if (( ${+POSTDISPLAY} )); then
+    POSTDISPLAY=''
+  fi
+
+  # Clear popup area + reset internal state.
   printf '%s' $'\e7\e[B\e[G\e[J\e8'
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_ACTIVE=0
   __NERV_SELECTED=1
   __NERV_ITEMS=()
   zle -R ""
-  # Force ZLE to repaint the line buffer with the new LBUFFER/RBUFFER.
-  # Without this, some terminal + plugin combinations leave the screen
-  # showing the pre-insert state until the next keystroke.
   zle reset-prompt 2>/dev/null
   zle redisplay 2>/dev/null
   return 0
@@ -243,8 +253,12 @@ zle -N accept-line __nerv_line_finish
 # Single-item popup short-circuits — cycling 1→1 is useless, so we
 # insert immediately (the user clearly wants that one suggestion).
 # Outside popup: defer to zsh's expand-or-complete.
+#
+# Only checks __NERV_ITEMS, NOT __NERV_ACTIVE: cursor-movement
+# keys don't clear ITEMS but may leave ACTIVE stale, and we'd
+# rather accept than appear no-op.
 __nerv_accept() {
-  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+  if (( ${#__NERV_ITEMS} > 0 )); then
     if (( ${#__NERV_ITEMS} == 1 )); then
       __nerv_insert_selected
       return
