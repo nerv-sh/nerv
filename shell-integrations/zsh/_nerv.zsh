@@ -27,6 +27,9 @@ __nerv_show_popup() {
   local sel_desc="${sel_line#*	}"; sel_desc="${sel_desc#*	}"
 
   # Auto-size: measure max display + max desc across visible items.
+  # Per-row desc is no longer rendered (Fig-style: footer only) but
+  # max_desc is still used to widen the popup so the footer's full
+  # desc has room without truncation.
   local i max_disp=0 max_desc=0
   for (( i=1; i<=count; i++ )); do
     local line="${items[$i]}"
@@ -38,19 +41,25 @@ __nerv_show_popup() {
   done
 
   # Hard caps so a long description doesn't blow the popup off-screen.
-  (( max_disp > 24 )) && max_disp=24
+  (( max_disp > 32 )) && max_disp=32
   local term_cols=${COLUMNS:-80}
   local cap=$(( term_cols * 8 / 10 ))
   (( cap < 30 )) && cap=30
 
-  # Layout: " $ "(4) + display + gap(2) + desc + " "(1)
-  local W=$(( 4 + max_disp + 2 + max_desc + 1 ))
+  # Footer-desc width hint: clamp footer-desc to a generous reach so
+  # the popup body width is mainly driven by display names, not by an
+  # unusually long description.
+  local foot_hint=$max_desc
+  (( foot_hint > 60 )) && foot_hint=60
+
+  # Layout: " $ "(4) + display + " "(1)
+  local body=$(( 4 + max_disp + 1 ))
+  # Footer needs " " + desc + " " (= foot_hint + 2). Pick whichever
+  # is wider so neither row wraps.
+  local W=$body
+  (( foot_hint + 2 > W )) && W=$(( foot_hint + 2 ))
   (( W > cap )) && W=$cap
   (( W < __NERV_WIDTH )) && W=$__NERV_WIDTH
-
-  # desc gets whatever's left after the display column.
-  local desc_avail=$(( W - 4 - max_disp - 2 - 1 ))
-  (( desc_avail < 0 )) && desc_avail=0
 
   local hbar=""
   local j; for (( j=0; j<W; j++ )); do hbar+="─"; done
@@ -73,28 +82,29 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}╭${hbar}╮${R}")
 
+  # Row body width (between the two vertical bars): everything past
+  # " │" on the left and " │" on the right. Equals W - 2.
+  local row_body=$(( W - 2 ))
+
   for (( i=1; i<=count; i++ )); do
     local line="${items[$i]}"
     local rest="${line#*	}"
     local display="${rest%%	*}"
-    local desc="${rest#*	}"
     (( ${#display} > max_disp )) && display="${display:0:$max_disp}"
-    (( ${#desc} > desc_avail )) && desc="${desc:0:$desc_avail}"
 
-    # Right-pad display to max_disp so descriptions align across rows.
-    local disp_pad=""
-    local disp_gap=$(( max_disp - ${#display} ))
-    (( disp_gap > 0 )) && for (( j=0; j<disp_gap; j++ )); do disp_pad+=" "; done
-
-    # Right-pad desc to desc_avail so the right border lines up.
-    local desc_pad=""
-    local d_gap=$(( desc_avail - ${#desc} ))
-    (( d_gap > 0 )) && for (( j=0; j<d_gap; j++ )); do desc_pad+=" "; done
+    # Layout inside one row: " $ display<padding>"
+    # ($ icon takes 2 cols including space after.) Right-pad with
+    # spaces to fill row_body so the right vertical bar lines up.
+    local visible_chars=$(( 3 + ${#display} ))  # " $ " + display
+    local pad_n=$(( row_body - visible_chars ))
+    (( pad_n < 0 )) && pad_n=0
+    local row_pad=""
+    for (( j=0; j<pad_n; j++ )); do row_pad+=" "; done
 
     if (( i == __NERV_SELECTED )); then
-      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}\$${SELFG} ${display}${disp_pad}  ${desc}${desc_pad} ${BDR}│${R}")
+      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}\$${SELFG} ${display}${row_pad}${BDR}│${R}")
     else
-      colored+=("  ${BG}${BDR}│${BG} ${ICON}\$${ITEM} ${display}${disp_pad}  ${DESC}${desc}${desc_pad} ${BDR}│${R}")
+      colored+=("  ${BG}${BDR}│${BG} ${ICON}\$${ITEM} ${display}${row_pad}${BDR}│${R}")
     fi
   done
 
