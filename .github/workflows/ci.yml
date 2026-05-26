@@ -48,7 +48,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-13, macos-14] # Intel + Apple Silicon (terminal-compat.md §7.1)
+        # Apple Silicon only for v0.1. macos-13 (Intel) runners are
+        # heavily queued on free-tier GitHub Actions — 30 min wait
+        # times made the CI signal too slow to be useful. Intel can
+        # come back via a periodic build (e.g. weekly cron) once
+        # there's a user reporting Intel-specific bugs.
+        os: [macos-14]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

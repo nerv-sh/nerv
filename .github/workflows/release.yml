@@ -24,11 +24,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Apple Silicon only for v0.1 releases. Intel (macos-13)
+        # release runners on free-tier are queued long enough
+        # (30 min+) that they hold up the release.yml workflow
+        # past the point of usefulness. Once there's an Intel
+        # user requesting binaries we can either pay for
+        # macos-13-large or cross-compile aarch64 → x86_64.
         include:
           - target: aarch64-apple-darwin
             os: macos-14
-          - target: x86_64-apple-darwin
-            os: macos-13
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
