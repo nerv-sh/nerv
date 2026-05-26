@@ -1,11 +1,11 @@
 #!/usr/bin/env zsh
 # _nerv.zsh — Nerv ZLE widget for inline autocomplete.
 #
-# Hybrid: zle -R manages space & cursor, raw ANSI overwrites colors.
-# 1. zle -R "" "plain1" "plain2" ... → ZLE creates space, positions cursor
-# 2. \e7 saves cursor (now correct)
-# 3. \e[B to status area, overwrite with colored text
-# 4. \e8 restores cursor
+# Render path: build colored lines (one per popup row), hand them
+# all to `zle -R "" <line>…` so zsh handles scrolling, cursor
+# position, and ANSI-in-status-area in one shot. The previous
+# `\e7 \e[B … \e8` save/restore lost rows when the popup ran past
+# the bottom of the screen — handing the lines to zle fixes that.
 
 if (( ${+__NERV_LOADED} )); then return 0; fi
 typeset -g __NERV_LOADED=1
@@ -85,13 +85,6 @@ __nerv_show_popup() {
   (( hbar_n < 0 )) && hbar_n=0
   local j; for (( j=0; j<hbar_n; j++ )); do hbar+="─"; done
 
-  # --- Build plain-text lines for zle -R (space reservation) ---
-  local -a plain=()
-  local blank=""
-  for (( j=0; j<W+4; j++ )); do blank+=" "; done
-  local plain_rows=$(( visible + 4 ))
-  for (( j=0; j<plain_rows; j++ )); do plain+=("$blank"); done
-
   # --- Build colored lines ---
   local R=$'\e[0m'
   local BG=$'\e[48;5;236m' BDR=$'\e[38;5;240m'
@@ -148,16 +141,14 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
 
-  # Step 1: ZLE creates space and positions cursor correctly
-  zle -R "" "${plain[@]}"
-
-  # Step 2-4: Save cursor, overwrite with colors, restore cursor
-  local buf=$'\e7'
-  for (( i=1; i<=${#colored}; i++ )); do
-    buf+=$'\e[B\e[G'"${colored[$i]}"$'\e[K'
-  done
-  buf+=$'\e8'
-  printf '%s' "$buf"
+  # Hand the colored lines straight to ZLE — `zle -R "" <line>…`
+  # renders each extra arg as one line of status area beneath the
+  # prompt. zsh tracks cursor position and terminal scroll
+  # correctly, so a popup taller than the remaining screen rows
+  # scrolls cleanly instead of losing rows the way our previous
+  # `\e7 \e[B \e[G … \e8` save/restore did when the bottom of the
+  # screen got hit mid-render.
+  zle -R "" "${colored[@]}"
 
   __NERV_ACTIVE=1
 }
@@ -165,11 +156,11 @@ __nerv_show_popup() {
 __nerv_hide_popup() {
   POSTDISPLAY=''
   (( ! __NERV_ACTIVE )) && return
-  # Clear raw ANSI remnants, then let ZLE clean up status lines
-  printf '%s' $'\e7\e[B\e[G\e[J\e8'
   __NERV_ACTIVE=0
   __NERV_SELECTED=1
   __NERV_ITEMS=()
+  # Empty zle -R clears the status area cleanly. No raw ANSI
+  # needed now that the popup itself uses zle -R for rendering.
   zle -R ""
 }
 
@@ -224,8 +215,10 @@ __nerv_insert_selected() {
     POSTDISPLAY=''
   fi
 
-  # Clear popup area + reset internal state.
-  printf '%s' $'\e7\e[B\e[G\e[J\e8'
+  # Clear popup area + reset internal state. `zle -R ""` releases
+  # any status lines previously claimed; reset-prompt + redisplay
+  # force ZLE to repaint the prompt now that BUFFER/CURSOR have
+  # moved (some terminals leave stale glyphs otherwise).
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_ACTIVE=0
   __NERV_SELECTED=1
