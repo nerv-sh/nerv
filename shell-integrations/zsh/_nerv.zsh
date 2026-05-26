@@ -140,12 +140,30 @@ __nerv_insert_selected() {
   (( ${#__NERV_ITEMS} == 0 )) && return 1
   local sel_line="${__NERV_ITEMS[$__NERV_SELECTED]}"
   local insertion="${sel_line%%	*}"
+
+  # LBUFFER side: replace the trailing partial word with the insertion.
   local prefix="${LBUFFER% *}"
   if [[ "$prefix" == "$LBUFFER" ]]; then
     LBUFFER="$insertion "
   else
     LBUFFER="$prefix $insertion "
   fi
+
+  # RBUFFER side: when cursor is mid-token, swallow the leading
+  # partial word so we don't end up with `git commit▮it -m ...`.
+  # The first run of non-whitespace bytes is the rest of the word
+  # the user was completing — anything from the first whitespace
+  # onward is preserved.
+  if [[ -n "$RBUFFER" && "${RBUFFER[1]}" != ' ' && "${RBUFFER[1]}" != $'\t' ]]; then
+    local rest_word="${RBUFFER%%[[:space:]]*}"
+    RBUFFER="${RBUFFER#$rest_word}"
+  fi
+
+  # Clear ghost text from zsh-autosuggestions (if loaded) so the
+  # user sees the actual line buffer, not a stale overlay.
+  unset POSTDISPLAY 2>/dev/null
+  typeset -g POSTDISPLAY=''
+
   # Clear raw ANSI popup first
   printf '%s' $'\e7\e[B\e[G\e[J\e8'
   __NERV_PREV_LBUFFER="$LBUFFER"
