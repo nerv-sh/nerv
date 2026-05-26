@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # rust-toolchain.toml pins 1.85 (edition 2024). Mirror here so jobs
+  # using dtolnay/rust-toolchain don't drift onto bleeding stable.
+  RUST_CHANNEL: "1.85"
 
 jobs:
   fmt:
@@ -16,8 +19,9 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_CHANNEL }}
           components: rustfmt
       - run: cargo fmt --all --check
 
@@ -26,8 +30,9 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ env.RUST_CHANNEL }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -41,9 +46,58 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_CHANNEL }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+
+  build-specs-smoke:
+    name: build-specs (hand-rolled fixtures)
+    runs-on: macos-14
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_CHANNEL }}
+      - uses: Swatinem/rust-cache@v2
+      - name: build-specs JSON (plain)
+        run: |
+          mkdir -p /tmp/nerv-specs-plain
+          cargo run --release -p nerv-engine --bin build-specs -- \
+            --input crates/nerv-engine/tests/fixtures/specs/ \
+            --output /tmp/nerv-specs-plain/
+          ls -la /tmp/nerv-specs-plain/
+          test -f /tmp/nerv-specs-plain/git.json
+      - name: build-specs gzip (--compress)
+        run: |
+          mkdir -p /tmp/nerv-specs-gz
+          cargo run --release -p nerv-engine --bin build-specs -- \
+            --input crates/nerv-engine/tests/fixtures/specs/ \
+            --output /tmp/nerv-specs-gz/ \
+            --compress
+          ls -la /tmp/nerv-specs-gz/
+          test -f /tmp/nerv-specs-gz/git.json.gz
+
+  ts-to-json:
+    name: ts-to-json (bun convert sample)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: install deps
+        working-directory: tools/ts-to-json
+        run: bun install --frozen-lockfile
+      - name: convert single spec (hostname.ts smoke)
+        working-directory: tools/ts-to-json
+        run: |
+          bun run convert:one
+          test -s /tmp/hostname.json
+          # Sanity: output is valid JSON with a name field
+          bun -e 'const j = JSON.parse(await Bun.file("/tmp/hostname.json").text()); if (!j.name) process.exit(1);'
 
   # Future: e2e job (M1 6주차 onward) — runs zsh + tmux scenarios via expectrl.
   # Future: spec regression job (M1) — checks Tier distribution.
