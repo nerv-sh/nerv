@@ -46,20 +46,35 @@
 - ✅ **SpecRegistry lazy load + mtime 기반 hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. negative cache + mtime check (~1µs/lookup overhead) — spec 재설치 시 daemon 재시작 불필요.
 - ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
 - ✅ **Tier B generator 실행**: 정적 shell command (예: `git branch --list`) → Rust 가 직접 spawn (200ms timeout) + TTL 5s LRU 64 cache (keystroke 마다 spawn 방지) + ANSI/git-marker line sanitization. Tier C (closure) 는 deno_core 비목표 정책 + closure JSON 직렬화 불가로 영구 defer.
-- ✅ **well-known Tier C → B 회복**: `Generator::PackageJsonScripts` 신규 변형. ts-to-json 이 `["bash","-c","...cat package.json"]` 시그니처 감지 → Rust 가 walk-up + `serde_json` 파싱 + scripts 키 emit. **npm/yarn/pnpm/bun/rushx/nr 6 spec** 자동 회복 (mtime cache 포함).
+- ✅ **well-known Tier C → B 회복** (signature-based recognizer 5종):
+  - `Generator::PackageJsonScripts` — npm/yarn/pnpm/bun/rushx/nr 6 spec. walk-up + JSON 파싱 + scripts 키.
+  - `Generator::Filepaths { folders_only }` — cd/cat/ls/59 spec. `ls -1ApL` closure 시그니처 감지. cwd-aware + dotfile 제외.
+  - `Generator::ZoxideQuery` — z/zoxide 2 spec. zoxide 우선, `~/.z` 폴백 (zsh-z 포맷). fuzzy substring (path+name).
+  - **aggressive script-fn 회복** — function-form script 를 stub context 로 호출 → returns string[] 면 Template 으로 강제. **kubectl 27 / docker 117 / docker-compose 23 / gh 23 / aws 1006 generator** 회복.
+  - **JSON output 자동 추출** — `gh --json=…` / `kubectl get -o json` 등 JSON 결과를 array-of-objects 로 읽고 `name/number/id/title/key/metadata.name` 우선 필드 추출.
 - ✅ **yarn-shorthand**: root args generator 를 subcommand emit 에 머지. `yarn web<Tab>` → `web:start/web:build:dev/...` (package.json scripts) + `yarn add` 같은 실제 subcommand 도 유지. additive merge + dedupe.
 - ✅ **cwd-aware IPC**: `Request::Complete.cwd: Option<String>` 추가. CLI bridge 가 `std::env::current_dir()` 채움. 데몬은 자기 cwd 대신 클라이언트 cwd 사용. `cd` 마다 daemon 재시작 불필요.
 - ✅ **UTF-8 char boundary 클램프**: `cursor` 가 multibyte (한글/CJK/emoji) 중간에 떨어질 때 `clamp_cursor_to_char_boundary` 로 직전 boundary 까지 감소. `'ㅊㅇ .'` 입력 시 패닉 → empty 응답.
+- ✅ **inline ghost text**: top 제안 trailing 부분을 `POSTDISPLAY` 에 dim grey 로 표시. Right-arrow (line 끝일 때만) 로 accept. LBUFFER 끝이 공백이거나 prefix 비면 ghost off — "토큰 타이핑 중" 시그널 일치.
+- ✅ **frecency ranking**: per-spec usage TSV (`~/Library/Caches/nerv/frecency.tsv`). 데몬이 `Request::RecordAccept` 받아 in-memory + opportunistic flush. score = `(count-1) / (1+age_days)` — single pick = no boost, 2+ picks 부터. daemon post-sort 가 alpha 결과를 boost-first 로 재정렬. `NERV_FRECENCY_FILE=-` 로 테스트 격리.
 - ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지 (E5 manifest 도입 후)
-- ✅ widget UX: popup auto-size + description 잘림 수정
+- ✅ **widget UX**: sliding window (`MAX_VIS = min(LINES-6, 10)`), footer 카운터 `[k/total]` 항상 표시, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow 모두 wrap-cycle, precmd 에서 self-insert/accept-line/backward-delete/space 재바인딩 (Q/oh-my-zsh/fzf-tab hijack 방지), description 매행 → footer 단일 라인 (Fig style).
 - ✅ SIGPIPE → SIG_DFL: `nerv spec list | head` panic 제거
-- ✅ **CI 확장**: rust 1.85 핀 + `build-specs-smoke` (plain+gzip vs 9 fixture) + `ts-to-json` (bun convert:one + JSON sanity) job 추가
+- ✅ **CI 확장**: rust 1.85 핀 + `brew install protobuf` (nerv-proto build.rs 회피) + `build-specs-smoke` (plain+gzip vs 9 fixture) + `ts-to-json` (bun convert:one + JSON sanity) job. **ARM64-only** 매트릭스 (macos-13 queue 너무 길어서 drop).
+- ✅ **release.yml 워크플로**: `v*.*.*` tag push → macos-14 빌드 + tarball (sha256) + GitHub Release 생성. `gh release create … --clobber` 로 idempotent.
+- ✅ **e2e-isolated.sh 스모크 하네스**: `scripts/e2e-isolated.sh` 가 격리 `/tmp/nerv-test/.zshrc` 로 새 zsh 진입. Q/oh-my-zsh 등 영향 zero. 매번 무조건 rebuild + spec install + daemon 재시작.
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
-- M1 본격: rquickjs Tier C 는 영구 deferred (closure 미직렬화); 남은 항목은 E5 manifest, inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요), 추가 well-known 회복 (예: docker container 목록, gh repo 목록)
+- Homebrew tap (`nerv-sh/homebrew-tap` repo + Formula)
+- aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
+- bash / fish 지원 (큼)
+- Linux / Windows 지원 (큼)
+- figterm PTY shim opt-in (`NERV_PTY=1`)
+- E5 manifest, inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
+- smart description fallback (cd/z 같은 desc 없는 spec footer 에 file count 등 보조 정보)
 
 ## 4. 절대 깨면 안 되는 불변식
 
@@ -72,6 +87,7 @@
 | 마커 블록 | `# >>> nerv >>>` ~ `# <<< nerv <<<` 는 **고정 문자열**. `fig_integrations` 흡수 시 marker 교체 필수 (Q 의 `# Fig pre block` 잔존 금지) | uninstall-spec §3 / `nerv-shell::MARKER_*` |
 | 경로 | `~/Library/Caches/nerv/`, `~/Library/Logs/nerv/`, `~/.config/nerv/` — `directories` 크레이트 사용 X (docs 가 contract). `fig_util` / `fig_log` / `fig_settings` 흡수 시 Q 기본 경로 (`~/.config/q/`, `~/Library/Caches/amzn/`) 전부 nerv 경로로 재배선 | uninstall-spec §2 / `nerv-engine/src/paths.rs` |
 | ANSI | alternate screen 진입 X, true color X, OSC 8/52 X — raw cursor save/restore + line clearing 만. **`fig_desktop` webview UI 흡수 금지** | terminal-compat §3 / §6 |
+| Popup 렌더 | `zle -R "" "${plain[@]}"` 로 공간 reserve + `printf '\e7…\e8'` 로 colored overlay. **`zle -R "" "${colored[@]}"` 금지** (zle 가 ANSI escape 해석 X — literal `^[[…m` 출력). MAX_VIS 은 `LINES-6` 으로 clamp (popup 화면 넘어가면 save/restore 깨짐) | `shell-integrations/zsh/_nerv.zsh` |
 | 에러 톤 | `[nerv] <문제> — <조치>` 영문 한 줄, 사과/완곡어구 금지, 회색만 사용 | error-states §4 |
 | CLI 표면 | v1.0 명령은 5개 (`init / doctor / start / stop / spec list / uninstall`) — 추가 금지. `q_cli` 흡수 금지 (chat/login/translate 잔존 금지) | PLAN §9 |
 | 비목표 | AI / 텔레메트리 / 자체업데이트 / `nerv config` / `spec list --changes` 코드 자체를 두지 않음. **흡수 시 `fig_api_client`/`fig_auth`/`fig_telemetry*`/`amzn-*`/`semantic_search_client` 의존 0** | PLAN §4 비목표 |
@@ -130,6 +146,19 @@ cargo run -p nerv-engine --bin build-specs -- \
 # Latency bench (M0-7 acceptance)
 cargo test --release -p nerv-daemon --test bench_latency \
     -- --ignored --nocapture
+
+# 격리 e2e 스모크 (Q/oh-my-zsh 등 영향 zero, /tmp/nerv-test ZDOTDIR)
+./scripts/e2e-isolated.sh                       # 빌드 + spec install + 데몬 + 격리 zsh
+NERV_SKIP_BUILD=1 ./scripts/e2e-isolated.sh    # 빌드 건너뛰기
+NERV_SKIP_SPECS=1 ./scripts/e2e-isolated.sh    # spec install 건너뛰기
+
+# Release tag (자동 빌드 + GitHub Release 생성, ARM-only)
+git tag -a v0.1.0-alpha.N -m "v0.1.0-alpha.N"
+git push origin v0.1.0-alpha.N                 # → release.yml 트리거
+
+# Frecency 디버그 (NERV_FRECENCY_FILE=- 로 테스트 격리)
+NERV_FRECENCY_FILE=- cargo test --workspace
+cat ~/Library/Caches/nerv/frecency.tsv         # spec\tinsertion\tcount\tunix
 
 # 흡수 crate 추출 (M0-2)
 git subtree add --prefix vendor/aws-autocomplete \

@@ -318,7 +318,24 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 
 **M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
 
-**현재 상태 (2026-05-26)**: 1-7 완료. 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 통과, hand-rolled fixture 9종 + 43 integration test. CLI 5/5 완성. **TS→JSON 변환 + loadSpec depth=1 동작** (715 spec, 440 Tier A / 6 B / 246 C, `aws ec2 <verb>` 등 nested 커버). **SpecRegistry lazy + mtime hot-reload + gzip 압축 (10×)** — daemon 즉시 기동, spec 재설치 시 재시작 불필요, 10MB 풀세트 디스크. **Tier B generator 실행** — 정적 shell command spawn (`git branch --list` 등) + TTL 5s LRU 64 cache + ANSI/git-marker line sanitization. **well-known Tier C 회복** — `Generator::PackageJsonScripts` (npm/yarn/pnpm/bun/rushx/nr 6 spec) Rust-native 추출, mtime 캐시, yarn-shorthand (root args generator 머지) 포함. **cwd-aware IPC** (`Request::Complete.cwd`) — `cd` 시 daemon 재시작 불필요. **UTF-8 char boundary 클램프** — 한글/CJK/emoji 입력 panic 방지. 에러 UX E1-E4 구현. **CI 확장** — rust 1.85 핀 + build-specs-smoke + ts-to-json bun job. Rquickjs Tier C 는 closure JSON 미직렬화로 영구 deferred (Fig 원본 closure body 가 vendored TS 안에만 존재; PRD §0.2 의 deno_core 금지와 정합). M1 0-10주차 작업 대부분 선행 완료 — figterm opt-in (M1 5-10주차) + 서명/공증 인프라 (M0-8) 만 남음.
+**현재 상태 (2026-05-26 evening / `v0.1.0-alpha.2` tag)**: M0 1-7 완료, 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 통과, hand-rolled fixture 9종 + 43 integration test + 453 workspace test. CLI 5/5 완성.
+
+- **TS→JSON 변환 + loadSpec depth=1** (715 spec, `aws ec2 <verb>` 등 nested 커버)
+- **SpecRegistry lazy + mtime hot-reload + gzip 압축 (10×)** — daemon 즉시 기동, 10MB 풀세트
+- **Tier B 실행** — script spawn + TTL 5s LRU 64 cache + ANSI/git-marker sanitization
+- **well-known Tier C 회복 5종** — PackageJsonScripts (npm/yarn/pnpm/bun/rushx/nr) + Filepaths (cd/cat/ls/59 spec, folders_only 감지) + ZoxideQuery (z/zoxide, `~/.z` 폴백 + fuzzy substring) + aggressive script-fn 회복 (function-form script stub call → **aws 1006 / docker 117 / docker-compose 23 / kubectl 27 / gh 23 generator** 회복) + JSON output 자동 추출 (`gh --json`, `kubectl -o json` 등)
+- **yarn-shorthand** — root args generator subcommand emit 머지 (additive + dedupe)
+- **inline ghost text** — `POSTDISPLAY` dim grey, Right-arrow accept (line 끝일 때), 토큰 타이핑 중일 때만 표시
+- **frecency ranking** — per-spec TSV, count>=2 부터 boost, time decay, daemon post-sort
+- **cwd-aware IPC** — `cd` 시 daemon 재시작 불필요
+- **UTF-8 char boundary 클램프** — 한글/CJK/emoji 입력 panic 방지
+- **widget UX** — sliding window (`MAX_VIS=min(LINES-6,10)`), footer `[k/total]` 항상, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow wrap-cycle, precmd 재바인딩 (Q hijack 방지), description 매행 → footer 단일 라인 (Fig style)
+- **에러 UX E1-E4 구현**
+- **CI** — rust 1.85 핀 + protoc preinstall + build-specs-smoke + ts-to-json bun job + **ARM64-only** (Intel queue 너무 길어 drop)
+- **release.yml** — `v*.*.*` tag push → macos-14 빌드 + tarball + sha256 + GitHub Release 자동 생성
+- **e2e-isolated.sh 스모크 하네스** — 격리 `/tmp/nerv-test/.zshrc` zsh 진입
+
+Rquickjs Tier C 는 closure JSON 미직렬화 + deno_core 금지 정책으로 영구 deferred. M1 0-10주차 작업 대부분 선행 완료 — figterm opt-in (M1 5-10주차) + 서명/공증 인프라 (M0-8) + Homebrew tap 만 남음.
 
 **M0-2 Fig 흡수 결과 의사결정 트리**:
 
