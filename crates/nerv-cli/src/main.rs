@@ -707,6 +707,7 @@ fn upgrade_tier<'a>(current: char, gens: impl IntoIterator<Item = &'a Generator>
             // recovered to Tier B by a native Rust path (see complete.rs).
             Generator::PackageJsonScripts => 'B',
             Generator::Filepaths { .. } => 'B',
+            Generator::ZoxideQuery => 'B',
             Generator::Script { .. } | Generator::Custom { .. } => 'C',
         };
         if (g_tier == 'B' && t == 'A') || g_tier == 'C' {

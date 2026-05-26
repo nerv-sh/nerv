@@ -162,6 +162,11 @@ pub enum Generator {
         #[serde(default)]
         folders_only: bool,
     },
+    /// Well-known: zoxide directory history (`z`, `zoxide` specs).
+    /// The Rust engine runs `zoxide query --list --score` and parses
+    /// scored entries — closures in Fig's spec post-process the same
+    /// list, but the underlying command is fixed.
+    ZoxideQuery,
 }
 
 // ---------------------------------------------------------------------------

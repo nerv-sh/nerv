@@ -522,6 +522,20 @@ fn emit_arg_candidates(
                         }));
                     }
                 }
+                crate::spec_parser::Generator::ZoxideQuery => {
+                    if let Some(rows) = zoxide_query() {
+                        out.extend(
+                            rows.into_iter()
+                                .filter(|(name, _, _)| name.starts_with(prefix))
+                                .map(|(name, path, score)| Suggestion {
+                                    insertion: name.clone(),
+                                    display: name,
+                                    description: Some(format!("{path} (score {score:.1})")),
+                                    kind: SuggestionKind::Argument,
+                                }),
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -678,6 +692,89 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
         c -= 1;
     }
     c
+}
+
+// ---------------------------------------------------------------------------
+// Well-known generator: zoxide directory history (z, zoxide)
+// ---------------------------------------------------------------------------
+
+/// Resolve the zoxide / zsh-z directory history. Tries `zoxide query
+/// --list --score` first (200ms cap, cached); on failure falls back
+/// to the zsh-z `~/.z` flat file (or `$_Z_DATA` / `$ZSHZ_DATA` env
+/// override). Returns `(folder_name, full_path, score)` tuples
+/// sorted by descending score. The folder_name is the last path
+/// segment — what the user usually wants to insert.
+fn zoxide_query() -> Option<Vec<(String, String, f64)>> {
+    if let Some(rows) = zoxide_via_command() {
+        if !rows.is_empty() {
+            return Some(sorted_by_score(rows));
+        }
+    }
+    zoxide_via_z_file().map(sorted_by_score)
+}
+
+fn zoxide_via_command() -> Option<Vec<(String, String, f64)>> {
+    let key = vec![
+        "zoxide".to_string(),
+        "query".to_string(),
+        "--list".to_string(),
+        "--score".to_string(),
+    ];
+    let lines = cached_template_generator(&key)?;
+    let mut rows: Vec<(String, String, f64)> = Vec::new();
+    for line in lines {
+        // Each line: "<spaces><score> <path>".
+        let trimmed = line.trim_start();
+        let mut split = trimmed.splitn(2, char::is_whitespace);
+        let score_str = split.next()?;
+        let path = split.next()?.trim().to_string();
+        let score: f64 = score_str.parse().ok()?;
+        rows.push((folder_name(&path), path, score));
+    }
+    Some(rows)
+}
+
+fn zoxide_via_z_file() -> Option<Vec<(String, String, f64)>> {
+    let path = z_history_file()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let mut rows: Vec<(String, String, f64)> = Vec::new();
+    for line in raw.lines() {
+        // zsh-z / z.sh format: "<path>|<score>|<unixtime>".
+        let mut parts = line.splitn(3, '|');
+        let p = parts.next()?.trim().to_string();
+        let s = parts.next()?.trim();
+        let score: f64 = s.parse().ok()?;
+        rows.push((folder_name(&p), p, score));
+    }
+    Some(rows)
+}
+
+fn z_history_file() -> Option<std::path::PathBuf> {
+    if let Ok(v) = std::env::var("ZSHZ_DATA") {
+        if !v.is_empty() {
+            return Some(std::path::PathBuf::from(v));
+        }
+    }
+    if let Ok(v) = std::env::var("_Z_DATA") {
+        if !v.is_empty() {
+            return Some(std::path::PathBuf::from(v));
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    let candidate = std::path::PathBuf::from(home).join(".z");
+    candidate.exists().then_some(candidate)
+}
+
+fn folder_name(path: &str) -> String {
+    path.rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn sorted_by_score(mut rows: Vec<(String, String, f64)>) -> Vec<(String, String, f64)> {
+    rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    rows
 }
 
 // ---------------------------------------------------------------------------
