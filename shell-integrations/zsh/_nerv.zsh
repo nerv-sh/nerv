@@ -131,13 +131,12 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}├${hbar}┤${R}")
 
-  # Footer: " desc … [n/total]" — right-side counter shows the
-  # current position within the full list so users know there's
-  # more below / above when the window is sliding.
-  # Content inside `│...│` must equal W-2 cells (matches the
-  # body rows above). Layout: " " + desc + pad + counter + " ".
-  local counter=""
-  (( total > visible )) && counter="[${__NERV_SELECTED}/${total}]"
+  # Footer: " desc … [n/total]" — right-side counter ALWAYS shown
+  # so users can see Tab cycle progression at a glance, even when
+  # the whole list fits in one window. Layout inside `│...│` must
+  # equal W-2 cells (matches the body rows above):
+  # " " + desc + pad + counter + " ".
+  local counter="[${__NERV_SELECTED}/${total}]"
   # Reserve cells for: leading " ", trailing " ", counter.
   local sel_avail=$(( W - 4 - ${#counter} ))
   (( sel_avail < 0 )) && sel_avail=0
@@ -271,14 +270,24 @@ __nerv_complete() {
 # Set POSTDISPLAY to the trailing portion of the top suggestion that
 # the user hasn't typed yet. Accepted with Right-Arrow at end of
 # buffer. Cleared on every other widget that mutates the buffer.
+#
+# Only shown when the user is actively mid-token (LBUFFER doesn't end
+# in whitespace). Browsing the popup right after typing a space (e.g.
+# `cd ` then looking at all folders) shouldn't smear a stray
+# suggestion onto the cursor line — that looks like the cursor
+# teleported into a new word.
 __nerv_set_ghost() {
   POSTDISPLAY=''
   (( ${#__NERV_ITEMS} == 0 )) && return
+  # Bail when nothing typed yet for the current word — keeps the
+  # prompt line quiet while the user surveys the popup.
+  [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' ]] && return
   local top="${__NERV_ITEMS[1]}"
   local top_ins="${top%%	*}"
   [[ -z "$top_ins" ]] && return
   # Current word = last whitespace-separated token of LBUFFER.
   local prefix="${LBUFFER##* }"
+  [[ -z "$prefix" ]] && return
   # Ghost only when top insertion extends the current word — never
   # for sideways matches (alias completions, fuzzy-style hits).
   [[ "$top_ins" == "$prefix"* ]] || return
