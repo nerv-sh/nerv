@@ -109,6 +109,7 @@ async fn roundtrip(sock_path: &std::path::Path) {
     let req = Request::Complete {
         line: "git commit --".to_string(),
         cursor: 13,
+        cwd: None,
     };
     let mut json = serde_json::to_string(&req).unwrap();
     json.push('\n');

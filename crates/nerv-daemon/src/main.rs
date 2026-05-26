@@ -12,7 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{Request, Response, SpecRegistry, complete, paths};
+use nerv_engine::{Request, Response, SpecRegistry, complete_in, paths};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
@@ -95,7 +95,9 @@ async fn handle_connection(stream: tokio::net::UnixStream, registry: Arc<SpecReg
             Ok(Request::Ping) => Response::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
-            Ok(Request::Complete { line, cursor }) => engine_complete(&registry, &line, cursor),
+            Ok(Request::Complete { line, cursor, cwd }) => {
+                engine_complete(&registry, &line, cursor, cwd.as_deref())
+            }
             Ok(Request::DoctorAutorun) => Response::Empty {
                 reason: Some("doctor-autorun-stub".to_string()),
             },
@@ -115,8 +117,14 @@ async fn handle_connection(stream: tokio::net::UnixStream, registry: Arc<SpecReg
 }
 
 /// Dispatch a Complete request through the real engine pipeline.
-fn engine_complete(registry: &SpecRegistry, line: &str, cursor: usize) -> Response {
-    let result = complete(line, cursor, registry);
+fn engine_complete(
+    registry: &SpecRegistry,
+    line: &str,
+    cursor: usize,
+    cwd: Option<&str>,
+) -> Response {
+    let cwd_path = cwd.map(std::path::Path::new);
+    let result = complete_in(line, cursor, registry, cwd_path);
     if result.items.is_empty() {
         return Response::Empty {
             reason: result.reason,

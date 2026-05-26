@@ -147,6 +147,12 @@ pub enum Generator {
     /// `generator.custom!(tokens, executeCommand, ctx)` — pure JS
     /// closure that returns candidates. Tier C — deferred to M1.
     Custom { description_hint: Option<String> },
+    /// Well-known: `npmScriptsGenerator` from `@withfig/autocomplete`.
+    /// Reused by npm / yarn / pnpm / bun / rushx / nr specs. The Rust
+    /// engine walks up from the CWD to the nearest `package.json`,
+    /// parses it, and emits the `scripts` keys as completions —
+    /// avoiding the postProcess closure (which is otherwise Tier C).
+    PackageJsonScripts,
 }
 
 // ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ pub mod spec;
 pub mod spec_loader;
 pub mod spec_parser;
 
-pub use complete::{CompleteResult, SpecRegistry, complete};
+pub use complete::{CompleteResult, SpecRegistry, complete, complete_in};
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
 pub use parser::{Position, Token};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};

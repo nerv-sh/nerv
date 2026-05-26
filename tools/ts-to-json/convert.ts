@@ -92,7 +92,8 @@ type NervSpec = {
 type NervGenerator =
   | { type: "template"; script: string[] }
   | { type: "script"; script: string[]; has_post_process: boolean }
-  | { type: "custom"; description_hint: string | null };
+  | { type: "custom"; description_hint: string | null }
+  | { type: "package_json_scripts" };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -160,6 +161,13 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
         ? splitShellCommand(g.script)
         : [];
     if (typeof g.postProcess === "function") {
+      // Well-known: `npmScriptsGenerator` (`cat package.json` + JSON.parse
+      // closure). Reused by npm/yarn/pnpm/bun/rushx/nr. Engine knows how
+      // to do this natively, so emit a tagged variant instead of dropping
+      // the postProcess into Tier C.
+      if (isPackageJsonScriptsSignature(scriptArr)) {
+        return { type: "package_json_scripts" };
+      }
       return {
         type: "script",
         script: scriptArr,
@@ -178,6 +186,20 @@ const splitShellCommand = (cmd: string): string[] =>
   cmd
     .split(/\s+/)
     .filter((s) => s.length > 0);
+
+/**
+ * Recognise the npmScriptsGenerator signature emitted by
+ * `@withfig/autocomplete`'s npm/yarn/pnpm/bun/rushx/nr specs. The shape
+ * is exactly `["bash","-c", "... cat package.json"]` where the inner
+ * shell command walks the cwd upward until it finds a package.json.
+ */
+const isPackageJsonScriptsSignature = (script: string[]): boolean => {
+  if (script.length !== 3) return false;
+  if (script[0] !== "bash" && script[0] !== "sh") return false;
+  if (script[1] !== "-c") return false;
+  const cmd = script[2];
+  return cmd.includes("package.json") && cmd.includes("cat ");
+};
 
 const convertArg = (a: FigArg): NervArg => {
   const names = namesOf(a.name);
