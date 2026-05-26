@@ -260,7 +260,20 @@ pub struct CompleteResult {
 
 /// Run the full pipeline against `line` + `cursor` byte offset.
 pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteResult {
-    let cursor = cursor.min(line.len());
+    complete_in(line, cursor, registry, None)
+}
+
+/// Same as [`complete`], but uses `cwd` as the working-directory
+/// context for filesystem-aware generators (e.g.
+/// [`Generator::PackageJsonScripts`]). When `cwd` is `None`, falls
+/// back to the daemon process's `current_dir()`.
+pub fn complete_in(
+    line: &str,
+    cursor: usize,
+    registry: &SpecRegistry,
+    cwd: Option<&std::path::Path>,
+) -> CompleteResult {
+    let cursor = clamp_cursor_to_char_boundary(line, cursor);
     let tokens = tokenize(&line[..cursor]);
 
     if tokens.is_empty() {
@@ -310,7 +323,7 @@ pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteR
         match result.cursor_context {
             CursorContext::Subcommand => emit_subcommands(current, &prefix),
             CursorContext::OptionName => emit_options(current, &prefix),
-            CursorContext::Arg => emit_arg_candidates(current, &prefix),
+            CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd),
             CursorContext::Done => vec![],
         }
     };
@@ -414,7 +427,11 @@ fn emit_options(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
     out
 }
 
-fn emit_arg_candidates(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
+fn emit_arg_candidates(
+    node: &Subcommand,
+    prefix: &str,
+    cwd: Option<&std::path::Path>,
+) -> Vec<Suggestion> {
     let Some(arg) = node.args.first() else {
         return vec![];
     };
@@ -437,20 +454,35 @@ fn emit_arg_candidates(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
     // sandboxed environments).
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
         for g in &arg.generators {
-            if let crate::spec_parser::Generator::Template { script } = g {
-                if let Some(lines) = cached_template_generator(script) {
-                    out.extend(
-                        lines
-                            .into_iter()
-                            .filter(|s| s.starts_with(prefix))
-                            .map(|line| Suggestion {
+            match g {
+                crate::spec_parser::Generator::Template { script } => {
+                    if let Some(lines) = cached_template_generator(script) {
+                        out.extend(lines.into_iter().filter(|s| s.starts_with(prefix)).map(
+                            |line| Suggestion {
                                 insertion: line.clone(),
                                 display: line,
                                 description: None,
                                 kind: SuggestionKind::Argument,
-                            }),
-                    );
+                            },
+                        ));
+                    }
                 }
+                crate::spec_parser::Generator::PackageJsonScripts => {
+                    if let Some(scripts) = package_json_scripts(cwd) {
+                        out.extend(
+                            scripts
+                                .into_iter()
+                                .filter(|(name, _)| name.starts_with(prefix))
+                                .map(|(name, cmd)| Suggestion {
+                                    insertion: name.clone(),
+                                    display: name,
+                                    description: Some(cmd),
+                                    kind: SuggestionKind::Argument,
+                                }),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -549,6 +581,74 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .collect();
     Some(lines)
+}
+
+// ---------------------------------------------------------------------------
+// Well-known generator: package.json scripts (npm/yarn/pnpm/bun/rushx/nr)
+// ---------------------------------------------------------------------------
+
+type PackageJsonCacheMap =
+    HashMap<std::path::PathBuf, (std::time::SystemTime, Vec<(String, String)>)>;
+
+static PACKAGE_JSON_CACHE: std::sync::LazyLock<std::sync::Mutex<PackageJsonCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Walk up from CWD until a `package.json` is found, parse it, and
+/// return its `scripts` entries as `(name, command)`. Cached per file
+/// path keyed on mtime — re-parse only when the file is rewritten.
+fn package_json_scripts(cwd: Option<&std::path::Path>) -> Option<Vec<(String, String)>> {
+    if let Some(p) = cwd {
+        return package_json_scripts_in(p);
+    }
+    let fallback = std::env::current_dir().ok()?;
+    package_json_scripts_in(&fallback)
+}
+
+fn package_json_scripts_in(start: &std::path::Path) -> Option<Vec<(String, String)>> {
+    let path = find_package_json(start)?;
+    let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
+    if let Ok(cache) = PACKAGE_JSON_CACHE.lock() {
+        if let Some((stamp, scripts)) = cache.get(&path) {
+            if *stamp == mtime {
+                return Some(scripts.clone());
+            }
+        }
+    }
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let scripts_obj = v.get("scripts")?.as_object()?;
+    let mut scripts: Vec<(String, String)> = scripts_obj
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+        .collect();
+    scripts.sort_by(|a, b| a.0.cmp(&b.0));
+    if let Ok(mut cache) = PACKAGE_JSON_CACHE.lock() {
+        cache.insert(path, (mtime, scripts.clone()));
+    }
+    Some(scripts)
+}
+
+/// Clamp `cursor` down to the nearest valid UTF-8 char boundary at or
+/// before the requested byte offset. Prevents the `byte index is not
+/// a char boundary` panic when zsh hands us a `$CURSOR` that lands
+/// mid-glyph (e.g. Hangul / emoji / CJK input).
+fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
+    let mut c = cursor.min(line.len());
+    while c > 0 && !line.is_char_boundary(c) {
+        c -= 1;
+    }
+    c
+}
+
+fn find_package_json(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut cur = start;
+    loop {
+        let candidate = cur.join("package.json");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        cur = cur.parent()?;
+    }
 }
 
 /// Trim shell-list cosmetics from a generator output line.
@@ -822,6 +922,28 @@ mod tests {
         let r = complete("x feat", 6, &registry_with(spec));
         let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(names, ["feature-a", "feature-b"]);
+    }
+
+    #[test]
+    fn package_json_scripts_walks_up_and_parses() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-pkg-{}", std::process::id()));
+        let nested = tmp.join("a/b/c");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            tmp.join("package.json"),
+            r#"{"name":"x","scripts":{"build":"tsc","test":"vitest","dev":"vite"}}"#,
+        )
+        .unwrap();
+
+        let scripts = package_json_scripts_in(&nested).expect("scripts");
+        let names: Vec<&str> = scripts.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["build", "dev", "test"]);
+        let test_cmd = scripts.iter().find(|(n, _)| n == "test").unwrap();
+        assert_eq!(test_cmd.1, "vitest");
+
+        fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
