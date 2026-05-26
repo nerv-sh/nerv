@@ -217,10 +217,15 @@ __nerv_line_finish() {
 zle -N accept-line __nerv_line_finish
 
 # Tab: cycle DOWN through popup items (Fig-style). Enter accepts.
-# When no popup is active, defer to zsh's expand-or-complete (the
-# user's normal Tab behavior is preserved outside Nerv's UX).
+# Single-item popup short-circuits — cycling 1→1 is useless, so we
+# insert immediately (the user clearly wants that one suggestion).
+# Outside popup: defer to zsh's expand-or-complete.
 __nerv_accept() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+    if (( ${#__NERV_ITEMS} == 1 )); then
+      __nerv_insert_selected
+      return
+    fi
     local max=${#__NERV_ITEMS}; (( max > 5 )) && max=5
     if (( __NERV_SELECTED < max )); then
       (( __NERV_SELECTED++ ))
