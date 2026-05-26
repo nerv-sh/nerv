@@ -46,15 +46,20 @@
 - ✅ **SpecRegistry lazy load + mtime 기반 hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. negative cache + mtime check (~1µs/lookup overhead) — spec 재설치 시 daemon 재시작 불필요.
 - ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
 - ✅ **Tier B generator 실행**: 정적 shell command (예: `git branch --list`) → Rust 가 직접 spawn (200ms timeout) + TTL 5s LRU 64 cache (keystroke 마다 spawn 방지) + ANSI/git-marker line sanitization. Tier C (closure) 는 deno_core 비목표 정책 + closure JSON 직렬화 불가로 영구 defer.
+- ✅ **well-known Tier C → B 회복**: `Generator::PackageJsonScripts` 신규 변형. ts-to-json 이 `["bash","-c","...cat package.json"]` 시그니처 감지 → Rust 가 walk-up + `serde_json` 파싱 + scripts 키 emit. **npm/yarn/pnpm/bun/rushx/nr 6 spec** 자동 회복 (mtime cache 포함).
+- ✅ **yarn-shorthand**: root args generator 를 subcommand emit 에 머지. `yarn web<Tab>` → `web:start/web:build:dev/...` (package.json scripts) + `yarn add` 같은 실제 subcommand 도 유지. additive merge + dedupe.
+- ✅ **cwd-aware IPC**: `Request::Complete.cwd: Option<String>` 추가. CLI bridge 가 `std::env::current_dir()` 채움. 데몬은 자기 cwd 대신 클라이언트 cwd 사용. `cd` 마다 daemon 재시작 불필요.
+- ✅ **UTF-8 char boundary 클램프**: `cursor` 가 multibyte (한글/CJK/emoji) 중간에 떨어질 때 `clamp_cursor_to_char_boundary` 로 직전 boundary 까지 감소. `'ㅊㅇ .'` 입력 시 패닉 → empty 응답.
 - ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지 (E5 manifest 도입 후)
 - ✅ widget UX: popup auto-size + description 잘림 수정
 - ✅ SIGPIPE → SIG_DFL: `nerv spec list | head` panic 제거
+- ✅ **CI 확장**: rust 1.85 핀 + `build-specs-smoke` (plain+gzip vs 9 fixture) + `ts-to-json` (bun convert:one + JSON sanity) job 추가
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
-- M1 본격: rquickjs Tier C 는 영구 deferred (closure 미직렬화); 남은 항목은 E5 manifest, CI workflow (bun + cargo), inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
+- M1 본격: rquickjs Tier C 는 영구 deferred (closure 미직렬화); 남은 항목은 E5 manifest, inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요), 추가 well-known 회복 (예: docker container 목록, gh repo 목록)
 
 ## 4. 절대 깨면 안 되는 불변식
 
@@ -70,7 +75,9 @@
 | 에러 톤 | `[nerv] <문제> — <조치>` 영문 한 줄, 사과/완곡어구 금지, 회색만 사용 | error-states §4 |
 | CLI 표면 | v1.0 명령은 5개 (`init / doctor / start / stop / spec list / uninstall`) — 추가 금지. `q_cli` 흡수 금지 (chat/login/translate 잔존 금지) | PLAN §9 |
 | 비목표 | AI / 텔레메트리 / 자체업데이트 / `nerv config` / `spec list --changes` 코드 자체를 두지 않음. **흡수 시 `fig_api_client`/`fig_auth`/`fig_telemetry*`/`amzn-*`/`semantic_search_client` 의존 0** | PLAN §4 비목표 |
-| JS 엔진 | **deno_core 임베드 금지**. Tier C 회복은 M1 = `rquickjs` (~1 MB) opt-in 만 | PLAN §0.2 / §7 |
+| JS 엔진 | **deno_core 임베드 금지**. Tier C 회복은 M1 = `rquickjs` (~1 MB) opt-in 만. **well-known 패턴은 Rust-native 회복 OK** (예: `Generator::PackageJsonScripts` — npm scripts 추출은 closure 우회) | PLAN §0.2 / §7 |
+| IPC cwd | `Request::Complete.cwd` 는 **클라이언트(쉘) 의 CWD**. 데몬 process cwd 사용 금지 (`std::env::current_dir()` 데몬 측 호출은 fallback 만). CLI bridge 가 채워야 함 | `nerv-engine/src/ipc.rs::Request::Complete` |
+| UTF-8 | 멀티바이트 입력 (한글/CJK/emoji) 으로 `cursor` 가 char 중간에 떨어질 수 있음 → **`clamp_cursor_to_char_boundary` 필수**. `&line[..cursor]` 직접 슬라이스 금지 | `nerv-engine/src/complete.rs` |
 | PTY shim | `figterm` (`nerv-pty`) 는 **M1 opt-in only**. M0 ZLE widget 과 상호 배타. `NERV_PTY=1` 환경변수로 분기 | PLAN §5.8 / §6.2 |
 | Rust | toolchain 1.85, **edition 2024** (upstream 정합). v0.5.1 의 edition 2021 폐기. 변경 시 PLAN §7 + `rust-toolchain.toml` + 본 §4 동시 갱신 | `rust-toolchain.toml` |
 | vendor 편집 | `vendor/withfig-autocomplete/` 와 `vendor/aws-autocomplete/` **양쪽 모두 직접 편집 금지**. 변경은 `vendor-patches/{upstream,self}/` 또는 upstream PR | spec-conversion-policy §5.2 |
