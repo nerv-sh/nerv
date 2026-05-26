@@ -629,6 +629,16 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
+    // Bail early on JSON-ish payloads — `gh repo list --json=...` and
+    // friends emit a single-line array that we have no way to render
+    // sensibly as raw candidates. The original Fig spec had a
+    // postProcess hook that picked fields out; until we recover that
+    // path, returning None looks better than dumping JSON noise.
+    if let Some(first) = text.trim_start().chars().next() {
+        if first == '[' || first == '{' {
+            return None;
+        }
+    }
     let lines: Vec<String> = text
         .lines()
         .map(sanitize_generator_line)

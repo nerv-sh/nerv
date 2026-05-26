@@ -14,6 +14,7 @@ macro_rules! ref_tests {
     ($($name:ident)*) => {
         $(
             #[test]
+            #[ignore = "alacritty ref fixtures gitignored (44 MB); run with --ignored after copying from upstream"]
             fn $name() {
                 let test_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/ref"));
                 let test_path = test_dir.join(stringify!($name));
