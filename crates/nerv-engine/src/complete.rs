@@ -318,7 +318,17 @@ pub fn complete_in(
     let items = if prefix_is_option {
         emit_options(current, &prefix)
     } else if prefer_subcommands {
-        emit_subcommands(current, &prefix)
+        // yarn-style shorthand: `yarn web` should match both yarn
+        // subcommands (none start with "web") and the root args
+        // generator (npmScriptsGenerator → web:start, web:build:dev,
+        // …). Merge whenever the level has args with dynamic source.
+        let mut subs = emit_subcommands(current, &prefix);
+        if arg_has_dynamic_source(current) {
+            subs.extend(emit_arg_candidates(current, &prefix, cwd));
+        }
+        subs.sort_by(|a, b| a.display.cmp(&b.display));
+        subs.dedup_by(|a, b| a.display == b.display);
+        subs
     } else {
         match result.cursor_context {
             CursorContext::Subcommand => emit_subcommands(current, &prefix),
@@ -425,6 +435,26 @@ fn emit_options(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
         .collect();
     out.sort_by(|a, b| a.display.cmp(&b.display));
     out
+}
+
+/// `true` when the node's first positional arg carries either
+/// suggestions or a generator we know how to drive. Used to decide
+/// whether to merge arg candidates into a subcommand-context emit
+/// (yarn-shorthand pattern: `yarn web<Tab>` → npm scripts).
+fn arg_has_dynamic_source(node: &Subcommand) -> bool {
+    let Some(arg) = node.args.first() else {
+        return false;
+    };
+    if !arg.suggestions.is_empty() {
+        return true;
+    }
+    arg.generators.iter().any(|g| {
+        matches!(
+            g,
+            crate::spec_parser::Generator::Template { .. }
+                | crate::spec_parser::Generator::PackageJsonScripts
+        )
+    })
 }
 
 fn emit_arg_candidates(
