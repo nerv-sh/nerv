@@ -27,3 +27,4 @@ name = "build-specs"
 path = "src/bin/build_specs.rs"
 
 [dev-dependencies]
+tempfile.workspace = true

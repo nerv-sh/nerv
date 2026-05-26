@@ -86,7 +86,14 @@ impl SpecRegistry {
         let mut cache = registry.cache.write().expect("cache poisoned");
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            // Accept both plain `.json` and gzipped `.json.gz`. Earlier
+            // versions skipped the latter, causing `nerv doctor` to
+            // report `0 specs loaded` against a populated `.json.gz`
+            // cache.
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let is_json = file_name.ends_with(".json");
+            let is_gz = file_name.ends_with(".json.gz");
+            if !is_json && !is_gz {
                 continue;
             }
             let mtime = path.metadata().and_then(|m| m.modified()).ok();
@@ -483,8 +490,8 @@ fn emit_arg_candidates(
     // Covers `cat`, `vim`, `ls`, `man`, etc. — most unix command
     // specs declare `template: filepaths` or `template: folders`
     // instead of a generator. The filesystem walker is the same
-    // path used by Generator::Filepaths. History / Help templates
-    // have no native handler yet — left for a future commit.
+    // path used by Generator::Filepaths. Help templates have no
+    // native handler yet.
     if let Some(folders_only) = match arg.template {
         Some(crate::spec_parser::TemplateKind::Folders) => Some(true),
         Some(crate::spec_parser::TemplateKind::Filepaths) => Some(false),
@@ -497,6 +504,24 @@ fn emit_arg_candidates(
                 description: None,
                 kind: SuggestionKind::Argument,
             }));
+        }
+    }
+    if matches!(
+        arg.template,
+        Some(crate::spec_parser::TemplateKind::History)
+    ) {
+        if let Some(entries) = shell_history_entries() {
+            out.extend(
+                entries
+                    .into_iter()
+                    .filter(|s| s.starts_with(prefix))
+                    .map(|s| Suggestion {
+                        insertion: s.clone(),
+                        display: s,
+                        description: Some("history".into()),
+                        kind: SuggestionKind::Argument,
+                    }),
+            );
         }
     }
 
@@ -541,6 +566,21 @@ fn emit_arg_candidates(
                             description: None,
                             kind: SuggestionKind::Argument,
                         }));
+                    }
+                }
+                crate::spec_parser::Generator::SshHosts => {
+                    if let Some(hosts) = ssh_hosts() {
+                        out.extend(
+                            hosts
+                                .into_iter()
+                                .filter(|h| h.starts_with(prefix))
+                                .map(|h| Suggestion {
+                                    insertion: h.clone(),
+                                    display: h,
+                                    description: Some("SSH host".into()),
+                                    kind: SuggestionKind::Argument,
+                                }),
+                        );
                     }
                 }
                 crate::spec_parser::Generator::ZoxideQuery => {
@@ -625,7 +665,9 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
 /// 25ms p95 budget even on a busy machine — any longer means the
 /// shell command itself is the bottleneck, not the engine.
 fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+    use std::io::Read;
     use std::process::{Command, Stdio};
+    use std::sync::mpsc;
     use std::time::Duration;
     if script.is_empty() {
         return None;
@@ -639,27 +681,32 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    // Polling wait — std::process::Child doesn't have async wait.
-    // For 200ms total we sleep in 10ms increments (max 20 polls).
-    let deadline = std::time::Instant::now() + Duration::from_millis(200);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(_) => return None,
+    // Drain stdout in a dedicated thread so the pipe buffer (~64 KB
+    // on macOS) never fills and blocks the child. A previous version
+    // try_wait()'d in 10ms ticks but never read the pipe — anything
+    // that wrote more than ~64 KB before exiting (e.g. `ps axo
+    // pid,comm` on a busy machine: 1600+ lines / ~50 KB) deadlocked
+    // and tripped the 200 ms cap even when the command itself
+    // finished in <100 ms.
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = Vec::with_capacity(8192);
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let buf = match rx.recv_timeout(Duration::from_millis(200)) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
         }
-    }
-    let output = child.wait_with_output().ok()?;
-    if !output.status.success() {
+    };
+    if !matches!(child.wait().map(|s| s.success()), Ok(true)) {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = String::from_utf8_lossy(&buf);
     // JSON-shaped payloads (`gh repo list --json=...`, `kubectl get -o
     // json`, etc.) need a different reader. Try to extract one
     // candidate per array element; bail to None when we can't make
@@ -889,6 +936,152 @@ fn folder_name(path: &str) -> String {
 fn sorted_by_score(mut rows: Vec<(String, String, f64)>) -> Vec<(String, String, f64)> {
     rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     rows
+}
+
+// ---------------------------------------------------------------------------
+// `template: history` — last N unique words from $HISTFILE.
+// ---------------------------------------------------------------------------
+
+const HISTORY_MAX_RETURN: usize = 200;
+const HISTORY_TAIL_LINES: usize = 2000;
+
+/// Pull the last ~2000 lines from the user's shell history file and
+/// return the unique whitespace tokens contained, last-seen first.
+/// Looks at `$HISTFILE`, then `~/.zsh_history`, then `~/.bash_history`.
+fn shell_history_entries() -> Option<Vec<String>> {
+    let path = history_file()?;
+    // zsh stores history with `\xNN`-escaped bytes that aren't valid
+    // UTF-8 byte sequences (e.g. Korean chars under `setopt
+    // EXTENDED_HISTORY`). Read raw bytes and lossy-decode — losing
+    // bad sequences as `U+FFFD` is fine; we only emit ASCII tokens.
+    let bytes = std::fs::read(&path).ok()?;
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    // Iterate newest-first.
+    let lines: Vec<&str> = raw.lines().rev().take(HISTORY_TAIL_LINES).collect();
+    for line in lines {
+        // zsh extended-history lines look like `: 1700000000:0;cmd args`.
+        // Trim the metadata prefix when present.
+        let payload = match line.find(';') {
+            Some(i) if line.starts_with(": ") => &line[i + 1..],
+            _ => line,
+        };
+        for token in payload.split_whitespace() {
+            if seen.insert(token.to_string()) {
+                out.push(token.to_string());
+                if out.len() >= HISTORY_MAX_RETURN {
+                    return Some(out);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+fn history_file() -> Option<std::path::PathBuf> {
+    if let Ok(v) = std::env::var("HISTFILE") {
+        if !v.is_empty() {
+            let p = std::path::PathBuf::from(v);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    let home = std::path::PathBuf::from(home);
+    for name in &[".zsh_history", ".bash_history"] {
+        let p = home.join(name);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Well-known generator: SSH host enumeration (ssh, scp, sftp, mosh, rsync)
+// ---------------------------------------------------------------------------
+
+/// Collect SSH hosts from `~/.ssh/known_hosts` + `~/.ssh/config` (with
+/// `Include` directive support, max one level deep). Dedup, sort, no
+/// score. Returns `None` only when `HOME` is unset; an empty Vec
+/// otherwise (caller surfaces that as "no completions").
+fn ssh_hosts() -> Option<Vec<String>> {
+    let home = std::env::var_os("HOME")?;
+    let ssh_dir = std::path::PathBuf::from(home).join(".ssh");
+    let mut hosts: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    ssh_hosts_from_known(&ssh_dir.join("known_hosts"), &mut hosts);
+    ssh_hosts_from_config(&ssh_dir.join("config"), &ssh_dir, &mut hosts, 0);
+    Some(hosts.into_iter().collect())
+}
+
+fn ssh_hosts_from_known(path: &std::path::Path, out: &mut std::collections::BTreeSet<String>) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in raw.lines() {
+        // `known_hosts` lines: `<hosts> <key-type> <key>` where `<hosts>`
+        // is a comma-list of `host` / `host,host:port` / `[host]:port`
+        // / `|1|salt|hash` (hashed — skip). Skip comments + empty.
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("|1|") {
+            continue;
+        }
+        let Some(host_field) = trimmed.split_whitespace().next() else {
+            continue;
+        };
+        for entry in host_field.split(',') {
+            let cleaned = entry
+                .trim_start_matches('[')
+                .split([']', ':'])
+                .next()
+                .unwrap_or(entry)
+                .trim();
+            if !cleaned.is_empty() && !cleaned.contains('*') {
+                out.insert(cleaned.to_string());
+            }
+        }
+    }
+}
+
+fn ssh_hosts_from_config(
+    path: &std::path::Path,
+    ssh_dir: &std::path::Path,
+    out: &mut std::collections::BTreeSet<String>,
+    depth: usize,
+) {
+    if depth > 1 {
+        return;
+    }
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return;
+    };
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, char::is_whitespace);
+        let key = parts.next().unwrap_or("").to_ascii_lowercase();
+        let rest = parts.next().unwrap_or("").trim();
+        if key == "host" {
+            for entry in rest.split_whitespace() {
+                if !entry.contains('*') && !entry.contains('?') {
+                    out.insert(entry.to_string());
+                }
+            }
+        } else if key == "include" {
+            for inc in rest.split_whitespace() {
+                let p = if inc.starts_with('/') {
+                    std::path::PathBuf::from(inc)
+                } else {
+                    ssh_dir.join(inc)
+                };
+                ssh_hosts_from_config(&p, ssh_dir, out, depth + 1);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,5 +1555,66 @@ mod tests {
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].text, "git");
         assert_eq!(toks[1].text, "status");
+    }
+
+    // Both env-mutating tests below share HOME/HISTFILE in the same
+    // process. Serialize them so parallel runs don't race.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn ssh_hosts_parses_known_hosts_and_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let ssh_dir = tmp.path().join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        std::fs::write(
+            ssh_dir.join("known_hosts"),
+            "# comment\n\
+             github.com,140.82.112.4 ssh-rsa AAAA...\n\
+             [example.com]:2222 ssh-ed25519 AAAA...\n\
+             |1|salt|hash ssh-rsa AAAA...\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ssh_dir.join("config"),
+            "Host alpha\n  HostName 10.0.0.1\nHost beta gamma\n  User x\nHost *\nInclude inc.conf\n",
+        )
+        .unwrap();
+        std::fs::write(ssh_dir.join("inc.conf"), "Host included\n  Port 22\n").unwrap();
+
+        let home = tmp.path().to_path_buf();
+        // SAFETY: single-threaded test; sets HOME for the helper.
+        unsafe { std::env::set_var("HOME", &home) };
+        let hosts = ssh_hosts().unwrap();
+        assert!(hosts.contains(&"github.com".to_string()));
+        assert!(hosts.contains(&"example.com".to_string()));
+        assert!(hosts.contains(&"alpha".to_string()));
+        assert!(hosts.contains(&"beta".to_string()));
+        assert!(hosts.contains(&"gamma".to_string()));
+        assert!(hosts.contains(&"included".to_string()));
+        assert!(!hosts.iter().any(|h| h.contains('*')));
+    }
+
+    #[test]
+    fn history_entries_handles_nonutf8_zsh_extended_format() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let hist = tmp.path().join(".zsh_history");
+        // EXTENDED_HISTORY prefix + invalid UTF-8 bytes mixed in.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b": 1700000000:0;curl https://example.com\n");
+        bytes.extend_from_slice(b": 1700000001:0;git log\n");
+        bytes.extend_from_slice(&[0xff, 0xfe, b'\n']); // bad utf-8 line
+        bytes.extend_from_slice(b": 1700000002:0;ssh root@gamma\n");
+        std::fs::write(&hist, bytes).unwrap();
+
+        unsafe {
+            std::env::set_var("HISTFILE", &hist);
+            std::env::remove_var("ZDOTDIR");
+        }
+        let entries = shell_history_entries().unwrap();
+        assert!(entries.iter().any(|s| s == "https://example.com"));
+        assert!(entries.iter().any(|s| s == "git"));
+        assert!(entries.iter().any(|s| s == "ssh"));
     }
 }
