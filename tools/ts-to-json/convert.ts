@@ -129,7 +129,8 @@ type NervGenerator =
   | { type: "script"; script: string[]; has_post_process: boolean }
   | { type: "custom"; description_hint: string | null }
   | { type: "package_json_scripts" }
-  | { type: "filepaths"; folders_only: boolean };
+  | { type: "filepaths"; folders_only: boolean }
+  | { type: "zoxide_query" };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -174,6 +175,26 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
   // Detected by the unique `ls -1ApL` signature their closures emit.
   const fp = detectFilepathsGenerator(g);
   if (fp) return { type: "filepaths", folders_only: fp.foldersOnly };
+
+  // Well-known: zoxide directory history. The vendor z / zoxide
+  // specs both build the same `zoxide query --list --score` call
+  // inside a custom closure — recognise by the literal command
+  // string in the closure source.
+  if (
+    g != null &&
+    typeof g === "object" &&
+    typeof g.custom === "function"
+  ) {
+    let src = "";
+    try {
+      src = g.custom.toString();
+    } catch {
+      // closure unstringifiable — fall through
+    }
+    if (src.includes('"zoxide"') && src.includes('"--list"')) {
+      return { type: "zoxide_query" };
+    }
+  }
 
   if (typeof g === "function") {
     // Custom generator function — Tier C, deferred to M1 rquickjs.
@@ -305,11 +326,43 @@ type Ctx = {
 ///   memory doesn't grow with the cache.
 const MAX_DEPTH = 1;
 
+// Specs whose top-level uses `generateSpec: async (...)` to pick
+// between alternate spec trees at runtime. We can't run the closure
+// safely in general (vendor specs may shell out), so this is a
+// curated allow-list. Each entry resolves the closure with a mock
+// executeShellCommand that returns success (status 0, empty stdout)
+// — the heuristic Fig itself uses to prefer the "modern" branch.
+const GENERATE_SPEC_ALLOW = new Set(["z"]);
+
+const tryResolveGenerateSpec = async (
+  s: FigSpec | any,
+  fallbackName?: string,
+): Promise<FigSpec | any> => {
+  if (typeof (s as any)?.generateSpec !== "function") return s;
+  const name = namesOf(s.name)[0] ?? fallbackName ?? "";
+  if (!GENERATE_SPEC_ALLOW.has(name)) return s;
+  const mockExecute = async () => ({ status: 0, stdout: "", stderr: "" });
+  try {
+    const child = await (s as any).generateSpec([], mockExecute, {
+      currentWorkingDirectory: process.cwd(),
+    });
+    if (child) return child;
+  } catch (e: any) {
+    console.error(
+      `[ts-to-json]  generateSpec(${name}) failed: ${e?.message ?? e}`,
+    );
+  }
+  return s;
+};
+
 const convertSpec = async (
-  s: FigSpec,
+  raw: FigSpec,
   ctx: Ctx,
   fallbackName?: string
 ): Promise<NervSpec> => {
+  // Resolve dynamic `generateSpec` selectors (allow-listed) before
+  // normalising — otherwise we'd emit an empty spec.
+  const s = await tryResolveGenerateSpec(raw, fallbackName);
   // Inline a referenced subspec when `loadSpec: "<relative/path>"` is
   // a literal string. Fig's runtime would lazy-load these; for static
   // JSON we eagerly inline up to MAX_DEPTH. Cycles + over-deep nesting
