@@ -171,6 +171,11 @@ __nerv_insert_selected() {
   __NERV_SELECTED=1
   __NERV_ITEMS=()
   zle -R ""
+  # Force ZLE to repaint the line buffer with the new LBUFFER/RBUFFER.
+  # Without this, some terminal + plugin combinations leave the screen
+  # showing the pre-insert state until the next keystroke.
+  zle reset-prompt 2>/dev/null
+  zle redisplay 2>/dev/null
   return 0
 }
 
@@ -313,3 +318,15 @@ __nerv_bracketed_paste() {
   __NERV_PREV_LBUFFER="$LBUFFER"
 }
 zle -N bracketed-paste __nerv_bracketed_paste
+
+# ---------------------------------------------------------------------------
+# Late re-binding via precmd hook — defends against plugins that bind ^I
+# AFTER us (fzf-tab, zsh-autocomplete, oh-my-zsh complete-on-tab).
+# Runs every prompt; cheap idempotent reassert.
+# ---------------------------------------------------------------------------
+__nerv_rebind() {
+  bindkey -M main '^I'    __nerv_accept       2>/dev/null
+  bindkey -M main '^[[Z'  __nerv_accept_back  2>/dev/null
+  bindkey -M main '^G'    __nerv_dismiss      2>/dev/null
+}
+autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __nerv_rebind
