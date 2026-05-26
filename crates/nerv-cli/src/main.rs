@@ -72,6 +72,15 @@ enum Command {
         /// Cursor byte offset within line.
         cursor: usize,
     },
+    /// Internal: record an accepted suggestion for frecency ranking.
+    /// Called fire-and-forget by the widget on Tab/Enter accept.
+    #[command(name = "_record", hide = true)]
+    InternalRecord {
+        /// Top-level binary name (e.g. `git`).
+        spec: String,
+        /// The insertion string the user committed.
+        insertion: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -109,6 +118,7 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Uninstall { keep_config, quiet } => cmd_uninstall(keep_config, quiet),
         Command::InternalComplete { line, cursor } => cmd_internal_complete(&line, cursor),
+        Command::InternalRecord { spec, insertion } => cmd_internal_record(&spec, &insertion),
     }
 }
 
@@ -1001,4 +1011,32 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
 fn print_suggestion(s: &Suggestion) {
     let desc = s.description.as_deref().unwrap_or("");
     println!("{}\t{}\t{}", s.insertion, s.display, desc);
+}
+
+fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let sock_path = paths::socket_path().ok_or_else(|| anyhow::anyhow!("HOME unset"))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()?;
+
+    rt.block_on(async {
+        let stream = UnixStream::connect(&sock_path).await?;
+        let (read_half, mut write_half) = stream.into_split();
+        let req = nerv_engine::Request::RecordAccept {
+            spec: spec.to_string(),
+            insertion: insertion.to_string(),
+        };
+        let mut json = serde_json::to_string(&req)?;
+        json.push('\n');
+        write_half.write_all(json.as_bytes()).await?;
+        // Drain the single-line response so the daemon can close
+        // the conn cleanly. We don't act on the body.
+        let mut reader = BufReader::new(read_half);
+        let mut resp_line = String::new();
+        let _ = reader.read_line(&mut resp_line).await;
+        anyhow::Ok(())
+    })
 }
