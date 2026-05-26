@@ -210,6 +210,16 @@ __nerv_insert_selected() {
   BUFFER="${pre}${insertion} ${post# }"
   CURSOR=$(( ${#pre} + ${#insertion} + 1 ))
 
+  # Frecency: record the accept in the background so the next
+  # completion request can boost it. Fire-and-forget — never
+  # block on the IPC, never surface its errors to the user.
+  # `${BUFFER%% *}` peels the first word — the spec the user
+  # invoked (e.g. `git`, `cd`).
+  local spec_name="${BUFFER%% *}"
+  if [[ -n "$spec_name" && -n "$insertion" ]]; then
+    ( "$__NERV_BIN" _record "$spec_name" "$insertion" >/dev/null 2>&1 & ) >/dev/null 2>&1
+  fi
+
   # Best-effort: clear zsh-autosuggestions ghost overlay.
   if (( ${+POSTDISPLAY} )); then
     POSTDISPLAY=''
