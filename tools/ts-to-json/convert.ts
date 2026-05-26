@@ -207,34 +207,40 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
     return { type: "custom", description_hint: null };
   }
 
-  // `script:` form — can be string, string[], or async function.
+  // `script:` form — can be string, string[], or function returning
+  // string[]. We resolve function-form by calling with a stub context
+  // (most kubectl-style closures just rewrite tokens into a fixed
+  // command).
   if (g.script !== undefined) {
+    let scriptArr: string[] = [];
     if (typeof g.script === "function") {
-      // Dynamic script function — Tier C.
+      scriptArr = tryResolveScriptFn(g.script);
+    } else if (Array.isArray(g.script)) {
+      scriptArr = g.script.map((s: any) => String(s));
+    } else if (typeof g.script === "string") {
+      scriptArr = splitShellCommand(g.script);
+    }
+    if (scriptArr.length === 0) {
+      // Couldn't recover a runnable command — surface as Tier C
+      // marker so `nerv spec list` can show it without dropping.
       return {
         type: "script",
         script: [],
         has_post_process: typeof g.postProcess === "function",
       };
     }
-    const scriptArr = Array.isArray(g.script)
-      ? g.script.map((s: any) => String(s))
-      : typeof g.script === "string"
-        ? splitShellCommand(g.script)
-        : [];
     if (typeof g.postProcess === "function") {
-      // Well-known: `npmScriptsGenerator` (`cat package.json` + JSON.parse
-      // closure). Reused by npm/yarn/pnpm/bun/rushx/nr. Engine knows how
-      // to do this natively, so emit a tagged variant instead of dropping
-      // the postProcess into Tier C.
+      // Well-known: `npmScriptsGenerator` (`cat package.json` +
+      // JSON.parse closure). Reused by npm/yarn/pnpm/bun/rushx/nr.
       if (isPackageJsonScriptsSignature(scriptArr)) {
         return { type: "package_json_scripts" };
       }
-      return {
-        type: "script",
-        script: scriptArr,
-        has_post_process: true,
-      };
+      // For everything else with a postProcess: still execute the
+      // script as a Template. The engine streams raw stdout lines as
+      // candidates — close enough for `-o name` / `--format` outputs
+      // (kubectl/docker/gh). Worst case the user sees raw text
+      // instead of a transformed label; better than empty.
+      return { type: "template", script: scriptArr };
     }
     return { type: "template", script: scriptArr };
   }
@@ -248,6 +254,37 @@ const splitShellCommand = (cmd: string): string[] =>
   cmd
     .split(/\s+/)
     .filter((s) => s.length > 0);
+
+/**
+ * Try to invoke a Fig `generators.script: (tokens, context) => string[]`
+ * closure with a stub argument set so we can capture the resulting
+ * command. Many kubectl/docker/gh closures just rewrite tokens into
+ * a fixed `[bin, sub, ...]` argv and don't depend on user state — for
+ * those, this recovers a runnable Tier B script. Closures that touch
+ * tokens / cwd in ways we don't simulate will return [] and the
+ * generator stays Tier C.
+ */
+const tryResolveScriptFn = (fn: any): string[] => {
+  const stubContext = {
+    environmentVariables: process.env,
+    currentProcess: "zsh",
+    currentWorkingDirectory: process.cwd(),
+    isDangerous: false,
+    searchTerm: "",
+  };
+  try {
+    const out = fn([], stubContext);
+    if (Array.isArray(out) && out.every((x) => typeof x === "string")) {
+      return out.map(String);
+    }
+    if (typeof out === "string" && out.length > 0) {
+      return splitShellCommand(out);
+    }
+  } catch {
+    // closure crashed on stub args — leave as Tier C
+  }
+  return [];
+};
 
 /**
  * Recognise the npmScriptsGenerator signature emitted by

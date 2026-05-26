@@ -26,6 +26,15 @@ pub enum Request {
     Ping,
     /// Trigger automatic doctor self-check (see error-states.md §3.6).
     DoctorAutorun,
+    /// Record a user-accepted suggestion for frecency ranking.
+    /// Fire-and-forget: daemon updates its in-memory table and
+    /// flushes opportunistically; response is `Empty`.
+    RecordAccept {
+        /// Top-level binary name (e.g. `git`, `cd`).
+        spec: String,
+        /// The insertion string the user committed.
+        insertion: String,
+    },
 }
 
 /// Response from daemon to ZLE widget.
