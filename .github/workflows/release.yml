@@ -1,0 +1,134 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.1.0) — must already exist"
+        required: true
+
+permissions:
+  contents: write # gh release create / upload
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_CHANNEL: "1.85"
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_CHANNEL }}
+          targets: ${{ matrix.target }}
+
+      - name: install protoc (nerv-proto build.rs)
+        # build.rs falls back to a download path that uses `sha256sum`
+        # (Linux only). Pre-install protobuf so the system-protoc
+        # branch is taken instead.
+        run: brew install protobuf
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: build nerv + nervd
+        run: |
+          cargo build --release \
+            --target ${{ matrix.target }} \
+            -p nerv-cli -p nerv-daemon
+
+      - name: stage tarball
+        id: stage
+        run: |
+          set -euo pipefail
+          # Resolve the release tag: prefer the workflow_dispatch
+          # input, fall back to GITHUB_REF_NAME on tag push.
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VERSION="${TAG#v}"
+          NAME="nerv-${VERSION}-${{ matrix.target }}"
+          STAGE="staging/${NAME}"
+          mkdir -p "$STAGE"
+          cp target/${{ matrix.target }}/release/nerv  "$STAGE/"
+          cp target/${{ matrix.target }}/release/nervd "$STAGE/"
+          for f in LICENSE NOTICE README.md; do
+            [ -f "$f" ] && cp "$f" "$STAGE/"
+          done
+          tar -czf "${NAME}.tar.gz" -C staging "$NAME"
+          shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256"
+          echo "tarball=${NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          ls -la "${NAME}".*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.stage.outputs.tarball }}
+          path: |
+            ${{ steps.stage.outputs.tarball }}
+            ${{ steps.stage.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: gh release create
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: resolve tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: list artifacts
+        run: ls -la artifacts
+
+      - name: create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          # `gh release create` is idempotent in spirit: create if
+          # missing, otherwise upload --clobber onto the existing
+          # release. The dispatch path assumes the tag already exists.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" artifacts/* \
+              --title "$TAG" \
+              --notes "Unsigned developer preview build of \`nerv\` + \`nervd\` for macOS (aarch64 + x86_64). Apple Developer ID signing/notarization arrives in a later release — until then, macOS Gatekeeper will warn on first launch. See README for install instructions."
+          fi

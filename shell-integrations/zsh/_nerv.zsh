@@ -1,11 +1,14 @@
 #!/usr/bin/env zsh
 # _nerv.zsh — Nerv ZLE widget for inline autocomplete.
 #
-# Hybrid: zle -R manages space & cursor, raw ANSI overwrites colors.
-# 1. zle -R "" "plain1" "plain2" ... → ZLE creates space, positions cursor
-# 2. \e7 saves cursor (now correct)
-# 3. \e[B to status area, overwrite with colored text
-# 4. \e8 restores cursor
+# Hybrid: `zle -R` reserves space with plain blank lines, raw ANSI
+# (printf with \e7 / \e[B / \e8) overwrites them with colored
+# content. `zle -R` doesn't interpret ANSI in its line arguments
+# (the escapes get quoted and rendered as literal `^[[…m`), so
+# the colored content has to go through printf separately.
+# MAX_VIS is capped to $LINES so the popup never spills past the
+# bottom of the screen — the save-restore dance breaks when the
+# terminal scrolls mid-render.
 
 if (( ${+__NERV_LOADED} )); then return 0; fi
 typeset -g __NERV_LOADED=1
@@ -47,9 +50,15 @@ __nerv_cycle_prev() {
 __nerv_show_popup() {
   local -a items=("$@")
   local total=${#items}
-  # Max visible rows. 10 is a reasonable default — taller popups
-  # eat too much vertical real estate; cycling slides the window.
-  local MAX_VIS=10
+  # Max visible rows — tight enough that the popup never runs past
+  # the bottom of the screen (the printf save/restore dance dies
+  # if the terminal scrolls mid-render). Each rendered row uses
+  # ~1 terminal row + 4 chrome rows (top + divider + footer +
+  # bottom), so leave 6 lines of headroom.
+  local term_lines=${LINES:-24}
+  local MAX_VIS=$(( term_lines - 6 ))
+  (( MAX_VIS > 10 )) && MAX_VIS=10
+  (( MAX_VIS < 3 )) && MAX_VIS=3
   local visible=$total
   (( visible > MAX_VIS )) && visible=$MAX_VIS
 
@@ -112,6 +121,8 @@ __nerv_show_popup() {
   repeat $hbar_n; do hbar+="─"; done
 
   # --- Build plain-text lines for zle -R (space reservation) ---
+  # zle -R doesn't interpret ANSI in its args, so we reserve space
+  # with blanks first and overwrite with colored content via printf.
   local -a plain=()
   local blank=""
   repeat $(( W + 4 )); do blank+=" "; done
@@ -157,13 +168,12 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}├${hbar}┤${R}")
 
-  # Footer: " desc … [n/total]" — right-side counter shows the
-  # current position within the full list so users know there's
-  # more below / above when the window is sliding.
-  # Content inside `│...│` must equal W-2 cells (matches the
-  # body rows above). Layout: " " + desc + pad + counter + " ".
-  local counter=""
-  (( total > visible )) && counter="[${__NERV_SELECTED}/${total}]"
+  # Footer: " desc … [n/total]" — right-side counter ALWAYS shown
+  # so users can see Tab cycle progression at a glance, even when
+  # the whole list fits in one window. Layout inside `│...│` must
+  # equal W-2 cells (matches the body rows above):
+  # " " + desc + pad + counter + " ".
+  local counter="[${__NERV_SELECTED}/${total}]"
   # Reserve cells for: leading " ", trailing " ", counter.
   local sel_avail=$(( W - 4 - ${#counter} ))
   (( sel_avail < 0 )) && sel_avail=0
@@ -175,10 +185,13 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
 
-  # Step 1: ZLE creates space and positions cursor correctly
+  # Step 1: ZLE creates space (plain blanks) and positions cursor.
   zle -R "" "${plain[@]}"
-
-  # Step 2-4: Save cursor, overwrite with colors, restore cursor
+  # Step 2-4: save cursor, move down + overwrite with colored
+  # content per row, restore cursor. Works as long as the popup
+  # stays within the visible screen — MAX_VIS above clamps to
+  # $LINES so we don't trigger a mid-render scroll that would
+  # invalidate the saved cursor pos.
   local buf=$'\e7'
   for (( i=1; i<=${#colored}; i++ )); do
     buf+=$'\e[B\e[G'"${colored[$i]}"$'\e[K'
@@ -190,8 +203,11 @@ __nerv_show_popup() {
 }
 
 __nerv_hide_popup() {
+  POSTDISPLAY=''
   (( ! __NERV_ACTIVE )) && return
-  # Clear raw ANSI remnants, then let ZLE clean up status lines
+  # Clear the raw-ANSI overlay we painted in show_popup BEFORE
+  # zle -R releases the status lines, otherwise the colored
+  # remnants persist where the blank lines used to be.
   printf '%s' "$__NERV_CLEAR_ESC"
   __nerv_reset_state
 }
@@ -232,12 +248,24 @@ __nerv_insert_selected() {
   BUFFER="${pre}${insertion} ${post# }"
   CURSOR=$(( ${#pre} + ${#insertion} + 1 ))
 
+  # Frecency: record the accept in the background so the next
+  # completion request can boost it. Fire-and-forget — never
+  # block on the IPC, never surface its errors to the user.
+  # `${BUFFER%% *}` peels the first word — the spec the user
+  # invoked (e.g. `git`, `cd`).
+  local spec_name="${BUFFER%% *}"
+  if [[ -n "$spec_name" && -n "$insertion" ]]; then
+    ( "$__NERV_BIN" _record "$spec_name" "$insertion" >/dev/null 2>&1 & ) >/dev/null 2>&1
+  fi
+
   # Best-effort: clear zsh-autosuggestions ghost overlay.
   if (( ${+POSTDISPLAY} )); then
     POSTDISPLAY=''
   fi
 
-  # Clear popup area + reset internal state.
+  # Clear the raw-ANSI popup overlay, then reset internal state.
+  # reset-prompt + redisplay force ZLE to repaint the prompt now
+  # that BUFFER/CURSOR have moved.
   printf '%s' "$__NERV_CLEAR_ESC"
   __NERV_PREV_LBUFFER="$LBUFFER"
   __nerv_reset_state
@@ -273,7 +301,36 @@ __nerv_complete() {
   (( ${#rlines} == 0 )) && { __nerv_hide_popup; return; }
 
   __NERV_ITEMS=("${rlines[@]}")
+  __nerv_set_ghost
   __nerv_show_popup "${rlines[@]}"
+}
+
+# Set POSTDISPLAY to the trailing portion of the top suggestion that
+# the user hasn't typed yet. Accepted with Right-Arrow at end of
+# buffer. Cleared on every other widget that mutates the buffer.
+#
+# Only shown when the user is actively mid-token (LBUFFER doesn't end
+# in whitespace). Browsing the popup right after typing a space (e.g.
+# `cd ` then looking at all folders) shouldn't smear a stray
+# suggestion onto the cursor line — that looks like the cursor
+# teleported into a new word.
+__nerv_set_ghost() {
+  POSTDISPLAY=''
+  (( ${#__NERV_ITEMS} == 0 )) && return
+  # Bail when nothing typed yet for the current word — keeps the
+  # prompt line quiet while the user surveys the popup.
+  [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' ]] && return
+  local top="${__NERV_ITEMS[1]}"
+  local top_ins="${top%%	*}"
+  [[ -z "$top_ins" ]] && return
+  # Current word = last whitespace-separated token of LBUFFER.
+  local prefix="${LBUFFER##* }"
+  [[ -z "$prefix" ]] && return
+  # Ghost only when top insertion extends the current word — never
+  # for sideways matches (alias completions, fuzzy-style hits).
+  [[ "$top_ins" == "$prefix"* ]] || return
+  [[ "$top_ins" == "$prefix" ]] && return
+  POSTDISPLAY="${top_ins#$prefix}"
 }
 zle -N __nerv_complete
 
@@ -369,7 +426,25 @@ bindkey $'\eOB' __nerv_select_down
 bindkey $'\e[A' __nerv_select_up
 bindkey $'\eOA' __nerv_select_up
 
-__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; }
+# Right-Arrow: accept ghost text (POSTDISPLAY) when at end of line.
+# Falls back to plain forward-char in the middle of the buffer or
+# when there's no ghost — matches user expectation for cursor
+# movement inside an existing edit.
+__nerv_accept_ghost() {
+  if (( ${+POSTDISPLAY} )) && [[ -n "$POSTDISPLAY" ]] && [[ -z "$RBUFFER" ]]; then
+    LBUFFER+="$POSTDISPLAY"
+    POSTDISPLAY=''
+    __NERV_PREV_LBUFFER="$LBUFFER"
+    __nerv_hide_popup
+  else
+    zle forward-char
+  fi
+}
+zle -N __nerv_accept_ghost
+bindkey $'\e[C' __nerv_accept_ghost
+bindkey $'\eOC' __nerv_accept_ghost
+
+__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
 zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
 
