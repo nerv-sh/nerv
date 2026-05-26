@@ -639,14 +639,13 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    // Bail early on JSON-ish payloads — `gh repo list --json=...` and
-    // friends emit a single-line array that we have no way to render
-    // sensibly as raw candidates. The original Fig spec had a
-    // postProcess hook that picked fields out; until we recover that
-    // path, returning None looks better than dumping JSON noise.
+    // JSON-shaped payloads (`gh repo list --json=...`, `kubectl get -o
+    // json`, etc.) need a different reader. Try to extract one
+    // candidate per array element; bail to None when we can't make
+    // sense of the structure.
     if let Some(first) = text.trim_start().chars().next() {
         if first == '[' || first == '{' {
-            return None;
+            return extract_json_candidates(&text);
         }
     }
     let lines: Vec<String> = text
@@ -655,6 +654,80 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .collect();
     Some(lines)
+}
+
+/// Convert a JSON payload from a Tier B generator (gh `--json=…`,
+/// kubectl `-o json`, etc.) into a flat list of suggestion strings.
+/// Strategy: look for an array (top-level or nested under a likely
+/// key like `items` / `data`); for each object element pick the first
+/// "label-shaped" string field (name → number → id → title → key); for
+/// each scalar element take its string form. Returns `None` when the
+/// payload doesn't fit any of those shapes — caller falls back to
+/// empty suggestions, which beats dumping JSON noise.
+fn extract_json_candidates(raw: &str) -> Option<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let arr = locate_array(&v)?;
+    let labels: Vec<String> = arr.iter().filter_map(label_from_value).collect();
+    if labels.is_empty() {
+        return None;
+    }
+    Some(labels)
+}
+
+/// Find the most-likely-relevant JSON array. Top-level array wins;
+/// otherwise the first array nested under `items` / `data` / `results`
+/// (covers kubectl `-o json` → `{"items":[…]}` and similar wrappers).
+fn locate_array(v: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    if let serde_json::Value::Array(a) = v {
+        return Some(a);
+    }
+    if let serde_json::Value::Object(obj) = v {
+        for key in ["items", "data", "results"] {
+            if let Some(serde_json::Value::Array(a)) = obj.get(key) {
+                return Some(a);
+            }
+        }
+    }
+    None
+}
+
+/// Pick a single label string from one array element. Preferred
+/// object-key order matches Fig spec postProcess conventions:
+/// `name` (most generators), `number` (gh pr/issue), `id`, `title`,
+/// `metadata.name` (kubernetes), `key`.
+fn label_from_value(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Object(obj) => {
+            for key in ["name", "number", "id", "title", "key"] {
+                if let Some(found) = obj.get(key) {
+                    if let Some(s) = scalar_to_string(found) {
+                        return Some(s);
+                    }
+                }
+            }
+            // Kubernetes-style nested metadata.name fallback.
+            if let Some(serde_json::Value::Object(meta)) = obj.get("metadata") {
+                if let Some(found) = meta.get("name") {
+                    if let Some(s) = scalar_to_string(found) {
+                        return Some(s);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn scalar_to_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,6 +1250,41 @@ mod tests {
         assert_eq!(test_cmd.1, "vitest");
 
         fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn extract_json_top_level_array_of_strings() {
+        let raw = r#"["alpha","beta","gamma"]"#;
+        let out = extract_json_candidates(raw).expect("parsed");
+        assert_eq!(out, ["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn extract_json_array_of_objects_picks_name_field() {
+        let raw = r#"[{"name":"main","sha":"abc"},{"name":"dev","sha":"def"}]"#;
+        let out = extract_json_candidates(raw).expect("parsed");
+        assert_eq!(out, ["main", "dev"]);
+    }
+
+    #[test]
+    fn extract_json_gh_pr_list_picks_number() {
+        let raw = r#"[{"number":42,"title":"fix x","state":"OPEN"},{"number":17,"title":"add y"}]"#;
+        let out = extract_json_candidates(raw).expect("parsed");
+        assert_eq!(out, ["42", "17"]);
+    }
+
+    #[test]
+    fn extract_json_kubectl_items_wrapper() {
+        let raw = r#"{"items":[{"metadata":{"name":"pod-1"}},{"metadata":{"name":"pod-2"}}]}"#;
+        let out = extract_json_candidates(raw).expect("parsed");
+        assert_eq!(out, ["pod-1", "pod-2"]);
+    }
+
+    #[test]
+    fn extract_json_malformed_returns_none() {
+        assert!(extract_json_candidates("not json at all").is_none());
+        // valid JSON, but no array we can find
+        assert!(extract_json_candidates(r#"{"foo":"bar"}"#).is_none());
     }
 
     #[test]
