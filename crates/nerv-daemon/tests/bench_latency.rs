@@ -52,6 +52,7 @@ async fn ipc_roundtrip_p95_under_threshold() {
         .env("NERV_SOCK", &sock_path)
         .env("NERV_PID", &pid_path)
         .env("NERV_SPECS_DIR", &specs_dir)
+        .env("NERV_FRECENCY_FILE", "-")
         .env("NERV_LOG", "warn")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())

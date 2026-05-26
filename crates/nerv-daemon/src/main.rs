@@ -12,7 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{Request, Response, SpecRegistry, complete_in, paths};
+use nerv_engine::{FrecencyStore, Request, Response, SpecRegistry, complete_in, paths};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
@@ -42,6 +42,24 @@ async fn main() -> anyhow::Result<()> {
         "spec registry initialized (lazy)"
     );
 
+    // Frecency: per-spec usage history that nudges repeat picks to
+    // the top of suggestion lists. Persisted as a TSV next to specs.
+    // NERV_FRECENCY_FILE=- disables loading (tests / sandboxed
+    // benchmarks that don't want the user's real history bleeding in).
+    let frecency_path = std::env::var_os("NERV_FRECENCY_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| cache_dir.join("frecency.tsv"));
+    let frecency = if frecency_path == std::path::PathBuf::from("-") {
+        Arc::new(FrecencyStore::empty())
+    } else {
+        Arc::new(FrecencyStore::load(&frecency_path))
+    };
+    info!(
+        path = %frecency_path.display(),
+        entries = frecency.len(),
+        "frecency store loaded"
+    );
+
     write_pid_file(&pid_path).await?;
 
     // Best-effort cleanup of any stale socket from a previous run.
@@ -65,7 +83,8 @@ async fn main() -> anyhow::Result<()> {
                 match res {
                     Ok((stream, _addr)) => {
                         let registry = registry.clone();
-                        tokio::spawn(handle_connection(stream, registry));
+                        let frecency = frecency.clone();
+                        tokio::spawn(handle_connection(stream, registry, frecency));
                     }
                     Err(e) => warn!(?e, "accept error"),
                 }
@@ -82,7 +101,11 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_connection(stream: tokio::net::UnixStream, registry: Arc<SpecRegistry>) {
+async fn handle_connection(
+    stream: tokio::net::UnixStream,
+    registry: Arc<SpecRegistry>,
+    frecency: Arc<FrecencyStore>,
+) {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -96,11 +119,18 @@ async fn handle_connection(stream: tokio::net::UnixStream, registry: Arc<SpecReg
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             Ok(Request::Complete { line, cursor, cwd }) => {
-                engine_complete(&registry, &line, cursor, cwd.as_deref())
+                engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref())
             }
             Ok(Request::DoctorAutorun) => Response::Empty {
                 reason: Some("doctor-autorun-stub".to_string()),
             },
+            Ok(Request::RecordAccept { spec, insertion }) => {
+                frecency.record(&spec, &insertion);
+                frecency.flush_if_dirty();
+                Response::Empty {
+                    reason: Some("recorded".to_string()),
+                }
+            }
             Err(e) => Response::Error {
                 message: format!("invalid request: {e}"),
             },
@@ -117,18 +147,33 @@ async fn handle_connection(stream: tokio::net::UnixStream, registry: Arc<SpecReg
 }
 
 /// Dispatch a Complete request through the real engine pipeline.
+/// After the engine returns, apply a frecency boost so suggestions
+/// the user has accepted before float to the top of the list.
 fn engine_complete(
     registry: &SpecRegistry,
+    frecency: &FrecencyStore,
     line: &str,
     cursor: usize,
     cwd: Option<&str>,
 ) -> Response {
     let cwd_path = cwd.map(std::path::Path::new);
-    let result = complete_in(line, cursor, registry, cwd_path);
+    let mut result = complete_in(line, cursor, registry, cwd_path);
     if result.items.is_empty() {
         return Response::Empty {
             reason: result.reason,
         };
+    }
+    // Extract the binary name once — frecency keys are per-spec.
+    if let Some(spec_name) = line.split_whitespace().next() {
+        let mut scored: Vec<(f64, _)> = result
+            .items
+            .drain(..)
+            .map(|s| (frecency.score(spec_name, &s.insertion), s))
+            .collect();
+        // Sort by score DESC; preserve alpha for ties via stable
+        // sort on already-alpha-sorted engine output.
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        result.items = scored.into_iter().map(|(_, s)| s).collect();
     }
     Response::Suggestions {
         items: result.items,
