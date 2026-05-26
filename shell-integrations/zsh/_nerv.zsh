@@ -75,8 +75,15 @@ __nerv_show_popup() {
   (( W > cap )) && W=$cap
   (( W < __NERV_WIDTH )) && W=$__NERV_WIDTH
 
+  # hbar fills the cells BETWEEN the corner glyphs (╭…╮ / ├…┤ /
+  # ╰…╯). Each border row is W cells total; corners take 2 cells,
+  # so hbar must be W-2. Off-by-2 bug here previously made the box
+  # 2 columns wider than the item rows, so the right `│` of rows
+  # appeared visually clipped against the wider border above.
   local hbar=""
-  local j; for (( j=0; j<W; j++ )); do hbar+="─"; done
+  local hbar_n=$(( W - 2 ))
+  (( hbar_n < 0 )) && hbar_n=0
+  local j; for (( j=0; j<hbar_n; j++ )); do hbar+="─"; done
 
   # --- Build plain-text lines for zle -R (space reservation) ---
   local -a plain=()
@@ -127,16 +134,18 @@ __nerv_show_popup() {
   # Footer: " desc … [n/total]" — right-side counter shows the
   # current position within the full list so users know there's
   # more below / above when the window is sliding.
+  # Content inside `│...│` must equal W-2 cells (matches the
+  # body rows above). Layout: " " + desc + pad + counter + " ".
   local counter=""
   (( total > visible )) && counter="[${__NERV_SELECTED}/${total}]"
-  local sel_avail=$(( W - 2 - ${#counter} ))
+  # Reserve cells for: leading " ", trailing " ", counter.
+  local sel_avail=$(( W - 4 - ${#counter} ))
   (( sel_avail < 0 )) && sel_avail=0
   (( ${#sel_desc} > sel_avail )) && sel_desc="${sel_desc:0:$sel_avail}"
-  local fvis=" ${sel_desc}"
-  local fpad=$(( W - 1 - ${#fvis} - ${#counter} ))
+  local fpad=$(( W - 4 - ${#sel_desc} - ${#counter} ))
   (( fpad < 0 )) && fpad=0
   local fps=""; for (( j=0; j<fpad; j++ )); do fps+=" "; done
-  colored+=("  ${BG}${BDR}│${DESC}${fvis}${fps}${counter} ${BDR}│${R}")
+  colored+=("  ${BG}${BDR}│${DESC} ${sel_desc}${fps}${counter} ${BDR}│${R}")
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
 
