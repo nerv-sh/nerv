@@ -164,6 +164,7 @@ __nerv_show_popup() {
 }
 
 __nerv_hide_popup() {
+  POSTDISPLAY=''
   (( ! __NERV_ACTIVE )) && return
   # Clear raw ANSI remnants, then let ZLE clean up status lines
   printf '%s' $'\e7\e[B\e[G\e[J\e8'
@@ -253,7 +254,26 @@ __nerv_complete() {
   (( ${#rlines} == 0 )) && { __nerv_hide_popup; return; }
 
   __NERV_ITEMS=("${rlines[@]}")
+  __nerv_set_ghost
   __nerv_show_popup "${rlines[@]}"
+}
+
+# Set POSTDISPLAY to the trailing portion of the top suggestion that
+# the user hasn't typed yet. Accepted with Right-Arrow at end of
+# buffer. Cleared on every other widget that mutates the buffer.
+__nerv_set_ghost() {
+  POSTDISPLAY=''
+  (( ${#__NERV_ITEMS} == 0 )) && return
+  local top="${__NERV_ITEMS[1]}"
+  local top_ins="${top%%	*}"
+  [[ -z "$top_ins" ]] && return
+  # Current word = last whitespace-separated token of LBUFFER.
+  local prefix="${LBUFFER##* }"
+  # Ghost only when top insertion extends the current word — never
+  # for sideways matches (alias completions, fuzzy-style hits).
+  [[ "$top_ins" == "$prefix"* ]] || return
+  [[ "$top_ins" == "$prefix" ]] && return
+  POSTDISPLAY="${top_ins#$prefix}"
 }
 zle -N __nerv_complete
 
@@ -369,7 +389,25 @@ bindkey $'\eOB' __nerv_select_down
 bindkey $'\e[A' __nerv_select_up
 bindkey $'\eOA' __nerv_select_up
 
-__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; }
+# Right-Arrow: accept ghost text (POSTDISPLAY) when at end of line.
+# Falls back to plain forward-char in the middle of the buffer or
+# when there's no ghost — matches user expectation for cursor
+# movement inside an existing edit.
+__nerv_accept_ghost() {
+  if (( ${+POSTDISPLAY} )) && [[ -n "$POSTDISPLAY" ]] && [[ -z "$RBUFFER" ]]; then
+    LBUFFER+="$POSTDISPLAY"
+    POSTDISPLAY=''
+    __NERV_PREV_LBUFFER="$LBUFFER"
+    __nerv_hide_popup
+  else
+    zle forward-char
+  fi
+}
+zle -N __nerv_accept_ghost
+bindkey $'\e[C' __nerv_accept_ghost
+bindkey $'\eOC' __nerv_accept_ghost
+
+__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
 zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
 
