@@ -130,7 +130,8 @@ type NervGenerator =
   | { type: "custom"; description_hint: string | null }
   | { type: "package_json_scripts" }
   | { type: "filepaths"; folders_only: boolean }
-  | { type: "zoxide_query" };
+  | { type: "zoxide_query" }
+  | { type: "ssh_hosts" };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -193,6 +194,19 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
     }
     if (src.includes('"zoxide"') && src.includes('"--list"')) {
       return { type: "zoxide_query" };
+    }
+    // Well-known: SSH host enumeration. Fig's ssh.ts exports
+    // `knownHosts` (reads `~/.ssh/known_hosts` via `cat`) and
+    // `configHosts` (reads `~/.ssh/config` and follows `Include`).
+    // Both closures are reused by scp.ts / sftp.ts / mosh.ts /
+    // rsync.ts. We sniff for either of the canonical path strings
+    // — anything else with that literal is unlikely to exist.
+    if (
+      src.includes(".ssh/known_hosts") ||
+      src.includes("known_hosts") ||
+      (src.includes(".ssh") && src.includes("Host "))
+    ) {
+      return { type: "ssh_hosts" };
     }
   }
 

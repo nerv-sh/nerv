@@ -167,6 +167,12 @@ pub enum Generator {
     /// scored entries — closures in Fig's spec post-process the same
     /// list, but the underlying command is fixed.
     ZoxideQuery,
+    /// Well-known: SSH host enumeration (`ssh`, `scp`, `sftp`, `mosh`,
+    /// `rsync`). Fig's `knownHosts` + `configHosts` closures read
+    /// `~/.ssh/known_hosts` + `~/.ssh/config` (with Include support).
+    /// The Rust engine does the same in pure Rust to skip the Tier C
+    /// closure roundtrip.
+    SshHosts,
 }
 
 // ---------------------------------------------------------------------------
