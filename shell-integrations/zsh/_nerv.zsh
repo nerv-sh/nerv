@@ -20,18 +20,32 @@ typeset -gi __NERV_PASTING=0
 
 __nerv_show_popup() {
   local -a items=("$@")
-  local count=${#items}
-  (( count > 5 )) && count=5
+  local total=${#items}
+  # Max visible rows. 10 is a reasonable default — taller popups
+  # eat too much vertical real estate; cycling slides the window.
+  local MAX_VIS=10
+  local visible=$total
+  (( visible > MAX_VIS )) && visible=$MAX_VIS
+
+  # Slide the rendered window so the selected item stays visible.
+  # When the user cycles Tab past the bottom of the window, scroll.
+  local start=1
+  if (( total > visible )); then
+    start=$(( __NERV_SELECTED - visible + 1 ))
+    (( start < 1 )) && start=1
+    local last_possible_start=$(( total - visible + 1 ))
+    (( start > last_possible_start )) && start=$last_possible_start
+  fi
+  local end=$(( start + visible - 1 ))
 
   local sel_line="${items[$__NERV_SELECTED]}"
   local sel_desc="${sel_line#*	}"; sel_desc="${sel_desc#*	}"
 
-  # Auto-size: measure max display + max desc across visible items.
-  # Per-row desc is no longer rendered (Fig-style: footer only) but
-  # max_desc is still used to widen the popup so the footer's full
-  # desc has room without truncation.
+  # Auto-size: measure max display + max desc across ALL items
+  # (not just the window), so window-sliding doesn't reshape the
+  # popup width every tick.
   local i max_disp=0 max_desc=0
-  for (( i=1; i<=count; i++ )); do
+  for (( i=1; i<=total; i++ )); do
     local line="${items[$i]}"
     local rest="${line#*	}"
     local d="${rest%%	*}"
@@ -68,8 +82,8 @@ __nerv_show_popup() {
   local -a plain=()
   local blank=""
   for (( j=0; j<W+4; j++ )); do blank+=" "; done
-  local total=$(( count + 4 ))
-  for (( j=0; j<total; j++ )); do plain+=("$blank"); done
+  local plain_rows=$(( visible + 4 ))
+  for (( j=0; j<plain_rows; j++ )); do plain+=("$blank"); done
 
   # --- Build colored lines ---
   local R=$'\e[0m'
@@ -86,7 +100,7 @@ __nerv_show_popup() {
   # " │" on the left and " │" on the right. Equals W - 2.
   local row_body=$(( W - 2 ))
 
-  for (( i=1; i<=count; i++ )); do
+  for (( i=start; i<=end; i++ )); do
     local line="${items[$i]}"
     local rest="${line#*	}"
     local display="${rest%%	*}"
@@ -110,15 +124,19 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}├${hbar}┤${R}")
 
-  # Footer shows the full selected description, line-wrapped via truncation
-  # to W-2 (leading + trailing space).
-  local sel_avail=$(( W - 2 ))
+  # Footer: " desc … [n/total]" — right-side counter shows the
+  # current position within the full list so users know there's
+  # more below / above when the window is sliding.
+  local counter=""
+  (( total > visible )) && counter="[${__NERV_SELECTED}/${total}]"
+  local sel_avail=$(( W - 2 - ${#counter} ))
+  (( sel_avail < 0 )) && sel_avail=0
   (( ${#sel_desc} > sel_avail )) && sel_desc="${sel_desc:0:$sel_avail}"
-  local fvis=" ${sel_desc} "
-  local fpad=$(( W - ${#fvis} ))
+  local fvis=" ${sel_desc}"
+  local fpad=$(( W - 1 - ${#fvis} - ${#counter} ))
   (( fpad < 0 )) && fpad=0
   local fps=""; for (( j=0; j<fpad; j++ )); do fps+=" "; done
-  colored+=("  ${BG}${BDR}│${DESC}${fvis}${fps}${BDR}│${R}")
+  colored+=("  ${BG}${BDR}│${DESC}${fvis}${fps}${counter} ${BDR}│${R}")
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
 
@@ -273,7 +291,7 @@ __nerv_accept() {
       __nerv_insert_selected
       return
     fi
-    local max=${#__NERV_ITEMS}; (( max > 5 )) && max=5
+    local max=${#__NERV_ITEMS}
     if (( __NERV_SELECTED < max )); then
       (( __NERV_SELECTED++ ))
     else
@@ -290,7 +308,7 @@ bindkey '^I' __nerv_accept
 # Shift-Tab: cycle UP. Falls back to reverse-menu-complete outside Nerv.
 __nerv_accept_back() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
-    local max=${#__NERV_ITEMS}; (( max > 5 )) && max=5
+    local max=${#__NERV_ITEMS}
     if (( __NERV_SELECTED > 1 )); then
       (( __NERV_SELECTED-- ))
     else
@@ -308,7 +326,7 @@ bindkey '^[[Z' __nerv_accept_back
 # stop at the edges, Tab cycles).
 __nerv_select_down() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
-    local max=${#__NERV_ITEMS}; (( max > 5 )) && max=5
+    local max=${#__NERV_ITEMS}
     (( __NERV_SELECTED < max )) && { (( __NERV_SELECTED++ )); __nerv_show_popup "${__NERV_ITEMS[@]}"; }
   else
     zle down-line-or-history
