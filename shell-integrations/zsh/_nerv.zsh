@@ -322,12 +322,18 @@ __nerv_accept_back() {
 zle -N __nerv_accept_back
 bindkey '^[[Z' __nerv_accept_back
 
-# Arrow keys: same navigation, NO cycle wrap (matches Fig — arrows
-# stop at the edges, Tab cycles).
+# Arrow keys: cycle through items (down at last → first, up at
+# first → last). Matches user expectation; differs from old Fig
+# behavior (which stopped at edges) per direct user feedback.
 __nerv_select_down() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
     local max=${#__NERV_ITEMS}
-    (( __NERV_SELECTED < max )) && { (( __NERV_SELECTED++ )); __nerv_show_popup "${__NERV_ITEMS[@]}"; }
+    if (( __NERV_SELECTED < max )); then
+      (( __NERV_SELECTED++ ))
+    else
+      __NERV_SELECTED=1
+    fi
+    __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle down-line-or-history
   fi
@@ -336,7 +342,13 @@ zle -N __nerv_select_down
 
 __nerv_select_up() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
-    (( __NERV_SELECTED > 1 )) && { (( __NERV_SELECTED-- )); __nerv_show_popup "${__NERV_ITEMS[@]}"; }
+    local max=${#__NERV_ITEMS}
+    if (( __NERV_SELECTED > 1 )); then
+      (( __NERV_SELECTED-- ))
+    else
+      __NERV_SELECTED=$max
+    fi
+    __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle up-line-or-history
   fi
