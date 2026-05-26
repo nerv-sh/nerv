@@ -349,8 +349,18 @@ zle -N bracketed-paste __nerv_bracketed_paste
 # Runs every prompt; cheap idempotent reassert.
 # ---------------------------------------------------------------------------
 __nerv_rebind() {
+  # Tab / Shift-Tab / Ctrl-G — last writer wins; reassert ours.
   bindkey -M main '^I'    __nerv_accept       2>/dev/null
   bindkey -M main '^[[Z'  __nerv_accept_back  2>/dev/null
   bindkey -M main '^G'    __nerv_dismiss      2>/dev/null
+  bindkey -M main ' '     __nerv_space        2>/dev/null
+
+  # zle widgets that competing inline-suggestion plugins (Amazon Q,
+  # Fig, fzf-tab, zsh-autosuggestions) re-bind during their own
+  # post-init. The last `zle -N self-insert <name>` wins, so we
+  # re-claim every prompt.
+  zle -N self-insert          __nerv_self_insert      2>/dev/null
+  zle -N backward-delete-char __nerv_backward_delete  2>/dev/null
+  zle -N accept-line          __nerv_line_finish      2>/dev/null
 }
 autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __nerv_rebind
