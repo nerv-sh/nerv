@@ -203,6 +203,9 @@ __nerv_show_popup() {
 }
 
 __nerv_hide_popup() {
+  if [[ -n "${NERV_DEBUG:-}" ]]; then
+    print -r -- "  hide_popup ACTIVE=$__NERV_ACTIVE" >> /tmp/nerv-debug.log
+  fi
   POSTDISPLAY=''
   (( ! __NERV_ACTIVE )) && return
   # Clear the raw-ANSI overlay we painted in show_popup BEFORE
@@ -278,6 +281,9 @@ __nerv_insert_selected() {
 # Core widget
 # ---------------------------------------------------------------------------
 __nerv_complete() {
+  if [[ -n "${NERV_DEBUG:-}" ]]; then
+    print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS}" >> /tmp/nerv-debug.log
+  fi
   (( __NERV_PASTING )) && return
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
@@ -288,6 +294,9 @@ __nerv_complete() {
 
   local resp
   resp=$("$__NERV_BIN" _complete "$LBUFFER" $CURSOR 2>/dev/null) || {
+    if [[ -n "${NERV_DEBUG:-}" ]]; then
+      print -r -- "  complete: BIN call FAILED" >> /tmp/nerv-debug.log
+    fi
     if (( ! __NERV_E1_SHOWN )); then
       __NERV_E1_SHOWN=1
       zle -R "[nerv] daemon not running — run: nerv start"
@@ -295,6 +304,9 @@ __nerv_complete() {
     fi
     return
   }
+  if [[ -n "${NERV_DEBUG:-}" ]]; then
+    print -r -- "  complete: got $(print -r -- "$resp" | wc -l | tr -d ' ') lines" >> /tmp/nerv-debug.log
+  fi
 
   local -a rlines=("${(@f)resp}")
   rlines=("${(@)rlines:#}")

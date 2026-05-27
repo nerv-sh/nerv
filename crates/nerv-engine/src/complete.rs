@@ -533,14 +533,18 @@ fn emit_arg_candidates(
             match g {
                 crate::spec_parser::Generator::Template { script } => {
                     if let Some(lines) = cached_template_generator(script) {
-                        out.extend(lines.into_iter().filter(|s| s.starts_with(prefix)).map(
-                            |line| Suggestion {
-                                insertion: line.clone(),
-                                display: line,
-                                description: None,
-                                kind: SuggestionKind::Argument,
-                            },
-                        ));
+                        out.extend(
+                            lines
+                                .into_iter()
+                                .map(|line| split_id_label(&line))
+                                .filter(|(ins, _)| ins.starts_with(prefix))
+                                .map(|(insertion, display)| Suggestion {
+                                    insertion,
+                                    display,
+                                    description: None,
+                                    kind: SuggestionKind::Argument,
+                                }),
+                        );
                     }
                 }
                 crate::spec_parser::Generator::PackageJsonScripts => {
@@ -764,6 +768,28 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
         .filter(|s| !s.is_empty())
         .collect();
     Some(lines)
+}
+
+/// Split a multi-column Tier B output line into `(insertion, display)`.
+/// When the first whitespace-separated token looks like a numeric id
+/// (e.g. `1234 /bin/zsh` from `ps axo pid,comm`) the bare id becomes
+/// the insertion and the original line stays as the display label.
+/// Otherwise the full line is used as both — covers single-column
+/// generators (`brew list -1`, `kubectl -o name`, etc.) where the
+/// label IS the insertion.
+fn split_id_label(raw: &str) -> (String, String) {
+    let trimmed = raw.trim_start();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or("");
+    let rest = parts.next().unwrap_or("").trim_start();
+    let id_like = !first.is_empty()
+        && first.chars().all(|c| c.is_ascii_digit())
+        && !rest.is_empty();
+    if id_like {
+        (first.to_string(), trimmed.to_string())
+    } else {
+        (raw.to_string(), raw.to_string())
+    }
 }
 
 /// Convert a JSON payload from a Tier B generator (gh `--json=…`,
