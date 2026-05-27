@@ -782,9 +782,8 @@ fn split_id_label(raw: &str) -> (String, String) {
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let first = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim_start();
-    let id_like = !first.is_empty()
-        && first.chars().all(|c| c.is_ascii_digit())
-        && !rest.is_empty();
+    let id_like =
+        !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty();
     if id_like {
         (first.to_string(), trimmed.to_string())
     } else {

@@ -190,13 +190,16 @@ async fn write_pid_file(path: &std::path::Path) -> anyhow::Result<()> {
 }
 
 async fn shutdown_signal() {
+    // SIGTERM only. SIGINT is intentionally NOT handled — `nerv start`
+    // historically inherited the shell's process group, so a Ctrl-C
+    // in the user's interactive zsh delivered SIGINT to the daemon
+    // too and quietly killed inline completion until the next
+    // explicit `nerv start`. Ignoring SIGINT here is a belt to
+    // `cmd_start`'s `process_group(0)` suspenders — either alone
+    // would fix the regression, both makes it stay fixed.
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("install SIGTERM");
-    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT");
-    tokio::select! {
-        _ = term.recv() => {},
-        _ = int.recv() => {},
-    }
+    let _ = term.recv().await;
 }
 
 // E2 (docs/error-states.md §3.2) reporting moves entirely into
