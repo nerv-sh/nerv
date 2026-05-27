@@ -332,6 +332,39 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
     ) {
       return { type: "kubectl_resources" };
     }
+    // Well-known: systemctl's `unitGenerator` / `unitFileGenerator`
+    // (vendor/withfig-autocomplete/src/systemctl.ts). Both shell out
+    // to `systemctl list-units -o json --all --full` (or list-unit-
+    // files). The complete.rs JSON extractor handles the `.unit` /
+    // `.unit_file` field lookup. Closure source check is exact.
+    if (src.includes('"systemctl"')) {
+      if (src.includes('"list-units"')) {
+        return {
+          type: "template",
+          script: [
+            "systemctl",
+            "list-units",
+            "-o",
+            "json",
+            "--all",
+            "--full",
+          ],
+        };
+      }
+      if (src.includes('"list-unit-files"')) {
+        return {
+          type: "template",
+          script: [
+            "systemctl",
+            "list-unit-files",
+            "-o",
+            "json",
+            "--all",
+            "--full",
+          ],
+        };
+      }
+    }
     // Well-known: git's branch enumeration closures
     // (`gitGenerators.localBranches` / `localOrRemoteBranches`
     // in vendor/withfig-autocomplete/src/git.ts). Both shell out to
