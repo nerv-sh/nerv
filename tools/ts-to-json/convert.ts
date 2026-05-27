@@ -77,6 +77,8 @@ type FigOpt = {
   isRequired?: boolean;
   isRepeatable?: boolean | number;
   hidden?: boolean;
+  isPersistent?: boolean;
+  priority?: number;
 };
 
 type FigSpec = {
@@ -122,6 +124,8 @@ type NervOpt = {
   is_required: boolean;
   is_repeatable: boolean;
   hidden: boolean;
+  isPersistent?: boolean;
+  priority?: number;
 };
 
 type NervSpec = {
@@ -133,6 +137,7 @@ type NervSpec = {
   args: NervArg[];
   requires_double_dash: boolean;
   hidden: boolean;
+  priority?: number;
 };
 
 type NervGenerator =
@@ -617,6 +622,8 @@ const convertOpt = async (o: FigOpt): Promise<NervOpt> => {
     is_required: o.isRequired ?? false,
     is_repeatable: typeof o.isRepeatable === "boolean" ? o.isRepeatable : false,
     hidden: o.hidden ?? false,
+    ...(o.isPersistent === true ? { isPersistent: true } : {}),
+    ...(typeof o.priority === "number" ? { priority: o.priority } : {}),
   };
 };
 
@@ -729,6 +736,9 @@ const convertSpec = async (
     args: await argsOf(s.args),
     requires_double_dash: false,
     hidden: s.hidden ?? false,
+    ...(typeof (s as any).priority === "number"
+      ? { priority: (s as any).priority }
+      : {}),
   };
 };
 

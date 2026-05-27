@@ -314,7 +314,17 @@ pub fn complete_in(
     //   roots like `git` that have BOTH subcommands AND a fallback
     //   `<alias>` positional — typing `git ` should suggest
     //   subcommands, not the alias arg's (empty) suggestion list.
-    let prefix_is_option = prefix.starts_with('-') && !current.options.is_empty();
+    // Walk the subcommand chain so emit_options can pull in
+    // persistent ancestor options (Fig parity for `--help` /
+    // `--debug` declared at the root with isPersistent).
+    let chain = walk_chain(spec_ref, &result.subcommand_path);
+    let ancestor_refs: Vec<&Subcommand> = chain.iter().rev().skip(1).copied().collect();
+
+    let has_emittable_options = !current.options.is_empty()
+        || ancestor_refs
+            .iter()
+            .any(|sc| sc.options.iter().any(|o| o.is_persistent));
+    let prefix_is_option = prefix.starts_with('-') && has_emittable_options;
     let prefer_subcommands = !prefix.starts_with('-')
         && !current.subcommands.is_empty()
         && matches!(
@@ -340,7 +350,7 @@ pub fn complete_in(
     }
 
     let items = if prefix_is_option {
-        emit_options(current, &prefix)
+        emit_options_with_ancestors(current, &ancestor_refs, &prefix)
     } else if prefer_subcommands {
         // yarn-style shorthand: `yarn web` should match both yarn
         // subcommands (none start with "web") and the root args
@@ -356,7 +366,9 @@ pub fn complete_in(
     } else {
         match result.cursor_context {
             CursorContext::Subcommand => emit_subcommands(current, &prefix),
-            CursorContext::OptionName => emit_options(current, &prefix),
+            CursorContext::OptionName => {
+                emit_options_with_ancestors(current, &ancestor_refs, &prefix)
+            }
             CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd),
             CursorContext::Done => vec![],
         }
@@ -423,6 +435,25 @@ fn walk_to_current<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand
     Some(node)
 }
 
+/// Like [`walk_to_current`] but returns the whole chain root → leaf.
+/// Used to enumerate ancestor subcommands when looking up
+/// persistent options. Returns at least `[root]` for an empty
+/// path.
+fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
+    let mut chain: Vec<&Subcommand> = vec![root];
+    let mut node: &Subcommand = root;
+    for name in path.iter().skip(1) {
+        match find_subcommand(node, name) {
+            Some(next) => {
+                node = next;
+                chain.push(next);
+            }
+            None => break,
+        }
+    }
+    chain
+}
+
 fn emit_subcommands(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = node
         .subcommands
@@ -440,24 +471,51 @@ fn emit_subcommands(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
     out
 }
 
-fn emit_options(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
+/// Emit option-name suggestions for `node`, including any
+/// ancestor options whose `is_persistent` flag is set (Fig parity).
+/// `ancestors` is leaf → root order of the chain ABOVE `node`;
+/// pass an empty slice for a root-level emit.
+fn emit_options_with_ancestors(
+    node: &Subcommand,
+    ancestors: &[&Subcommand],
+    prefix: &str,
+) -> Vec<Suggestion> {
+    let emit = |opt: &crate::spec_parser::Opt| -> Vec<Suggestion> {
+        opt.names
+            .iter()
+            .filter(|n| n.starts_with(prefix))
+            .map(|n| Suggestion {
+                insertion: n.clone(),
+                display: n.clone(),
+                description: opt.description.clone(),
+                kind: SuggestionKind::Flag,
+            })
+            .collect()
+    };
     let mut out: Vec<Suggestion> = node
         .options
         .iter()
         .filter(|o| !o.hidden)
-        .flat_map(|o| {
-            o.names
-                .iter()
-                .filter(|n| n.starts_with(prefix))
-                .map(move |n| Suggestion {
-                    insertion: n.clone(),
-                    display: n.clone(),
-                    description: o.description.clone(),
-                    kind: SuggestionKind::Flag,
-                })
-        })
+        .flat_map(&emit)
         .collect();
+    for sc in ancestors {
+        for opt in &sc.options {
+            if !opt.is_persistent || opt.hidden {
+                continue;
+            }
+            // Don't double-emit if leaf already declared the same flag.
+            if opt.names.iter().any(|n| {
+                node.options
+                    .iter()
+                    .any(|local| local.names.contains(n))
+            }) {
+                continue;
+            }
+            out.extend(emit(opt));
+        }
+    }
     out.sort_by(|a, b| a.display.cmp(&b.display));
+    out.dedup_by(|a, b| a.display == b.display);
     out
 }
 
