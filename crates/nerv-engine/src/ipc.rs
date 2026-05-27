@@ -62,7 +62,7 @@ pub enum Response {
 }
 
 /// A single completion suggestion.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Suggestion {
     /// What gets inserted on Tab.
     pub insertion: String,
@@ -72,11 +72,16 @@ pub struct Suggestion {
     pub description: Option<String>,
     /// Subcommand / flag / argument.
     pub kind: SuggestionKind,
+    /// Fig parity sort hint. Higher → earlier in the popup.
+    /// Default 50 (Fig convention). Falls back to alpha when equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SuggestionKind {
+    #[default]
     Subcommand,
     Flag,
     Argument,
