@@ -530,11 +530,22 @@ fn cmd_start() -> anyhow::Result<()> {
     let log_err = log.try_clone()?;
 
     let bin = resolve_nervd_path()?;
-    Command::new(&bin)
-        .stdin(Stdio::null())
+    let mut cmd = Command::new(&bin);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err))
-        .spawn()
+        .stderr(Stdio::from(log_err));
+    // Put the daemon in its own process group so a Ctrl-C in the
+    // launching shell (or any later interactive shell that shares the
+    // pgrp) doesn't deliver SIGINT to the daemon too. Without this
+    // the daemon inherited the shell's pgrp and silently died the
+    // first time a user hit Ctrl-C — popup stopped appearing until
+    // the user re-ran `nerv start`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn()
         .with_context(|| format!("spawn {}", bin.display()))?;
 
     // Wait briefly for the daemon to write its PID file (signals readiness).
