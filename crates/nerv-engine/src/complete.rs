@@ -552,10 +552,10 @@ fn emit_candidates_for_arg(
         _ => None,
     } {
         if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
-            out.extend(paths.into_iter().map(|(insertion, display)| Suggestion {
+            out.extend(paths.into_iter().map(|(insertion, display, description)| Suggestion {
                 insertion,
                 display,
-                description: None,
+                description,
                 kind: SuggestionKind::Argument,
             }));
         }
@@ -618,10 +618,10 @@ fn emit_candidates_for_arg(
                 }
                 crate::spec_parser::Generator::Filepaths { folders_only } => {
                     if let Some(paths) = filepaths_at(cwd, prefix, *folders_only) {
-                        out.extend(paths.into_iter().map(|(insertion, display)| Suggestion {
+                        out.extend(paths.into_iter().map(|(insertion, display, description)| Suggestion {
                             insertion,
                             display,
-                            description: None,
+                            description,
                             kind: SuggestionKind::Argument,
                         }));
                     }
@@ -1638,7 +1638,7 @@ fn filepaths_at(
     cwd: Option<&std::path::Path>,
     prefix: &str,
     folders_only: bool,
-) -> Option<Vec<(String, String)>> {
+) -> Option<Vec<(String, String, Option<String>)>> {
     // Split prefix into (dir_part_preserve_trailing_slash, basename_filter).
     let (dir_part, filter) = match prefix.rfind('/') {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),
@@ -1646,7 +1646,7 @@ fn filepaths_at(
     };
     let resolved = resolve_filepaths_root(cwd, dir_part)?;
     let entries = std::fs::read_dir(&resolved).ok()?;
-    let mut out: Vec<(String, String)> = Vec::new();
+    let mut out: Vec<(String, String, Option<String>)> = Vec::new();
     for e in entries.flatten() {
         let name_os = e.file_name();
         let Some(name) = name_os.to_str() else {
@@ -1659,17 +1659,62 @@ fn filepaths_at(
         if name.starts_with('.') && !filter.starts_with('.') {
             continue;
         }
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let ft = e.file_type().ok();
+        let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
         if folders_only && !is_dir {
             continue;
         }
         let trailing = if is_dir { "/" } else { "" };
         let insertion = format!("{dir_part}{name}{trailing}");
         let display = format!("{name}{trailing}");
-        out.push((insertion, display));
+        // Description fallback: file size for regular files, "dir"
+        // for folders, "→ target" for symlinks. One metadata() per
+        // entry — cheap (~10µs each, ~500µs for a 50-entry dir).
+        // Keeps the footer line in the popup informative; was
+        // empty before for cd / ls / cat / vim / ...
+        let is_symlink = ft.map(|t| t.is_symlink()).unwrap_or(false);
+        let desc = filepaths_desc(&e, is_dir, is_symlink);
+        out.push((insertion, display, desc));
     }
     out.sort_by(|a, b| a.1.cmp(&b.1));
     Some(out)
+}
+
+fn filepaths_desc(
+    entry: &std::fs::DirEntry,
+    is_dir: bool,
+    is_symlink: bool,
+) -> Option<String> {
+    if is_symlink {
+        if let Ok(target) = std::fs::read_link(entry.path()) {
+            return Some(format!("→ {}", target.display()));
+        }
+        return Some("symlink".into());
+    }
+    if is_dir {
+        return Some("dir".into());
+    }
+    let meta = entry.metadata().ok()?;
+    Some(human_size(meta.len()))
+}
+
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{bytes}{}", UNITS[0])
+    } else if v >= 100.0 {
+        format!("{v:.0}{}", UNITS[u])
+    } else if v >= 10.0 {
+        format!("{v:.1}{}", UNITS[u])
+    } else {
+        format!("{v:.2}{}", UNITS[u])
+    }
 }
 
 /// Resolve a (possibly relative, possibly tilde-prefixed) directory
@@ -2203,5 +2248,30 @@ mod tests {
     #[test]
     fn extract_enum_no_braces_returns_none() {
         assert_eq!(extract_enum_from_description("just a description"), None);
+    }
+
+    #[test]
+    fn human_size_small_bytes() {
+        assert_eq!(human_size(0), "0B");
+        assert_eq!(human_size(512), "512B");
+        assert_eq!(human_size(1023), "1023B");
+    }
+
+    #[test]
+    fn human_size_kilobytes_use_one_decimal_under_100() {
+        assert_eq!(human_size(1024), "1.00K");
+        assert_eq!(human_size(2048), "2.00K");
+        assert_eq!(human_size(15 * 1024), "15.0K");
+    }
+
+    #[test]
+    fn human_size_at_unit_boundary_uses_no_decimals_above_100() {
+        assert_eq!(human_size(150 * 1024), "150K");
+        assert_eq!(human_size(5 * 1024 * 1024), "5.00M");
+    }
+
+    #[test]
+    fn human_size_giga_scale() {
+        assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2.00G");
     }
 }
