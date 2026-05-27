@@ -614,6 +614,38 @@ fn emit_arg_candidates(
                         );
                     }
                 }
+                crate::spec_parser::Generator::PackageJsonDeps => {
+                    if let Some(deps) = package_json_deps(cwd) {
+                        out.extend(
+                            deps.into_iter()
+                                .filter(|(name, _)| name.starts_with(prefix))
+                                .map(|(name, kind)| Suggestion {
+                                    insertion: name.clone(),
+                                    display: name,
+                                    description: Some(kind.into()),
+                                    kind: SuggestionKind::Argument,
+                                }),
+                        );
+                    }
+                }
+                crate::spec_parser::Generator::KubectlResources => {
+                    let key = vec![
+                        "kubectl".to_string(),
+                        "api-resources".to_string(),
+                        "-o".to_string(),
+                        "name".to_string(),
+                    ];
+                    if let Some(lines) = cached_template_generator(&key) {
+                        out.extend(lines.into_iter().filter(|s| s.starts_with(prefix)).map(
+                            |line| Suggestion {
+                                insertion: line.clone(),
+                                display: line,
+                                description: Some("k8s resource".into()),
+                                kind: SuggestionKind::Argument,
+                            },
+                        ));
+                    }
+                }
                 crate::spec_parser::Generator::ZoxideQuery => {
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
@@ -953,6 +985,34 @@ fn package_json_scripts_in(start: &std::path::Path) -> Option<Vec<(String, Strin
         cache.insert(path, (mtime, scripts.clone()));
     }
     Some(scripts)
+}
+
+/// Collect the union of `dependencies` / `devDependencies` /
+/// `optionalDependencies` keys from the nearest `package.json` above
+/// `cwd`. Returns `(name, kind)` pairs where kind is the description
+/// label (`dependency`, `devDependency`, `optionalDependency`).
+fn package_json_deps(cwd: Option<&std::path::Path>) -> Option<Vec<(String, &'static str)>> {
+    let start = cwd
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())?;
+    let path = find_package_json(&start)?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let mut out: Vec<(String, &'static str)> = Vec::new();
+    for (key, label) in &[
+        ("dependencies", "dependency"),
+        ("devDependencies", "devDependency"),
+        ("optionalDependencies", "optionalDependency"),
+    ] {
+        if let Some(obj) = v.get(*key).and_then(|x| x.as_object()) {
+            for k in obj.keys() {
+                out.push((k.clone(), *label));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    Some(out)
 }
 
 /// Clamp `cursor` down to the nearest valid UTF-8 char boundary at or
