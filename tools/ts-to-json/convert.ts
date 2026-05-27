@@ -332,6 +332,40 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
     ) {
       return { type: "kubectl_resources" };
     }
+    // Well-known: git's branch enumeration closures
+    // (`gitGenerators.localBranches` / `localOrRemoteBranches`
+    // in vendor/withfig-autocomplete/src/git.ts). Both shell out to
+    // `git ... branch ... --no-color --sort=-committerdate` and
+    // post-process to strip the `* ` / `+ ` markers. Rewrite to a
+    // Template form — sanitize_generator_line already handles the
+    // marker stripping. False positives essentially zero (the
+    // git-marker + --sort=-committerdate co-occurrence is unique).
+    if (
+      (src.includes("--sort=-committerdate") ||
+        src.includes("'-sort=-committerdate'")) &&
+      (src.includes('"branch"') || src.includes("'branch'"))
+    ) {
+      const wantsRemote = src.includes('"-r"') || src.includes("'-r'");
+      return {
+        type: "template",
+        script: wantsRemote
+          ? [
+              "git",
+              "--no-optional-locks",
+              "branch",
+              "-a",
+              "--no-color",
+              "--sort=-committerdate",
+            ]
+          : [
+              "git",
+              "--no-optional-locks",
+              "branch",
+              "--no-color",
+              "--sort=-committerdate",
+            ],
+      };
+    }
     // Well-known: cargo's `targetGenerator({ kind })` — runs
     // `cargo metadata --format-version 1 --no-deps` and walks
     // `packages[*].targets[*]`, optionally filtering by
