@@ -583,6 +583,33 @@ fn emit_arg_candidates(
                         );
                     }
                 }
+                crate::spec_parser::Generator::MakefileTargets => {
+                    if let Some(targets) = makefile_targets(cwd) {
+                        out.extend(targets.into_iter().filter(|t| t.starts_with(prefix)).map(
+                            |t| Suggestion {
+                                insertion: t.clone(),
+                                display: t,
+                                description: Some("make target".into()),
+                                kind: SuggestionKind::Argument,
+                            },
+                        ));
+                    }
+                }
+                crate::spec_parser::Generator::ManPages => {
+                    if let Some(pages) = man_pages() {
+                        out.extend(
+                            pages
+                                .into_iter()
+                                .filter(|p| p.starts_with(prefix))
+                                .map(|p| Suggestion {
+                                    insertion: p.clone(),
+                                    display: p,
+                                    description: Some("man page".into()),
+                                    kind: SuggestionKind::Argument,
+                                }),
+                        );
+                    }
+                }
                 crate::spec_parser::Generator::ZoxideQuery => {
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
@@ -661,10 +688,19 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
 }
 
 /// Run a Tier B template generator script and return its stdout lines.
-/// Hard-capped at 200ms wall time to keep the IPC roundtrip under the
-/// 25ms p95 budget even on a busy machine — any longer means the
-/// shell command itself is the bottleneck, not the engine.
+///
+/// Hard-capped at 800ms wall time. The engine itself has a 25ms p95
+/// budget for cached lookups, but the first call to any generator
+/// inevitably costs whatever the underlying shell command takes.
+/// 200ms was too tight for `brew list -1` (~450ms cold on a busy
+/// machine) and `gh repo list` (network); 800ms covers those without
+/// pushing UX into noticeably-laggy territory, and the 5s in-memory
+/// cache means every keystroke after the first hits cache anyway.
+const GENERATOR_TIMEOUT_MS: u64 = 800;
+
 fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+    // Wrapper kept for parity with the prior call sites and the doc
+    // comment above.
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
@@ -695,7 +731,7 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
         let _ = stdout.read_to_end(&mut buf);
         let _ = tx.send(buf);
     });
-    let buf = match rx.recv_timeout(Duration::from_millis(200)) {
+    let buf = match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
         Ok(b) => b,
         Err(_) => {
             let _ = child.kill();
@@ -1133,6 +1169,131 @@ fn ssh_hosts_from_config(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Well-known generator: Makefile target enumeration (`make`)
+// ---------------------------------------------------------------------------
+
+/// Parse `Makefile` / `makefile` / `GNUmakefile` in the current
+/// working directory and return target names. Recognises lines of
+/// the form `<name>:` where `<name>` is composed of identifier-safe
+/// characters — same surface area as Fig's `listTargets` closure but
+/// without booting Node.
+fn makefile_targets(cwd: Option<&std::path::Path>) -> Option<Vec<String>> {
+    let dir = cwd
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())?;
+    let path = ["Makefile", "makefile", "GNUmakefile"]
+        .iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.exists())?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let mut targets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for line in raw.lines() {
+        // Skip recipe lines (start with a tab) and continuation chunks.
+        if line.starts_with('\t') {
+            continue;
+        }
+        let Some(colon) = line.find(':') else {
+            continue;
+        };
+        let head = &line[..colon];
+        // Skip `target = value` style variables — `:=` rules out
+        // direct-set, and a leading `#` is a comment.
+        if head.contains('=') || head.trim_start().starts_with('#') {
+            continue;
+        }
+        for raw_target in head.split_whitespace() {
+            if is_makefile_target_name(raw_target) && !raw_target.starts_with('.') {
+                targets.insert(raw_target.to_string());
+            }
+        }
+    }
+    Some(targets.into_iter().collect())
+}
+
+fn is_makefile_target_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/'))
+}
+
+// ---------------------------------------------------------------------------
+// Well-known generator: man page enumeration (`man`)
+// ---------------------------------------------------------------------------
+
+/// Walk the user's `MANPATH` (or the common defaults) for `manN/*`
+/// entries and return the bare page name (no section suffix, no
+/// `.gz`). Matches the surface area of Fig's `generateManualPages`
+/// closure without spawning `man -k`.
+fn man_pages() -> Option<Vec<String>> {
+    let roots = man_path_roots();
+    if roots.is_empty() {
+        return None;
+    }
+    let mut pages: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for root in roots {
+        let Ok(sections) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for sec in sections.flatten() {
+            let name = sec.file_name();
+            let Some(s) = name.to_str() else {
+                continue;
+            };
+            if !s.starts_with("man") || s.len() < 4 {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(sec.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let fname = f.file_name();
+                let Some(fs) = fname.to_str() else { continue };
+                if let Some(page) = man_page_stem(fs) {
+                    pages.insert(page);
+                }
+            }
+        }
+    }
+    Some(pages.into_iter().collect())
+}
+
+fn man_page_stem(file_name: &str) -> Option<String> {
+    let trimmed = file_name.strip_suffix(".gz").unwrap_or(file_name);
+    // `git.1` / `printf.3` / `man.1posix` — strip the last dot and
+    // anything after.
+    let dot = trimmed.rfind('.')?;
+    let stem = &trimmed[..dot];
+    if stem.is_empty() {
+        None
+    } else {
+        Some(stem.to_string())
+    }
+}
+
+fn man_path_roots() -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(v) = std::env::var("MANPATH") {
+        for p in v.split(':') {
+            if !p.is_empty() {
+                roots.push(std::path::PathBuf::from(p));
+            }
+        }
+    }
+    for fallback in [
+        "/usr/share/man",
+        "/usr/local/share/man",
+        "/opt/homebrew/share/man",
+        "/Library/Developer/CommandLineTools/usr/share/man",
+    ] {
+        let p = std::path::PathBuf::from(fallback);
+        if p.exists() && !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+    roots
 }
 
 // ---------------------------------------------------------------------------

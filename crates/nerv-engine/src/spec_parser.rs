@@ -173,6 +173,16 @@ pub enum Generator {
     /// The Rust engine does the same in pure Rust to skip the Tier C
     /// closure roundtrip.
     SshHosts,
+    /// Well-known: `make`'s `listTargets` closure. Parses `Makefile`
+    /// (or `makefile` / `GNUmakefile`) in the current working dir and
+    /// emits target names. Fig runs the closure via Node; we recover
+    /// in pure Rust by scanning for `^[A-Za-z0-9_./-]+:` lines.
+    MakefileTargets,
+    /// Well-known: `man`'s `generateManualPages` closure. Walks
+    /// `MANPATH` (or the default `/usr/share/man`,
+    /// `/usr/local/share/man`, `/opt/homebrew/share/man`) for
+    /// `manN/*.N` / `manN/*.N.gz` and emits the bare page name.
+    ManPages,
 }
 
 // ---------------------------------------------------------------------------
