@@ -196,6 +196,17 @@ pub enum Generator {
     /// `typeWithoutName(context[len-1])` and we can substitute the
     /// underlying `api-resources` call directly.
     KubectlResources,
+    /// Well-known: cargo's `targetGenerator({ kind })` — runs
+    /// `cargo metadata --format-version 1 --no-deps`, walks
+    /// `packages[*].targets[*]`, and (when `kind` is set) filters by
+    /// `target.kind.includes(kind)`. Used by `cargo run/build/test/
+    /// bench/install/...` for `--bin / --example / --test / --bench`
+    /// completions. `kind = None` returns every target regardless of
+    /// kind (matches the fallthrough branch in the upstream closure).
+    CargoTargets {
+        #[serde(default)]
+        kind: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +272,13 @@ pub struct ParserResult {
     /// Subcommand chain from root to current (e.g. `["git", "remote", "add"]`).
     /// Cloned names; the spec tree is not borrowed.
     pub subcommand_path: Vec<String>,
+    /// When the cursor sits on an option's expected argument value
+    /// (i.e. the previous token was an option with un-consumed arg
+    /// slots), this carries `(option_name, arg_index)` so the caller
+    /// can dispatch completion to the *option's* args[arg_index]
+    /// instead of the surrounding subcommand's positional args.
+    /// `None` everywhere else.
+    pub active_option_arg: Option<(String, usize)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -699,10 +717,22 @@ pub fn parse_arguments(spec: &Spec, tokens: &[Annotation], cursor: usize) -> Par
 
     let cursor_context = compute_cursor_context(spec, &state, last_consumed_text.as_deref());
 
+    // Capture which option-arg slot the cursor is awaiting, if any.
+    // Lives alongside cursor_context = Arg; downstream uses it to
+    // dispatch to the option's args[idx] generators instead of the
+    // subcommand's positionals.
+    let active_option_arg = match (state.option_args.as_ref(), state.consumed_options.last()) {
+        (Some(args), Some(opt)) if args.has_more() => {
+            opt.names.first().map(|n| (n.clone(), args.idx))
+        }
+        _ => None,
+    };
+
     ParserResult {
         annotations,
         cursor_context,
         subcommand_path: state.subcommand_path,
+        active_option_arg,
     }
 }
 
@@ -1319,5 +1349,28 @@ mod tests {
         // downstream can render it.
         assert_eq!(r.annotations.len(), 1);
         assert_eq!(r.annotations[0].kind, TokenKind::Subcommand);
+    }
+
+    #[test]
+    fn active_option_arg_after_option_with_arg() {
+        // `git commit -m <here>` — cursor after `-m`, awaiting the
+        // option's `msg` arg value.
+        let s = git_spec();
+        let toks = tokenize("git commit -m ");
+        let r = parse_arguments(&s, &toks, 14);
+        assert_eq!(r.cursor_context, CursorContext::Arg);
+        assert_eq!(
+            r.active_option_arg,
+            Some(("-m".to_string(), 0)),
+            "cursor on `git commit -m ` should bind active_option_arg to -m"
+        );
+    }
+
+    #[test]
+    fn active_option_arg_is_none_when_no_option_pending() {
+        let s = git_spec();
+        let toks = tokenize("git commit");
+        let r = parse_arguments(&s, &toks, 999);
+        assert_eq!(r.active_option_arg, None);
     }
 }

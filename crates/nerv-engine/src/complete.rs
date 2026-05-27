@@ -322,6 +322,23 @@ pub fn complete_in(
             CursorContext::Subcommand | CursorContext::Arg
         );
 
+    // Option-arg dispatch: when the parser tells us the cursor is
+    // awaiting an option's argument value (e.g. `cargo run --bin
+    // <here>`), iterate that option's args[idx] generators directly
+    // — `emit_arg_candidates` would otherwise look at the surrounding
+    // subcommand's positional args, which is the wrong slot.
+    if let Some((opt_name, arg_idx)) = result.active_option_arg.as_ref() {
+        if let Some(opt) = current.options.iter().find(|o| o.names.contains(opt_name)) {
+            if let Some(arg) = opt.args.get(*arg_idx) {
+                let items = emit_candidates_for_arg(arg, &prefix, cwd);
+                return CompleteResult {
+                    items,
+                    reason: None,
+                };
+            }
+        }
+    }
+
     let items = if prefix_is_option {
         emit_options(current, &prefix)
     } else if prefer_subcommands {
@@ -472,7 +489,14 @@ fn emit_arg_candidates(
     let Some(arg) = node.args.first() else {
         return vec![];
     };
+    emit_candidates_for_arg(arg, prefix, cwd)
+}
 
+fn emit_candidates_for_arg(
+    arg: &crate::spec_parser::Arg,
+    prefix: &str,
+    cwd: Option<&std::path::Path>,
+) -> Vec<Suggestion> {
     // Static suggestions list (Tier A).
     let mut out: Vec<Suggestion> = arg
         .suggestions
@@ -646,6 +670,25 @@ fn emit_arg_candidates(
                         ));
                     }
                 }
+                crate::spec_parser::Generator::CargoTargets { kind } => {
+                    if let Some(targets) = cargo_targets(cwd, kind.as_deref()) {
+                        out.extend(
+                            targets
+                                .into_iter()
+                                .filter(|(name, _, _)| name.starts_with(prefix))
+                                .map(|(name, kind, path)| Suggestion {
+                                    insertion: name.clone(),
+                                    display: name,
+                                    description: Some(if path.is_empty() {
+                                        kind
+                                    } else {
+                                        format!("{kind} — {path}")
+                                    }),
+                                    kind: SuggestionKind::Argument,
+                                }),
+                        );
+                    }
+                }
                 crate::spec_parser::Generator::ZoxideQuery => {
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
@@ -707,8 +750,6 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
     }
     let lines = execute_template_generator(script)?;
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
-        // Drop oldest entry when full (simple LRU stand-in; for 64
-        // slots the O(n) scan is cheaper than dragging in a real LRU).
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
                 .iter()
@@ -735,8 +776,6 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
 const GENERATOR_TIMEOUT_MS: u64 = 800;
 
 fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
-    // Wrapper kept for parity with the prior call sites and the doc
-    // comment above.
     use std::io::Read;
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
@@ -1013,6 +1052,120 @@ fn package_json_deps(cwd: Option<&std::path::Path>) -> Option<Vec<(String, &'sta
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out.dedup_by(|a, b| a.0 == b.0);
     Some(out)
+}
+
+/// Run `cargo metadata --format-version 1 --no-deps` in `cwd`, walk
+/// `packages[*].targets[*]`, optionally filter by `kind`, and return
+/// `(name, kind, src_path_relative_to_cwd)` tuples. Cached via the
+/// shared `cached_template_generator` (5s TTL).
+///
+/// Recovery for the upstream `targetGenerator` closure in
+/// vendor/withfig-autocomplete/src/cargo.ts — 78 unresolved customs.
+fn cargo_targets(
+    cwd: Option<&std::path::Path>,
+    kind_filter: Option<&str>,
+) -> Option<Vec<(String, String, String)>> {
+    let start = cwd
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())?;
+    // Run cargo metadata in cwd. Bypass cached_template_generator's
+    // JSON-auto-extract path (which would flatten `packages[*]` into
+    // candidate strings) and parse the raw blob ourselves — we need
+    // the nested `packages[*].targets[*].kind` structure.
+    let raw = cached_cargo_metadata(&start)?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let packages = v.get("packages")?.as_array()?;
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    for pkg in packages {
+        let targets = pkg.get("targets").and_then(|t| t.as_array());
+        let Some(targets) = targets else { continue };
+        for t in targets {
+            let name = t.get("name").and_then(|x| x.as_str()).unwrap_or("");
+            let src = t.get("src_path").and_then(|x| x.as_str()).unwrap_or("");
+            let kinds: Vec<String> = t
+                .get("kind")
+                .and_then(|k| k.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(filter) = kind_filter {
+                if !kinds.iter().any(|k| k == filter) {
+                    continue;
+                }
+            }
+            if name.is_empty() {
+                continue;
+            }
+            let kind_label = kinds.first().cloned().unwrap_or_else(|| "target".into());
+            let rel = src
+                .strip_prefix(&format!("{}/", start.display()))
+                .unwrap_or(src)
+                .to_string();
+            out.push((name.to_string(), kind_label, rel));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    Some(out)
+}
+
+/// Per-cwd cache for `cargo metadata` raw output. Keyed by cwd
+/// (canonicalized), TTL 5s. Lives separately from
+/// [`GENERATOR_CACHE`] because that cache routes JSON-shaped output
+/// through `extract_json_candidates`, which would lose the nested
+/// `packages[*].targets[*]` structure cargo_targets needs.
+static CARGO_METADATA_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, String)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
+    let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    if let Ok(cache) = CARGO_METADATA_CACHE.lock() {
+        if let Some((stamp, blob)) = cache.get(&canon) {
+            if stamp.elapsed() < GENERATOR_CACHE_TTL {
+                return Some(blob.clone());
+            }
+        }
+    }
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let mut child = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(&canon)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = Vec::with_capacity(65_536);
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let buf = match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
+        Ok(b) => b,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let _ = child.wait();
+    if buf.is_empty() {
+        return None;
+    }
+    let blob = String::from_utf8_lossy(&buf).into_owned();
+    if let Ok(mut cache) = CARGO_METADATA_CACHE.lock() {
+        cache.insert(canon, (std::time::Instant::now(), blob.clone()));
+    }
+    Some(blob)
 }
 
 /// Clamp `cursor` down to the nearest valid UTF-8 char boundary at or
