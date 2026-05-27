@@ -703,7 +703,13 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
             return None;
         }
     };
-    if !matches!(child.wait().map(|s| s.success()), Ok(true)) {
+    // Don't gate on exit status alone — many Fig generators run
+    // `find $i ...` over `$PATH`-derived dirs that may not all exist,
+    // so the script exits non-zero on the missing-path case even
+    // though stdout was usefully populated. If we got stdout bytes,
+    // use them; only return None when there's truly nothing to parse.
+    let _ = child.wait();
+    if buf.is_empty() {
         return None;
     }
     let text = String::from_utf8_lossy(&buf);
@@ -733,6 +739,43 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
 /// payload doesn't fit any of those shapes — caller falls back to
 /// empty suggestions, which beats dumping JSON noise.
 fn extract_json_candidates(raw: &str) -> Option<Vec<String>> {
+    // JSON-lines first: `docker ps --format '{{ json . }}'`,
+    // `gh repo list --json …` (when piped). One object per line,
+    // each starts with `{`. Single `serde_json::from_str` over the
+    // whole payload fails because the chunks are concatenated, not
+    // wrapped in `[...]`. Detect by checking that >50% of non-blank
+    // lines start with `{` and that the first line parses.
+    let trimmed = raw.trim();
+    let mut maybe_jsonl = false;
+    if trimmed.starts_with('{') {
+        let lines: Vec<&str> = trimmed
+            .lines()
+            .map(str::trim_start)
+            .filter(|s| !s.is_empty())
+            .collect();
+        // Accept any non-empty stream where every non-blank line is
+        // an object — covers `docker ps --format '{{ json . }}'`
+        // (which emits ONE line per container, often a single line).
+        if !lines.is_empty() && lines.iter().all(|l| l.starts_with('{')) {
+            maybe_jsonl = true;
+        }
+    }
+    if maybe_jsonl {
+        let labels: Vec<String> = trimmed
+            .lines()
+            .filter_map(|line| {
+                let s = line.trim();
+                if s.is_empty() {
+                    return None;
+                }
+                let v: serde_json::Value = serde_json::from_str(s).ok()?;
+                label_from_value(&v)
+            })
+            .collect();
+        if !labels.is_empty() {
+            return Some(labels);
+        }
+    }
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let arr = locate_array(&v)?;
     let labels: Vec<String> = arr.iter().filter_map(label_from_value).collect();
@@ -769,8 +812,16 @@ fn label_from_value(v: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Object(obj) => {
-            for key in ["name", "number", "id", "title", "key"] {
-                if let Some(found) = obj.get(key) {
+            // Case-insensitive key match — docker emits `Names`,
+            // kubectl emits `metadata.name`, gh emits `name`/`number`.
+            // Build a lower-cased view so the same generator handles
+            // all three without per-tool special-casing.
+            let lower_keys: std::collections::HashMap<String, &serde_json::Value> = obj
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v))
+                .collect();
+            for key in ["name", "names", "number", "id", "title", "key"] {
+                if let Some(found) = lower_keys.get(key) {
                     if let Some(s) = scalar_to_string(found) {
                         return Some(s);
                     }
