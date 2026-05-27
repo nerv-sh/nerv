@@ -65,6 +65,10 @@ pub struct Subcommand {
     pub requires_double_dash: bool,
     /// Hidden from the suggestion list but still parseable.
     pub hidden: bool,
+    /// Fig parity sort hint (higher = earlier). Falls back to alpha
+    /// when equal / absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
 }
 
 /// A long / short option flag, possibly with one or more attached
@@ -89,6 +93,16 @@ pub struct Opt {
     pub is_repeatable: bool,
     /// Hidden from the suggestion list but still parseable.
     pub hidden: bool,
+    /// Fig parity: when true, this option propagates to every
+    /// descendant subcommand. e.g. `git --help isPersistent: true`
+    /// makes `git commit --help` valid even though `commit`'s
+    /// option table doesn't list `--help`.
+    #[serde(default, rename = "isPersistent", alias = "is_persistent")]
+    pub is_persistent: bool,
+    /// Fig parity sort hint. Higher = earlier in the popup. Default
+    /// 50 (Fig convention). Falls back to alpha when equal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
 }
 
 /// A positional or option-bound argument.
@@ -393,6 +407,39 @@ pub(crate) fn find_option<'a>(subcommand: &'a Subcommand, needle: &str) -> Optio
         .find(|o| o.names.iter().any(|n| n == needle))
 }
 
+/// Fig parity: when looking up `needle` on the current subcommand
+/// (deepest in `path`), fall back to ancestor subcommands' options
+/// whose `is_persistent` flag is set. `root` is the root spec;
+/// `path` is the subcommand chain (path[0] is root.name).
+pub(crate) fn find_option_inherited<'a>(
+    root: &'a Spec,
+    path: &[String],
+    needle: &str,
+) -> Option<&'a Opt> {
+    // Walk leaf → root. Leaf can match any option; ancestors only
+    // contribute options with is_persistent = true.
+    let mut node: &Spec = root;
+    let mut chain: Vec<&Spec> = vec![root];
+    for name in path.iter().skip(1) {
+        let next = find_subcommand(node, name)?;
+        chain.push(next);
+        node = next;
+    }
+    // Leaf (last) — any option.
+    if let Some(opt) = chain.last().and_then(|sc| find_option(sc, needle)) {
+        return Some(opt);
+    }
+    // Ancestors — only persistent.
+    for sc in chain.iter().rev().skip(1) {
+        if let Some(opt) = find_option(sc, needle) {
+            if opt.is_persistent {
+                return Some(opt);
+            }
+        }
+    }
+    None
+}
+
 /// Two options are "equal" iff they share at least one name. This is
 /// the TS `optionsAreEqual` rule — used by `count_equal_options` to
 /// enforce `is_repeatable`.
@@ -625,10 +672,7 @@ fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
         }
         TokenShape::Empty => TokenKind::Unknown,
         TokenShape::LongOption { name, value } => {
-            let Some(node) = current_subcommand(root, &state.subcommand_path) else {
-                return TokenKind::Unknown;
-            };
-            let Some(opt) = find_option(node, &name) else {
+            let Some(opt) = find_option_inherited(root, &state.subcommand_path, &name) else {
                 return TokenKind::Unknown;
             };
             if !can_consume_option(opt, &state.consumed_options) {
@@ -648,13 +692,12 @@ fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
             TokenKind::OptionName
         }
         TokenShape::ShortOption { chars } => {
-            let Some(node) = current_subcommand(root, &state.subcommand_path) else {
-                return TokenKind::Unknown;
-            };
             // Single short → normal option; chain (≥2) → ChainedOption.
             if chars.len() == 1 {
                 let lookup = format!("-{}", chars[0]);
-                let Some(opt) = find_option(node, &lookup) else {
+                let Some(opt) =
+                    find_option_inherited(root, &state.subcommand_path, &lookup)
+                else {
                     return TokenKind::Unknown;
                 };
                 if !can_consume_option(opt, &state.consumed_options) {
@@ -669,7 +712,9 @@ fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
             // mark Unknown — TS reference treats those as opaque.
             for c in &chars {
                 let lookup = format!("-{c}");
-                let Some(opt) = find_option(node, &lookup) else {
+                let Some(opt) =
+                    find_option_inherited(root, &state.subcommand_path, &lookup)
+                else {
                     return TokenKind::Unknown;
                 };
                 if !opt.args.is_empty() {
@@ -1451,5 +1496,65 @@ mod tests {
         let toks = tokenize("git commit");
         let r = parse_arguments(&s, &toks, 999);
         assert_eq!(r.active_option_arg, None);
+    }
+
+    fn root_with_persistent_help() -> Spec {
+        Subcommand {
+            name: "git".into(),
+            options: vec![Opt {
+                names: vec!["--help".into()],
+                description: Some("show help".into()),
+                is_persistent: true,
+                ..Default::default()
+            }],
+            subcommands: vec![Subcommand {
+                name: "commit".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn persistent_option_resolves_in_child_subcommand() {
+        let s = root_with_persistent_help();
+        // commit doesn't list --help locally, but root's --help
+        // isPersistent → should still bind.
+        let opt = find_option_inherited(&s, &["git".into(), "commit".into()], "--help");
+        assert!(opt.is_some(), "persistent --help should resolve in commit");
+    }
+
+    #[test]
+    fn non_persistent_option_does_not_inherit() {
+        let mut s = root_with_persistent_help();
+        s.options[0].is_persistent = false;
+        let opt = find_option_inherited(&s, &["git".into(), "commit".into()], "--help");
+        assert!(opt.is_none(), "non-persistent --help must not inherit");
+    }
+
+    #[test]
+    fn leaf_options_take_priority_over_ancestor() {
+        // Same flag name on both — leaf wins (even if not persistent).
+        let s = Subcommand {
+            name: "git".into(),
+            options: vec![Opt {
+                names: vec!["--mode".into()],
+                description: Some("root mode".into()),
+                is_persistent: true,
+                ..Default::default()
+            }],
+            subcommands: vec![Subcommand {
+                name: "commit".into(),
+                options: vec![Opt {
+                    names: vec!["--mode".into()],
+                    description: Some("commit mode".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let opt = find_option_inherited(&s, &["git".into(), "commit".into()], "--mode").unwrap();
+        assert_eq!(opt.description.as_deref(), Some("commit mode"));
     }
 }
