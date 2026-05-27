@@ -982,7 +982,16 @@ fn label_from_value(v: &serde_json::Value) -> Option<String> {
                 .iter()
                 .map(|(k, v)| (k.to_ascii_lowercase(), v))
                 .collect();
-            for key in ["name", "names", "number", "id", "title", "key"] {
+            for key in [
+                "name",
+                "names",
+                "unit",
+                "unit_file",
+                "number",
+                "id",
+                "title",
+                "key",
+            ] {
                 if let Some(found) = lower_keys.get(key) {
                     if let Some(s) = scalar_to_string(found) {
                         return Some(s);
