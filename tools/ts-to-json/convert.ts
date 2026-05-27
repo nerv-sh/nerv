@@ -135,7 +135,8 @@ type NervGenerator =
   | { type: "makefile_targets" }
   | { type: "man_pages" }
   | { type: "package_json_deps" }
-  | { type: "kubectl_resources" };
+  | { type: "kubectl_resources" }
+  | { type: "cargo_targets"; kind: string | null };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -146,10 +147,10 @@ const namesOf = (n: string | string[] | undefined | null): string[] => {
 };
 
 /** Normalize `args` (object | array | undefined) into our array form. */
-const argsOf = (a: FigArg | FigArg[] | undefined): NervArg[] => {
+const argsOf = async (a: FigArg | FigArg[] | undefined): Promise<NervArg[]> => {
   if (a == null) return [];
   const list = Array.isArray(a) ? a : [a];
-  return list.map(convertArg);
+  return await Promise.all(list.map(convertArg));
 };
 
 const TEMPLATE_MAP: Record<string, string> = {
@@ -169,13 +170,81 @@ const convertTemplate = (t: string | string[] | undefined): string | null => {
   return null;
 };
 
-const convertGenerators = (g: any | any[] | undefined): NervGenerator[] => {
+const convertGenerators = async (
+  g: any | any[] | undefined,
+): Promise<NervGenerator[]> => {
   if (g == null) return [];
   const list = Array.isArray(g) ? g : [g];
-  return list.map(convertOneGenerator).filter((x): x is NervGenerator => x !== null);
+  const resolved = await Promise.all(list.map(convertOneGenerator));
+  return resolved.filter((x): x is NervGenerator => x !== null);
 };
 
-const convertOneGenerator = (g: any): NervGenerator | null => {
+// Mock packages payload for cargo's targetGenerator probe — one
+// target per kind, prefixed with a sentinel so we can read back
+// which kind(s) survived the closure's `target.kind.includes(kind)`
+// filter. Used by `convertOneGenerator` to recover the closure-bound
+// `kind` parameter that we can't see via `.toString()` source
+// inspection.
+const CARGO_KIND_PROBE = [
+  "lib",
+  "bin",
+  "example",
+  "test",
+  "bench",
+  "custom-build",
+];
+const CARGO_PROBE_MARK = "__nervkp_";
+const CARGO_MOCK_METADATA = JSON.stringify({
+  workspace_root: "",
+  packages: [
+    {
+      name: "__probe",
+      source: null,
+      targets: CARGO_KIND_PROBE.map((k) => ({
+        name: `${CARGO_PROBE_MARK}${k}`,
+        src_path: "",
+        kind: [k],
+      })),
+    },
+  ],
+});
+
+const probeCargoKind = async (g: any): Promise<string | null | "any"> => {
+  // Probe the targetGenerator closure with a synthetic cargo metadata
+  // payload. The closure filters its `targets` by `kind` when that
+  // captured param is set; we run it and check which of our marked
+  // targets survives.
+  //
+  // Returns:
+  //   - "lib" | "bin" | "example" | ... when exactly one mark survives
+  //   - "any" when all marks survive (no kind filter — captures the
+  //     fallthrough branch where the closure passes every target)
+  //   - null on failure / unrecognised shape
+  try {
+    const mockExec = async () => ({
+      stdout: CARGO_MOCK_METADATA,
+      stderr: "",
+      status: 0,
+    });
+    const out = await g.custom([], mockExec, {
+      currentWorkingDirectory: "",
+      sshPrefix: "",
+      environmentVariables: {},
+    });
+    if (!Array.isArray(out)) return null;
+    const survivors = out
+      .map((s: any) => (typeof s?.name === "string" ? s.name : ""))
+      .filter((n: string) => n.startsWith(CARGO_PROBE_MARK))
+      .map((n: string) => n.slice(CARGO_PROBE_MARK.length));
+    if (survivors.length === 1) return survivors[0];
+    if (survivors.length === CARGO_KIND_PROBE.length) return "any";
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
   // Well-known: filepaths / folders from @fig/autocomplete-generators.
   // Detected by the unique `ls -1ApL` signature their closures emit.
   const fp = detectFilepathsGenerator(g);
@@ -262,6 +331,25 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
       src.includes("custom-columns=:.metadata.name")
     ) {
       return { type: "kubectl_resources" };
+    }
+    // Well-known: cargo's `targetGenerator({ kind })` — runs
+    // `cargo metadata --format-version 1 --no-deps` and walks
+    // `packages[*].targets[*]`, optionally filtering by
+    // `target.kind.includes(kind)`. The closure captures `kind`
+    // from outer scope so we can't read it from source — probe
+    // the closure with synthetic packages to recover it.
+    if (
+      src.includes('"cargo"') &&
+      src.includes('"metadata"') &&
+      (src.includes("target.kind") || src.includes("targets.filter"))
+    ) {
+      const k = await probeCargoKind(g);
+      if (k !== null) {
+        return {
+          type: "cargo_targets",
+          kind: k === "any" ? null : k,
+        };
+      }
     }
   }
 
@@ -388,7 +476,7 @@ const isPackageJsonScriptsSignature = (script: string[]): boolean => {
   return cmd.includes("package.json") && cmd.includes("cat ");
 };
 
-const convertArg = (a: FigArg): NervArg => {
+const convertArg = async (a: FigArg): Promise<NervArg> => {
   const names = namesOf(a.name);
 
   // Fig accepts nested name aliases: [["auto", "automatic"], "always"] —
@@ -415,16 +503,16 @@ const convertArg = (a: FigArg): NervArg => {
     is_variadic: a.isVariadic ?? false,
     suggestions,
     template: convertTemplate(a.template),
-    generators: convertGenerators(a.generators),
+    generators: await convertGenerators(a.generators),
   };
 };
 
-const convertOpt = (o: FigOpt): NervOpt => {
+const convertOpt = async (o: FigOpt): Promise<NervOpt> => {
   const names = namesOf(o.name);
   return {
     names,
     description: o.description ?? null,
-    args: argsOf(o.args),
+    args: await argsOf(o.args),
     exclusive_on: o.exclusiveOn ?? [],
     depends_on: o.dependsOn ?? [],
     is_required: o.isRequired ?? false,
@@ -538,8 +626,8 @@ const convertSpec = async (
     aliases,
     description: s.description ?? null,
     subcommands,
-    options: (s.options ?? []).map(convertOpt),
-    args: argsOf(s.args),
+    options: await Promise.all((s.options ?? []).map(convertOpt)),
+    args: await argsOf(s.args),
     requires_double_dash: false,
     hidden: s.hidden ?? false,
   };
