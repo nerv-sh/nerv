@@ -524,15 +524,19 @@ fn emit_candidates_for_arg(
         })
         .collect();
 
-    // Static suggestions list (Tier A).
+    // Static suggestions list (Tier A). Each entry may be a bare
+    // string or a rich {name, description, displayName, insertValue,
+    // icon, priority} object — we surface description / displayName
+    // / insertValue here for Fig parity, fallback to .name for the
+    // others. Priority is honoured at the global sort step (TODO).
     out.extend(
         arg.suggestions
             .iter()
-            .filter(|s| s.starts_with(prefix))
+            .filter(|s| s.name.starts_with(prefix))
             .map(|s| Suggestion {
-                insertion: s.clone(),
-                display: s.clone(),
-                description: None,
+                insertion: s.insert_value.clone().unwrap_or_else(|| s.name.clone()),
+                display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
+                description: s.description.clone(),
                 kind: SuggestionKind::Argument,
             }),
     );
@@ -1911,7 +1915,20 @@ mod tests {
                     aliases: vec!["co".into()],
                     args: vec![Arg {
                         name: Some("branch".into()),
-                        suggestions: vec!["main".into(), "dev".into(), "feature/x".into()],
+                        suggestions: vec![
+                            crate::spec_parser::RawSuggestion {
+                                name: "main".into(),
+                                ..Default::default()
+                            },
+                            crate::spec_parser::RawSuggestion {
+                                name: "dev".into(),
+                                ..Default::default()
+                            },
+                            crate::spec_parser::RawSuggestion {
+                                name: "feature/x".into(),
+                                ..Default::default()
+                            },
+                        ],
                         ..Default::default()
                     }],
                     ..Default::default()

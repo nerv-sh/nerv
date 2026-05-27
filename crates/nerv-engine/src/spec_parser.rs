@@ -104,14 +104,93 @@ pub struct Arg {
     /// Consumes one-or-more rest tokens.
     pub is_variadic: bool,
     /// Static enum choices (e.g. `["yes", "no"]`). When non-empty,
-    /// these are emitted directly as completions.
-    pub suggestions: Vec<String>,
+    /// these are emitted directly as completions. Each entry can be
+    /// a plain string or an object with description / displayName /
+    /// insertValue / icon / priority — Fig spec parity.
+    pub suggestions: Vec<RawSuggestion>,
     /// Static filepath template (relative / absolute / extension
     /// filter). Empty when the arg is not a filepath.
     pub template: Option<TemplateKind>,
     /// Dynamic-generator markers. M0-5 surfaces these as
     /// metadata only; M1 + `rquickjs` opt-in executes them.
     pub generators: Vec<Generator>,
+}
+
+/// Rich suggestion entry. Mirrors the relevant fields of
+/// Fig.Suggestion that affect completion behavior:
+/// - `name`: canonical token (used for prefix-matching + fallback
+///   insertion).
+/// - `description`: footer text in the popup.
+/// - `display_name`: label shown to the user (falls back to `name`).
+/// - `insert_value`: text to actually insert (falls back to `name`).
+///   Many specs use this for `pkg@version` or short-form aliases.
+/// - `icon`: emoji / glyph for the menu row.
+/// - `priority`: sort hint (Fig 1-100). Higher = earlier.
+///
+/// Deserialised from either a bare string (`"yes"`) or a JSON
+/// object (`{"name": "yes", "description": "..."}`) via the
+/// custom `Deserialize` impl below.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct RawSuggestion {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "displayName")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "insertValue")]
+    pub insert_value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
+}
+
+impl<'de> serde::Deserialize<'de> for RawSuggestion {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Input {
+            Bare(String),
+            Obj {
+                #[serde(default)]
+                name: Option<String>,
+                #[serde(default)]
+                description: Option<String>,
+                #[serde(default, alias = "displayName")]
+                display_name: Option<String>,
+                #[serde(default, alias = "insertValue")]
+                insert_value: Option<String>,
+                #[serde(default)]
+                icon: Option<String>,
+                #[serde(default)]
+                priority: Option<u32>,
+            },
+        }
+        match Input::deserialize(d)? {
+            Input::Bare(s) => Ok(RawSuggestion {
+                name: s,
+                ..Default::default()
+            }),
+            Input::Obj {
+                name,
+                description,
+                display_name,
+                insert_value,
+                icon,
+                priority,
+            } => Ok(RawSuggestion {
+                name: name.unwrap_or_default(),
+                description,
+                display_name,
+                insert_value,
+                icon,
+                priority,
+            }),
+        }
+    }
 }
 
 /// Filepath-style template suggestion source.

@@ -92,12 +92,23 @@ type FigSpec = {
   generators?: any;
 };
 
+type NervSuggestion =
+  | string
+  | {
+      name: string;
+      description?: string;
+      displayName?: string;
+      insertValue?: string;
+      icon?: string;
+      priority?: number;
+    };
+
 type NervArg = {
   name: string | null;
   description: string | null;
   is_optional: boolean;
   is_variadic: boolean;
-  suggestions: string[];
+  suggestions: NervSuggestion[];
   template: string | null;
   generators: NervGenerator[];
 };
@@ -547,20 +558,41 @@ const convertArg = async (a: FigArg): Promise<NervArg> => {
   const names = namesOf(a.name);
 
   // Fig accepts nested name aliases: [["auto", "automatic"], "always"] —
-  // each top-level slot can be either a string, a {name} object, or an
-  // array of either. Flatten everything to a primary name (first slot)
-  // so our suggestions field stays Vec<String>.
-  const suggestions: string[] = (a.suggestions ?? []).flatMap((s: any) => {
-    if (typeof s === "string") return [s];
+  // each top-level slot can be either a string, a {name, description,
+  // displayName, insertValue, icon, priority} object, or an array of
+  // either. Flatten, preserve rich fields when present, emit bare
+  // strings when nothing extra to carry.
+  const richSuggestion = (s: any): NervSuggestion | NervSuggestion[] | null => {
+    if (typeof s === "string") return s;
     if (Array.isArray(s)) {
       return s.flatMap((x: any) => {
-        if (typeof x === "string") return [x];
-        if (x && typeof x === "object" && typeof x.name === "string") return [x.name];
-        return [];
+        const r = richSuggestion(x);
+        return r === null ? [] : Array.isArray(r) ? r : [r];
       });
     }
-    if (s && typeof s === "object" && typeof s.name === "string") return [s.name];
-    return [];
+    if (s && typeof s === "object" && typeof s.name === "string") {
+      const hasExtra =
+        s.description != null ||
+        s.displayName != null ||
+        s.insertValue != null ||
+        s.icon != null ||
+        s.priority != null;
+      if (!hasExtra) return s.name;
+      return {
+        name: s.name,
+        ...(s.description != null ? { description: s.description } : {}),
+        ...(s.displayName != null ? { displayName: s.displayName } : {}),
+        ...(s.insertValue != null ? { insertValue: s.insertValue } : {}),
+        ...(s.icon != null ? { icon: s.icon } : {}),
+        ...(s.priority != null ? { priority: s.priority } : {}),
+      };
+    }
+    return null;
+  };
+  const suggestions: NervSuggestion[] = (a.suggestions ?? []).flatMap((s: any) => {
+    const r = richSuggestion(s);
+    if (r === null) return [];
+    return Array.isArray(r) ? r : [r];
   });
 
   return {
