@@ -719,6 +719,8 @@ fn upgrade_tier<'a>(current: char, gens: impl IntoIterator<Item = &'a Generator>
             Generator::Filepaths { .. } => 'B',
             Generator::ZoxideQuery => 'B',
             Generator::SshHosts => 'B',
+            Generator::MakefileTargets => 'B',
+            Generator::ManPages => 'B',
             Generator::Script { .. } | Generator::Custom { .. } => 'C',
         };
         if (g_tier == 'B' && t == 'A') || g_tier == 'C' {

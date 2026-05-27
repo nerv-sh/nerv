@@ -131,7 +131,9 @@ type NervGenerator =
   | { type: "package_json_scripts" }
   | { type: "filepaths"; folders_only: boolean }
   | { type: "zoxide_query" }
-  | { type: "ssh_hosts" };
+  | { type: "ssh_hosts" }
+  | { type: "makefile_targets" }
+  | { type: "man_pages" };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -207,6 +209,30 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
       (src.includes(".ssh") && src.includes("Host "))
     ) {
       return { type: "ssh_hosts" };
+    }
+    // Well-known: make's `listTargets` closure (vendor src/make.ts).
+    // Reads `Makefile` / `makefile` / `GNUmakefile` via executeCommand
+    // + cat and emits target names. Detect by literal filename
+    // references — false-positive surface is essentially zero.
+    if (
+      src.includes("Makefile") ||
+      src.includes("makefile") ||
+      src.includes("GNUmakefile")
+    ) {
+      return { type: "makefile_targets" };
+    }
+    // Well-known: man's `generateManualPages` closure. The vendor
+    // implementation runs `man -k .` (apropos all). Sniff that
+    // literal plus the alternate `manpath` / `man1` forms in case
+    // upstream rewrites the closure later.
+    if (
+      src.includes('command: "man"') ||
+      src.includes("'man'") ||
+      src.includes("manpath") ||
+      src.includes('"man1"') ||
+      src.includes("'man1'")
+    ) {
+      return { type: "man_pages" };
     }
   }
 
