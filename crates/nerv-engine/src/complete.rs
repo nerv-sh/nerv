@@ -330,12 +330,7 @@ pub fn complete_in(
     if let Some((opt_name, arg_idx)) = result.active_option_arg.as_ref() {
         if let Some(opt) = current.options.iter().find(|o| o.names.contains(opt_name)) {
             if let Some(arg) = opt.args.get(*arg_idx) {
-                let items = emit_candidates_for_arg(
-                    arg,
-                    &prefix,
-                    cwd,
-                    opt.description.as_deref(),
-                );
+                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt));
                 return CompleteResult {
                     items,
                     reason: None,
@@ -497,17 +492,19 @@ fn emit_arg_candidates(
     emit_candidates_for_arg(arg, prefix, cwd, None)
 }
 
-/// `enclosing_description` lets the caller pass the OPTION's
-/// description when dispatching for `cargo run --bin <here>`-style
-/// option args — many vendor specs put `{a|b|c}` enum hints in the
-/// option's description rather than the arg's, so the description-
-/// extraction fallback needs to see both.
+/// `enclosing_opt` lets the caller pass the OPTION wrapping the arg
+/// when dispatching for `cargo run --bin <here>`-style option args.
+/// Two uses: (a) description-extraction fallback sees the option's
+/// `{a|b|c}` hints, and (b) name-based filepaths inference falls
+/// back to the option flag name (`--file`, `-o`) when the arg name
+/// itself is uninformative (`name: "string"`).
 fn emit_candidates_for_arg(
     arg: &crate::spec_parser::Arg,
     prefix: &str,
     cwd: Option<&std::path::Path>,
-    enclosing_description: Option<&str>,
+    enclosing_opt: Option<&crate::spec_parser::Opt>,
 ) -> Vec<Suggestion> {
+    let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
     // Description-extracted enum suggestions (Tier A-ish). Many Fig
     // specs put `{a|b|c}` directly in the description text instead
     // of populating `suggestions[]` — recover those as candidates
@@ -753,9 +750,14 @@ fn emit_candidates_for_arg(
     // treat it as a filepaths/folders walk. Covers docker build
     // (arg.name = "path"), `find <path>`, and dozens of similar
     // unix-style specs where the spec author forgot the template
-    // hint. Only kicks in when nothing else fired.
+    // hint. Falls back to the enclosing option's flag name when the
+    // arg name is uninformative (`docker build -f` has arg.name =
+    // "string" but the option is `-f / --file`).
+    // Only kicks in when nothing else fired.
     if out.is_empty() && std::env::var_os("NERV_NO_GENERATORS").is_none() {
-        if let Some(folders_only) = infer_filepaths_kind(arg.name.as_deref()) {
+        let kind = infer_filepaths_kind(arg.name.as_deref())
+            .or_else(|| infer_filepaths_kind_from_opt_names(enclosing_opt));
+        if let Some(folders_only) = kind {
             if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
                 out.extend(
                     paths
@@ -791,6 +793,39 @@ fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
         "dir" | "directory" | "folder" | "dirname" | "dirpath" => Some(true),
         _ => None,
     }
+}
+
+/// Same idea as [`infer_filepaths_kind`] but consults the wrapping
+/// option's flag names. Recovers args whose own `name` is generic
+/// ("string") but whose option is unmistakably a path:
+/// `-f / --file`, `-o / --output`, `-d / --directory`. Long names
+/// take precedence — short flags (`-d` could be delete OR
+/// directory) only count when no long form is present.
+fn infer_filepaths_kind_from_opt_names(
+    opt: Option<&crate::spec_parser::Opt>,
+) -> Option<bool> {
+    let opt = opt?;
+    let names: Vec<String> = opt.names.iter().map(|n| n.to_ascii_lowercase()).collect();
+    for n in &names {
+        if let Some(long) = n.strip_prefix("--") {
+            match long {
+                "file" | "files" | "filename" | "filepath" | "input" | "output"
+                | "log" | "log-file" | "input-file" | "output-file" => return Some(false),
+                "dir" | "directory" | "folder" | "input-dir" | "output-dir"
+                | "workdir" | "working-dir" | "chdir" => return Some(true),
+                _ => {}
+            }
+        }
+    }
+    // Short flag fallback — only when no long-name disambiguation
+    // exists. `-d` is ambiguous (delete vs directory) so we don't
+    // accept it here; require an explicit long name.
+    for n in &names {
+        if n == "-f" {
+            return Some(false);
+        }
+    }
+    None
 }
 
 type GeneratorCacheMap = HashMap<Vec<String>, (std::time::Instant, Vec<String>)>;
@@ -2334,5 +2369,41 @@ mod tests {
         assert_eq!(infer_filepaths_kind(Some("image")), None);
         assert_eq!(infer_filepaths_kind(Some("filename for output")), None);
         assert_eq!(infer_filepaths_kind(None), None);
+    }
+
+    #[test]
+    fn infer_from_opt_long_file_name() {
+        let opt = Opt {
+            names: vec!["-f".into(), "--file".into()],
+            ..Default::default()
+        };
+        assert_eq!(infer_filepaths_kind_from_opt_names(Some(&opt)), Some(false));
+    }
+
+    #[test]
+    fn infer_from_opt_long_directory_name() {
+        let opt = Opt {
+            names: vec!["--directory".into()],
+            ..Default::default()
+        };
+        assert_eq!(infer_filepaths_kind_from_opt_names(Some(&opt)), Some(true));
+    }
+
+    #[test]
+    fn infer_from_opt_short_d_is_ambiguous_so_none() {
+        let opt = Opt {
+            names: vec!["-d".into()],
+            ..Default::default()
+        };
+        assert_eq!(infer_filepaths_kind_from_opt_names(Some(&opt)), None);
+    }
+
+    #[test]
+    fn infer_from_opt_short_f_alone_treats_as_file() {
+        let opt = Opt {
+            names: vec!["-f".into()],
+            ..Default::default()
+        };
+        assert_eq!(infer_filepaths_kind_from_opt_names(Some(&opt)), Some(false));
     }
 }
