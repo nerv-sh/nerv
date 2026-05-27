@@ -748,9 +748,49 @@ fn emit_candidates_for_arg(
         }
     }
 
+    // Smart fallback: when the arg has no template / no generators /
+    // no suggestions but the arg name semantically implies a path,
+    // treat it as a filepaths/folders walk. Covers docker build
+    // (arg.name = "path"), `find <path>`, and dozens of similar
+    // unix-style specs where the spec author forgot the template
+    // hint. Only kicks in when nothing else fired.
+    if out.is_empty() && std::env::var_os("NERV_NO_GENERATORS").is_none() {
+        if let Some(folders_only) = infer_filepaths_kind(arg.name.as_deref()) {
+            if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
+                out.extend(
+                    paths
+                        .into_iter()
+                        .map(|(insertion, display, description)| Suggestion {
+                            insertion,
+                            display,
+                            description,
+                            kind: SuggestionKind::Argument,
+                        }),
+                );
+            }
+        }
+    }
+
     out.sort_by(|a, b| a.display.cmp(&b.display));
     out.dedup_by(|a, b| a.display == b.display);
     out
+}
+
+/// Infer whether an arg with no explicit template / generators
+/// should be treated as a path. Returns `Some(folders_only)` to
+/// activate filepaths walk, or `None` to leave the arg empty.
+///
+/// Conservative — only matches exact lowercase single-word names
+/// to avoid hijacking args like "filename for output" that mean
+/// something more specific than a generic path picker.
+fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
+    let n = name?.trim().to_ascii_lowercase();
+    match n.as_str() {
+        "path" | "file" | "files" | "filepath" | "filename" | "src" | "dest"
+        | "source" | "destination" | "input" | "output" => Some(false),
+        "dir" | "directory" | "folder" | "dirname" | "dirpath" => Some(true),
+        _ => None,
+    }
 }
 
 type GeneratorCacheMap = HashMap<Vec<String>, (std::time::Instant, Vec<String>)>;
@@ -2273,5 +2313,26 @@ mod tests {
     #[test]
     fn human_size_giga_scale() {
         assert_eq!(human_size(2 * 1024 * 1024 * 1024), "2.00G");
+    }
+
+    #[test]
+    fn infer_filepaths_kind_file_names() {
+        assert_eq!(infer_filepaths_kind(Some("path")), Some(false));
+        assert_eq!(infer_filepaths_kind(Some("File")), Some(false));
+        assert_eq!(infer_filepaths_kind(Some(" filename ")), Some(false));
+    }
+
+    #[test]
+    fn infer_filepaths_kind_folder_names() {
+        assert_eq!(infer_filepaths_kind(Some("dir")), Some(true));
+        assert_eq!(infer_filepaths_kind(Some("DIRECTORY")), Some(true));
+        assert_eq!(infer_filepaths_kind(Some("folder")), Some(true));
+    }
+
+    #[test]
+    fn infer_filepaths_kind_unknown_returns_none() {
+        assert_eq!(infer_filepaths_kind(Some("image")), None);
+        assert_eq!(infer_filepaths_kind(Some("filename for output")), None);
+        assert_eq!(infer_filepaths_kind(None), None);
     }
 }
