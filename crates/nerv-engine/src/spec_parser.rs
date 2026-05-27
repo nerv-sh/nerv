@@ -183,6 +183,19 @@ pub enum Generator {
     /// `/usr/local/share/man`, `/opt/homebrew/share/man`) for
     /// `manN/*.N` / `manN/*.N.gz` and emits the bare page name.
     ManPages,
+    /// Well-known: npm's `dependenciesGenerator`. Walks up from the
+    /// cwd to the nearest `package.json` and emits the union of
+    /// `dependencies` / `devDependencies` / `optionalDependencies`
+    /// keys. Used by `npm uninstall <pkg>` / `npm update <pkg>` /
+    /// `npm outdated <pkg>` and equivalents (pnpm / yarn rm).
+    PackageJsonDeps,
+    /// Well-known: kubectl's `scripts.types` resource-type list.
+    /// Runs `kubectl api-resources -o name` (Tier B). Used by
+    /// `kubectl get <type>` / `describe` / `delete` / `logs`'s
+    /// first positional arg, where the closure version reaches for
+    /// `typeWithoutName(context[len-1])` and we can substitute the
+    /// underlying `api-resources` call directly.
+    KubectlResources,
 }
 
 // ---------------------------------------------------------------------------

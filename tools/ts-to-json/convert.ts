@@ -133,7 +133,9 @@ type NervGenerator =
   | { type: "zoxide_query" }
   | { type: "ssh_hosts" }
   | { type: "makefile_targets" }
-  | { type: "man_pages" };
+  | { type: "man_pages" }
+  | { type: "package_json_deps" }
+  | { type: "kubectl_resources" };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -234,6 +236,33 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
     ) {
       return { type: "man_pages" };
     }
+    // Well-known: npm's `dependenciesGenerator` (and pnpm / yarn
+    // equivalents that mirror the same shape). Reads `package.json`
+    // and joins dependencies / devDependencies / optionalDependencies.
+    // Detect by the `devDependencies` + `package.json` literal
+    // co-occurrence — both nearly unique to this pattern.
+    if (
+      src.includes("devDependencies") &&
+      (src.includes("package.json") || src.includes('"package.json"'))
+    ) {
+      return { type: "package_json_deps" };
+    }
+    // Well-known: kubectl's resource-type closure. The vendor closure
+    // in src/kubectl.ts builds `["kubectl","get",<type>,"-o","custom-
+    // columns=:.metadata.name"]` for the second arg via
+    // `typeWithoutName`, and uses a static `["kubectl","api-resources",
+    // "-o","name"]` (scripts.types) for the first. Both end up as
+    // closures in the conversion pass — fall back to running the
+    // resource-types call directly. False-positive surface is tiny
+    // since `api-resources` / `typeWithoutName` / `custom-columns=`
+    // are kubectl-specific strings.
+    if (
+      src.includes("api-resources") ||
+      src.includes("typeWithoutName") ||
+      src.includes("custom-columns=:.metadata.name")
+    ) {
+      return { type: "kubectl_resources" };
+    }
   }
 
   if (typeof g === "function") {
@@ -252,6 +281,25 @@ const convertOneGenerator = (g: any): NervGenerator | null => {
   // (most kubectl-style closures just rewrite tokens into a fixed
   // command).
   if (g.script !== undefined) {
+    // Well-known sniff BEFORE attempting resolution — function-form
+    // closures that capture `tokens` (e.g. kubectl's typeWithoutName)
+    // can't be statically executed but we can still recognise the
+    // signature and pivot to a known-good static command.
+    if (typeof g.script === "function") {
+      let src = "";
+      try {
+        src = g.script.toString();
+      } catch {
+        // closure unstringifiable — fall through
+      }
+      if (
+        src.includes("api-resources") ||
+        src.includes("typeWithoutName") ||
+        src.includes("custom-columns=:.metadata.name")
+      ) {
+        return { type: "kubectl_resources" };
+      }
+    }
     let scriptArr: string[] = [];
     if (typeof g.script === "function") {
       scriptArr = tryResolveScriptFn(g.script);
