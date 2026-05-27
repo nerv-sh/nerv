@@ -427,6 +427,17 @@ fn current_prefix(text: &str) -> String {
     }
 }
 
+/// Sort suggestions by Fig-style priority (higher first, default
+/// 50), then alphabetically by display label. Used uniformly by
+/// emit_subcommands / emit_options_with_ancestors /
+/// emit_candidates_for_arg so the popup order matches Fig's rule:
+/// higher priority floats up, ties resolve by name.
+fn sort_by_priority_then_alpha(a: &Suggestion, b: &Suggestion) -> std::cmp::Ordering {
+    let pa = a.priority.unwrap_or(50);
+    let pb = b.priority.unwrap_or(50);
+    pb.cmp(&pa).then_with(|| a.display.cmp(&b.display))
+}
+
 fn walk_to_current<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand> {
     let mut node = root;
     for name in path.iter().skip(1) {
@@ -465,9 +476,10 @@ fn emit_subcommands(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
             display: sc.name.clone(),
             description: sc.description.clone(),
             kind: SuggestionKind::Subcommand,
+            priority: sc.priority,
         })
         .collect();
-    out.sort_by(|a, b| a.display.cmp(&b.display));
+    out.sort_by(sort_by_priority_then_alpha);
     out
 }
 
@@ -489,6 +501,7 @@ fn emit_options_with_ancestors(
                 display: n.clone(),
                 description: opt.description.clone(),
                 kind: SuggestionKind::Flag,
+                priority: opt.priority,
             })
             .collect()
     };
@@ -514,7 +527,7 @@ fn emit_options_with_ancestors(
             out.extend(emit(opt));
         }
     }
-    out.sort_by(|a, b| a.display.cmp(&b.display));
+    out.sort_by(sort_by_priority_then_alpha);
     out.dedup_by(|a, b| a.display == b.display);
     out
 }
@@ -579,6 +592,7 @@ fn emit_candidates_for_arg(
             display: s,
             description: desc_for_extract.map(|d| d.to_string()),
             kind: SuggestionKind::Argument,
+            priority: None,
         })
         .collect();
 
@@ -586,7 +600,7 @@ fn emit_candidates_for_arg(
     // string or a rich {name, description, displayName, insertValue,
     // icon, priority} object — we surface description / displayName
     // / insertValue here for Fig parity, fallback to .name for the
-    // others. Priority is honoured at the global sort step (TODO).
+    // others.
     out.extend(
         arg.suggestions
             .iter()
@@ -596,6 +610,7 @@ fn emit_candidates_for_arg(
                 display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
                 description: s.description.clone(),
                 kind: SuggestionKind::Argument,
+                priority: s.priority,
             }),
     );
 
@@ -616,6 +631,7 @@ fn emit_candidates_for_arg(
                 display,
                 description,
                 kind: SuggestionKind::Argument,
+                priority: None,
             }));
         }
     }
@@ -633,6 +649,7 @@ fn emit_candidates_for_arg(
                         display: s,
                         description: Some("history".into()),
                         kind: SuggestionKind::Argument,
+                        priority: None,
                     }),
             );
         }
@@ -656,6 +673,7 @@ fn emit_candidates_for_arg(
                                     display,
                                     description: None,
                                     kind: SuggestionKind::Argument,
+                                    priority: None,
                                 }),
                         );
                     }
@@ -671,6 +689,7 @@ fn emit_candidates_for_arg(
                                     display: name,
                                     description: Some(cmd),
                                     kind: SuggestionKind::Argument,
+                                    priority: None,
                                 }),
                         );
                     }
@@ -682,6 +701,7 @@ fn emit_candidates_for_arg(
                             display,
                             description,
                             kind: SuggestionKind::Argument,
+                            priority: None,
                         }));
                     }
                 }
@@ -696,6 +716,7 @@ fn emit_candidates_for_arg(
                                     display: h,
                                     description: Some("SSH host".into()),
                                     kind: SuggestionKind::Argument,
+                                    priority: None,
                                 }),
                         );
                     }
@@ -708,6 +729,7 @@ fn emit_candidates_for_arg(
                                 display: t,
                                 description: Some("make target".into()),
                                 kind: SuggestionKind::Argument,
+                                priority: None,
                             },
                         ));
                     }
@@ -723,6 +745,7 @@ fn emit_candidates_for_arg(
                                     display: p,
                                     description: Some("man page".into()),
                                     kind: SuggestionKind::Argument,
+                                    priority: None,
                                 }),
                         );
                     }
@@ -737,6 +760,7 @@ fn emit_candidates_for_arg(
                                     display: name,
                                     description: Some(kind.into()),
                                     kind: SuggestionKind::Argument,
+                                    priority: None,
                                 }),
                         );
                     }
@@ -755,6 +779,7 @@ fn emit_candidates_for_arg(
                                 display: line,
                                 description: Some("k8s resource".into()),
                                 kind: SuggestionKind::Argument,
+                                priority: None,
                             },
                         ));
                     }
@@ -774,6 +799,7 @@ fn emit_candidates_for_arg(
                                         format!("{kind} — {path}")
                                     }),
                                     kind: SuggestionKind::Argument,
+                                    priority: None,
                                 }),
                         );
                     }
@@ -798,6 +824,7 @@ fn emit_candidates_for_arg(
                                     display: name,
                                     description: Some(format!("{path} (score {score:.1})")),
                                     kind: SuggestionKind::Argument,
+                                    priority: None,
                                 }),
                         );
                     }
@@ -829,13 +856,14 @@ fn emit_candidates_for_arg(
                             display,
                             description,
                             kind: SuggestionKind::Argument,
+                            priority: None,
                         }),
                 );
             }
         }
     }
 
-    out.sort_by(|a, b| a.display.cmp(&b.display));
+    out.sort_by(sort_by_priority_then_alpha);
     out.dedup_by(|a, b| a.display == b.display);
     out
 }
@@ -2471,6 +2499,46 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(infer_filepaths_kind_from_opt_names(Some(&opt)), None);
+    }
+
+    fn sug(name: &str, prio: Option<u32>) -> Suggestion {
+        Suggestion {
+            insertion: name.into(),
+            display: name.into(),
+            description: None,
+            kind: SuggestionKind::Argument,
+            priority: prio,
+        }
+    }
+
+    #[test]
+    fn priority_sort_higher_first() {
+        let mut v = vec![
+            sug("a", Some(50)),
+            sug("b", Some(75)),
+            sug("c", Some(25)),
+        ];
+        v.sort_by(sort_by_priority_then_alpha);
+        assert_eq!(v[0].display, "b");
+        assert_eq!(v[1].display, "a");
+        assert_eq!(v[2].display, "c");
+    }
+
+    #[test]
+    fn priority_sort_default_50_ties_break_alpha() {
+        let mut v = vec![sug("zeta", None), sug("alpha", None)];
+        v.sort_by(sort_by_priority_then_alpha);
+        assert_eq!(v[0].display, "alpha");
+        assert_eq!(v[1].display, "zeta");
+    }
+
+    #[test]
+    fn priority_sort_explicit_50_equals_none() {
+        let mut v = vec![sug("a", None), sug("b", Some(50))];
+        v.sort_by(sort_by_priority_then_alpha);
+        // Same priority → alpha sort wins
+        assert_eq!(v[0].display, "a");
+        assert_eq!(v[1].display, "b");
     }
 
     #[test]
