@@ -330,7 +330,12 @@ pub fn complete_in(
     if let Some((opt_name, arg_idx)) = result.active_option_arg.as_ref() {
         if let Some(opt) = current.options.iter().find(|o| o.names.contains(opt_name)) {
             if let Some(arg) = opt.args.get(*arg_idx) {
-                let items = emit_candidates_for_arg(arg, &prefix, cwd);
+                let items = emit_candidates_for_arg(
+                    arg,
+                    &prefix,
+                    cwd,
+                    opt.description.as_deref(),
+                );
                 return CompleteResult {
                     items,
                     reason: None,
@@ -489,26 +494,51 @@ fn emit_arg_candidates(
     let Some(arg) = node.args.first() else {
         return vec![];
     };
-    emit_candidates_for_arg(arg, prefix, cwd)
+    emit_candidates_for_arg(arg, prefix, cwd, None)
 }
 
+/// `enclosing_description` lets the caller pass the OPTION's
+/// description when dispatching for `cargo run --bin <here>`-style
+/// option args — many vendor specs put `{a|b|c}` enum hints in the
+/// option's description rather than the arg's, so the description-
+/// extraction fallback needs to see both.
 fn emit_candidates_for_arg(
     arg: &crate::spec_parser::Arg,
     prefix: &str,
     cwd: Option<&std::path::Path>,
+    enclosing_description: Option<&str>,
 ) -> Vec<Suggestion> {
-    // Static suggestions list (Tier A).
-    let mut out: Vec<Suggestion> = arg
-        .suggestions
-        .iter()
+    // Description-extracted enum suggestions (Tier A-ish). Many Fig
+    // specs put `{a|b|c}` directly in the description text instead
+    // of populating `suggestions[]` — recover those as candidates
+    // when the spec didn't otherwise provide any. Conservative
+    // pattern: braces + ≥2 pipe-separated alphanumeric tokens.
+    let desc_for_extract = arg.description.as_deref().or(enclosing_description);
+    let mut out: Vec<Suggestion> = desc_for_extract
+        .and_then(extract_enum_from_description)
+        .into_iter()
+        .flatten()
         .filter(|s| s.starts_with(prefix))
         .map(|s| Suggestion {
             insertion: s.clone(),
-            display: s.clone(),
-            description: None,
+            display: s,
+            description: desc_for_extract.map(|d| d.to_string()),
             kind: SuggestionKind::Argument,
         })
         .collect();
+
+    // Static suggestions list (Tier A).
+    out.extend(
+        arg.suggestions
+            .iter()
+            .filter(|s| s.starts_with(prefix))
+            .map(|s| Suggestion {
+                insertion: s.clone(),
+                display: s.clone(),
+                description: None,
+                kind: SuggestionKind::Argument,
+            }),
+    );
 
     // `template:` field on the arg (separate from `generators:`).
     // Covers `cat`, `vim`, `ls`, `man`, etc. — most unix command
@@ -1166,6 +1196,58 @@ fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
         cache.insert(canon, (std::time::Instant::now(), blob.clone()));
     }
     Some(blob)
+}
+
+/// Extract `{a|b|c}` enum-list suggestions from a Fig description
+/// string. Many vendor specs document enum values inline (e.g. `gh
+/// pr list --state "Filter by state: {open|closed|merged|all}"`)
+/// without populating `arg.suggestions[]`. Recovering them here
+/// turns a dead enum into useful completion.
+///
+/// Conservative rules to avoid false positives:
+/// - Braces must contain ≥2 pipe-separated entries
+/// - Each entry: 1+ chars from `[A-Za-z0-9_/.-]`
+/// - Pipes and entries only — anything else (spaces, equals, etc.)
+///   disqualifies the candidate group
+///
+/// Returns the first matching group only; if a description has
+/// multiple enum lists, the first one wins (matches how a human
+/// would scan-read the doc string).
+fn extract_enum_from_description(desc: &str) -> Option<Vec<String>> {
+    let bytes = desc.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b'}' {
+                j += 1;
+            }
+            if j < bytes.len() {
+                let inner = &desc[i + 1..j];
+                if inner.contains('|') {
+                    let parts: Vec<&str> = inner.split('|').map(str::trim).collect();
+                    let ok = parts.len() >= 2
+                        && parts.iter().all(|p| {
+                            !p.is_empty()
+                                && p.chars().all(|c| {
+                                    c.is_ascii_alphanumeric()
+                                        || c == '_'
+                                        || c == '/'
+                                        || c == '.'
+                                        || c == '-'
+                                })
+                        });
+                    if ok {
+                        return Some(parts.into_iter().map(|s| s.to_string()).collect());
+                    }
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Clamp `cursor` down to the nearest valid UTF-8 char boundary at or
@@ -2066,5 +2148,51 @@ mod tests {
         assert!(entries.iter().any(|s| s == "https://example.com"));
         assert!(entries.iter().any(|s| s == "git"));
         assert!(entries.iter().any(|s| s == "ssh"));
+    }
+
+    #[test]
+    fn extract_enum_simple_pipe_list() {
+        let got = extract_enum_from_description("Filter by state: {open|closed|merged|all}");
+        assert_eq!(
+            got,
+            Some(vec![
+                "open".into(),
+                "closed".into(),
+                "merged".into(),
+                "all".into(),
+            ])
+        );
+    }
+
+    #[test]
+    fn extract_enum_with_spaces_around_pipes() {
+        let got = extract_enum_from_description("Mode: {auto | always | never}");
+        assert_eq!(
+            got,
+            Some(vec!["auto".into(), "always".into(), "never".into()])
+        );
+    }
+
+    #[test]
+    fn extract_enum_ignores_single_value_braces() {
+        // `{foo}` is not an enum — likely a placeholder.
+        assert_eq!(
+            extract_enum_from_description("Path: {file}"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_enum_ignores_braces_with_disallowed_chars() {
+        // `{a b|c d}` has spaces inside entries — not an enum list.
+        assert_eq!(
+            extract_enum_from_description("usage: {a b|c d}"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_enum_no_braces_returns_none() {
+        assert_eq!(extract_enum_from_description("just a description"), None);
     }
 }
