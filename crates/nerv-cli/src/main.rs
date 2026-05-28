@@ -1061,3 +1061,78 @@ fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
         anyhow::Ok(())
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chrono_like_timestamp_is_numeric_and_growing() {
+        let t1 = chrono_like_timestamp();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let t2 = chrono_like_timestamp();
+        assert!(
+            t1.parse::<u64>().is_ok(),
+            "timestamp not parseable as u64: {t1}"
+        );
+        let n1: u64 = t1.parse().unwrap();
+        let n2: u64 = t2.parse().unwrap();
+        assert!(n2 >= n1, "{n2} should be >= {n1}");
+    }
+
+    #[test]
+    fn strip_zsh_hooks_removes_block_and_creates_backup() {
+        // Isolated HOME so we don't touch the real ~/.zshrc.
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let zshrc = tmp.join(".zshrc");
+        let original = format!(
+            "alias ll='ls -la'\n{}# trailing user comment\n",
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts")
+        );
+        std::fs::write(&zshrc, &original).unwrap();
+
+        let mut log = UninstallLog::new(true);
+        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        assert!(backup.is_some(), "expected backup PathBuf");
+        let backup_path = backup.unwrap();
+        assert!(backup_path.exists(), "backup file should exist");
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).unwrap(),
+            original,
+            "backup must hold the pre-strip content verbatim"
+        );
+
+        // Post-strip .zshrc has no marker block but keeps user code.
+        let after = std::fs::read_to_string(&zshrc).unwrap();
+        assert_eq!(nerv_shell::count_blocks(&after), 0);
+        assert!(after.contains("alias ll='ls -la'"));
+        assert!(after.contains("# trailing user comment"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn strip_zsh_hooks_no_op_when_no_blocks() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-noop-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let zshrc = tmp.join(".zshrc");
+        let body = "alias x=ls\n";
+        std::fs::write(&zshrc, body).unwrap();
+        let mut log = UninstallLog::new(true);
+        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        assert!(backup.is_none(), "no backup when nothing to strip");
+        assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn strip_zsh_hooks_handles_missing_home_files() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut log = UninstallLog::new(true);
+        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        assert!(backup.is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+}

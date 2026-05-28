@@ -127,4 +127,68 @@ mod tests {
         let zshrc = "alias nerv-test=echo\n";
         assert_eq!(strip_blocks(zshrc), zshrc);
     }
+
+    #[test]
+    fn strip_on_empty_input_returns_empty() {
+        assert_eq!(strip_blocks(""), "");
+    }
+
+    #[test]
+    fn strip_handles_only_block_no_user_code() {
+        let zshrc = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts");
+        assert_eq!(strip_blocks(&zshrc), "");
+    }
+
+    #[test]
+    fn strip_drops_unterminated_block_to_end() {
+        // Corruption case: start marker without end. Everything from
+        // the start marker through EOF gets dropped — matches the
+        // "trace zero" uninstall guarantee.
+        let zshrc = format!(
+            "user code line\n\
+             {MARKER_START}\n\
+             # half-written block, no end marker\n\
+             eval \"$(nerv init zsh --shell-script)\"\n"
+        );
+        let stripped = strip_blocks(&zshrc);
+        assert_eq!(stripped, "user code line\n");
+        assert_eq!(count_blocks(&stripped), 0);
+    }
+
+    #[test]
+    fn strip_preserves_marker_text_inside_string_literal() {
+        // The matcher is line-exact (trimmed CR/LF). A marker buried
+        // inside a longer line — e.g. echoed inside an alias — must
+        // NOT trigger stripping.
+        let zshrc = format!("alias x='echo {MARKER_START} hello'\n");
+        assert_eq!(strip_blocks(&zshrc), zshrc);
+    }
+
+    #[test]
+    fn count_blocks_counts_start_markers_only() {
+        let blk = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts");
+        let zshrc = format!("a\n{blk}b\n{blk}c\n{blk}");
+        assert_eq!(count_blocks(&zshrc), 3);
+        assert_eq!(count_blocks(""), 0);
+    }
+
+    #[test]
+    fn strip_tolerates_crlf_line_endings() {
+        // Windows-style \r\n on every line. trim_end_matches drops
+        // both CR and LF, so marker detection still works.
+        let blk_lf = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts");
+        let zshrc_crlf = format!("a\r\n{}", blk_lf.replace('\n', "\r\n"));
+        let out = strip_blocks(&zshrc_crlf);
+        assert_eq!(count_blocks(&out), 0);
+        assert!(out.starts_with("a\r\n"));
+    }
+
+    #[test]
+    fn init_block_preserves_bin_path_with_spaces() {
+        // macOS Applications path can have spaces. The eval line
+        // should round-trip them verbatim.
+        let b = init_block("/Applications/My Tools/nerv", "1.0.0", "ts");
+        assert!(b.contains("/Applications/My Tools/nerv"));
+        assert!(b.contains("Version: 1.0.0"));
+    }
 }
