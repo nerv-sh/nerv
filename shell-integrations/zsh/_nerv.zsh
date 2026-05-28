@@ -18,6 +18,13 @@ typeset -gi __NERV_E1_SHOWN=0
 typeset -gi __NERV_SELECTED=1
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
+
+# Tighten KEYTIMEOUT so single-press Esc dismisses the popup
+# without zsh's default 0.4s wait for longer escape sequences.
+# 1 = 10ms — fast enough for human perception, still safe for
+# multi-byte arrow keys on local terminals. User can override
+# after the init block.
+KEYTIMEOUT=1
 typeset -gi __NERV_WIDTH=46
 typeset -gi __NERV_PASTING=0
 typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
@@ -497,10 +504,9 @@ bindkey '^G' __nerv_dismiss
 
 # Esc closes an active popup. When no popup is up, falls through to
 # zsh's usual Esc handling (send-break — same as the unbound default).
-# Note: binding `\e` adds a KEYTIMEOUT-bounded wait (default 40 =
-# 0.4s) before firing, because zsh first tries to match longer
-# escape sequences like `\e[A`. Users who notice the lag can shorten
-# it with `KEYTIMEOUT=10` in their .zshrc (= 0.1s).
+# KEYTIMEOUT is set to 1 (10ms) at the top of this file so the
+# bare-Esc binding fires instantly without waiting for a longer
+# escape sequence like `\e[A`.
 __nerv_escape() {
   if (( __NERV_ACTIVE )); then
     __nerv_hide_popup
