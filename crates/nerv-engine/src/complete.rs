@@ -2921,4 +2921,109 @@ mod tests {
         let out = emit_options_with_ancestors(&node, &[], "--a");
         assert_eq!(out[0].icon, None, "fig:// URL must not leak");
     }
+
+    // --- Edge case coverage (tech-debt sweep) ---
+
+    #[test]
+    fn sanitize_icon_at_exact_4_byte_boundary() {
+        // Common 4-byte emoji should pass.
+        assert_eq!(sanitize_icon(Some("📦")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some("📁")), Some("📁".into()));
+        // 5+ bytes (emoji + ASCII) must not.
+        assert_eq!(sanitize_icon(Some("📦x")), None);
+        // 3-byte CJK char passes (≤4).
+        assert_eq!(sanitize_icon(Some("文")), Some("文".into()));
+    }
+
+    #[test]
+    fn sanitize_icon_trims_whitespace() {
+        assert_eq!(sanitize_icon(Some("  📦  ")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some("\t$\n")), Some("$".into()));
+    }
+
+    #[test]
+    fn split_by_query_term_handles_multibyte_delim() {
+        // CJK delim char (3 bytes). Make sure byte-position split
+        // doesn't fall inside a char boundary.
+        let (q, ip) = split_by_query_term("foo,bar", Some(","));
+        assert_eq!(q, "bar");
+        assert_eq!(ip, "foo,");
+        // Empty prefix.
+        let (q, ip) = split_by_query_term("", Some(","));
+        assert_eq!(q, "");
+        assert_eq!(ip, "");
+        // Trailing delim → empty query, full insert prefix.
+        let (q, ip) = split_by_query_term("foo,", Some(","));
+        assert_eq!(q, "");
+        assert_eq!(ip, "foo,");
+    }
+
+    #[test]
+    fn split_by_query_term_utf8_safe_with_emoji() {
+        // Emoji before delim — split must land at char boundary.
+        let (q, ip) = split_by_query_term("📦,bar", Some(","));
+        assert_eq!(q, "bar");
+        assert_eq!(ip, "📦,");
+    }
+
+    #[test]
+    fn split_by_query_term_empty_delim_string_returns_whole() {
+        let (q, ip) = split_by_query_term("foo,bar", Some(""));
+        assert_eq!(q, "foo,bar");
+        assert_eq!(ip, "");
+    }
+
+    #[test]
+    fn matches_filter_empty_query_matches_anything() {
+        assert!(matches_filter("foobar", "", None));
+        assert!(matches_filter("foobar", "", Some("substring")));
+        assert!(matches_filter("", "", None));
+    }
+
+    #[test]
+    fn matches_filter_substring_empty_string_in_empty_name() {
+        assert!(matches_filter("", "", Some("substring")));
+        assert!(!matches_filter("", "foo", Some("substring")));
+    }
+
+    #[test]
+    fn dir_summary_handles_unreadable_dir() {
+        // Nonexistent path → fallback "dir".
+        let p = std::path::PathBuf::from("/this/does/not/exist/anywhere");
+        assert_eq!(dir_summary(&p), "dir");
+    }
+
+    #[test]
+    fn dir_summary_truncates_at_cap() {
+        // Create a dir with > 200 entries; should report `n+ items`.
+        let tmp = std::env::temp_dir().join(format!("nerv-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        for i in 0..210u32 {
+            std::fs::write(tmp.join(format!("f{i}")), "x").unwrap();
+        }
+        let s = dir_summary(&tmp);
+        assert!(s.ends_with("+ items"), "expected truncated label: {s}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn filepath_icons_assigned_per_kind() {
+        // Symlinks > dirs > files in the icon precedence chain.
+        let tmp = std::env::temp_dir().join(format!("nerv-fp-icons-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join("subdir")).unwrap();
+        std::fs::write(tmp.join("file.txt"), "x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.join("file.txt"), tmp.join("link")).unwrap();
+        let rows = filepaths_at(Some(&tmp), "", false).unwrap();
+        let by_name: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|(_, display, _, icon)| (display, icon))
+            .collect();
+        assert_eq!(by_name.get("subdir/"), Some(&Some("📁".into())));
+        assert_eq!(by_name.get("file.txt"), Some(&Some("📄".into())));
+        #[cfg(unix)]
+        assert_eq!(by_name.get("link"), Some(&Some("🔗".into())));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
