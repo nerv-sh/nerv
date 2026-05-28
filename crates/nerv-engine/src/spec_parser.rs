@@ -153,7 +153,9 @@ pub struct Arg {
     /// after comma, only the trailing `serde` is the query; the
     /// completion preserves `tokio,` in the insertion. Stored as
     /// a string of single-byte delimiter chars (`","`, `"@"`, etc.).
-    /// Function-form `getQueryTerm` is Tier C and deferred to M1.
+    /// Function-form `getQueryTerm` is Tier C and deferred to M1
+    /// (PLAN §5.7 — `rquickjs` opt-in). The TS converter drops
+    /// function-form values and only emits string/array forms.
     #[serde(
         default,
         rename = "getQueryTerm",
