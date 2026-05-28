@@ -1026,8 +1026,12 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
 }
 
 fn print_suggestion(s: &Suggestion) {
+    // Wire format: insertion \t display \t description \t icon
+    // Icon is empty string when None. Widget renders icon as a
+    // prefix glyph to the display column.
     let desc = s.description.as_deref().unwrap_or("");
-    println!("{}\t{}\t{}", s.insertion, s.display, desc);
+    let icon = s.icon.as_deref().unwrap_or("");
+    println!("{}\t{}\t{}\t{}", s.insertion, s.display, desc, icon);
 }
 
 fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {

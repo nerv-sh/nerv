@@ -76,6 +76,12 @@ pub struct Suggestion {
     /// Default 50 (Fig convention). Falls back to alpha when equal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+    /// Fig parity icon glyph. Single grapheme or short text only.
+    /// `fig://icon?type=...` URLs from upstream specs are stripped
+    /// (they reference Fig's icon registry which is irrelevant in
+    /// the terminal). The widget renders this verbatim as a prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]

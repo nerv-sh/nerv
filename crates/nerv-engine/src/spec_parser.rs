@@ -69,6 +69,10 @@ pub struct Subcommand {
     /// when equal / absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+    /// Fig parity icon glyph (emoji or single visible char). Stripped
+    /// by the TS converter for `fig://*` URLs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A long / short option flag, possibly with one or more attached
@@ -110,6 +114,9 @@ pub struct Opt {
     /// continues into the arg in one motion.
     #[serde(default, rename = "requiresSeparator", alias = "requires_separator")]
     pub requires_separator: bool,
+    /// Fig parity icon glyph. Same rules as Subcommand.icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A positional or option-bound argument.

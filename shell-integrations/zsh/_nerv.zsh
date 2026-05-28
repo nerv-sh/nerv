@@ -73,8 +73,12 @@ __nerv_show_popup() {
   fi
   local end=$(( start + visible - 1 ))
 
+  # Wire format from `nerv _complete`:
+  #   insertion \t display \t description \t icon
+  # All 4 fields tab-separated; icon may be empty.
   local sel_line="${items[$__NERV_SELECTED]}"
   local sel_desc="${sel_line#*	}"; sel_desc="${sel_desc#*	}"
+  sel_desc="${sel_desc%%	*}"  # drop trailing icon field
 
   # Auto-size: measure max display + max desc across ALL items
   # (not just the window), so window-sliding doesn't reshape the
@@ -85,6 +89,7 @@ __nerv_show_popup() {
     local rest="${line#*	}"
     local d="${rest%%	*}"
     local desc_full="${rest#*	}"
+    desc_full="${desc_full%%	*}"  # drop icon field
     (( ${#d} > max_disp )) && max_disp=${#d}
     (( ${#desc_full} > max_desc )) && max_desc=${#desc_full}
   done
@@ -149,20 +154,28 @@ __nerv_show_popup() {
     local rest="${line#*	}"
     local display="${rest%%	*}"
     (( ${#display} > max_disp )) && display="${display:0:$max_disp}"
+    # Pull icon (4th field). Empty → fallback to `$` literal.
+    local trail="${rest#*	}"           # description + tab + icon
+    local row_icon="${trail#*	}"        # everything after description tab
+    [[ "$row_icon" == "$trail" ]] && row_icon=""  # no tab → no icon
+    local glyph="$"
+    [[ -n "$row_icon" ]] && glyph="$row_icon"
 
-    # Layout inside one row: " $ display<padding>"
-    # ($ icon takes 2 cols including space after.) Right-pad with
-    # spaces to fill row_body so the right vertical bar lines up.
-    local visible_chars=$(( 3 + ${#display} ))  # " $ " + display
+    # Layout inside one row: " <glyph> display<padding>"
+    # (slot takes 3 cols including bracketing spaces.) Right-pad
+    # with spaces to fill row_body so the right vertical bar lines
+    # up. Glyph width is approximated as 1 col; emojis can be 2
+    # wide and may bleed one cell — accepted MVP tradeoff.
+    local visible_chars=$(( 3 + ${#display} ))  # " G " + display
     local pad_n=$(( row_body - visible_chars ))
     (( pad_n < 0 )) && pad_n=0
     local row_pad=""
     repeat $pad_n; do row_pad+=" "; done
 
     if (( i == __NERV_SELECTED )); then
-      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}\$${SELFG} ${display}${row_pad}${BDR}│${R}")
+      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}${glyph}${SELFG} ${display}${row_pad}${BDR}│${R}")
     else
-      colored+=("  ${BG}${BDR}│${BG} ${ICON}\$${ITEM} ${display}${row_pad}${BDR}│${R}")
+      colored+=("  ${BG}${BDR}│${BG} ${ICON}${glyph}${ITEM} ${display}${row_pad}${BDR}│${R}")
     fi
   done
 
