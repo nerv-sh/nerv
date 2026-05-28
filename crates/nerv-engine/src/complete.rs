@@ -493,11 +493,15 @@ fn emit_options_with_ancestors(
     prefix: &str,
 ) -> Vec<Suggestion> {
     let emit = |opt: &crate::spec_parser::Opt| -> Vec<Suggestion> {
+        // Fig parity: when `requiresSeparator` is set and the option
+        // takes args, append `=` to the insertion so the cursor
+        // continues into the arg in one keystroke (`--color=`).
+        let needs_eq = opt.requires_separator && !opt.args.is_empty();
         opt.names
             .iter()
             .filter(|n| n.starts_with(prefix))
             .map(|n| Suggestion {
-                insertion: n.clone(),
+                insertion: if needs_eq { format!("{n}=") } else { n.clone() },
                 display: n.clone(),
                 description: opt.description.clone(),
                 kind: SuggestionKind::Flag,
@@ -517,11 +521,11 @@ fn emit_options_with_ancestors(
                 continue;
             }
             // Don't double-emit if leaf already declared the same flag.
-            if opt.names.iter().any(|n| {
-                node.options
-                    .iter()
-                    .any(|local| local.names.contains(n))
-            }) {
+            if opt
+                .names
+                .iter()
+                .any(|n| node.options.iter().any(|local| local.names.contains(n)))
+            {
                 continue;
             }
             out.extend(emit(opt));
@@ -626,13 +630,17 @@ fn emit_candidates_for_arg(
         _ => None,
     } {
         if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
-            out.extend(paths.into_iter().map(|(insertion, display, description)| Suggestion {
-                insertion,
-                display,
-                description,
-                kind: SuggestionKind::Argument,
-                priority: None,
-            }));
+            out.extend(
+                paths
+                    .into_iter()
+                    .map(|(insertion, display, description)| Suggestion {
+                        insertion,
+                        display,
+                        description,
+                        kind: SuggestionKind::Argument,
+                        priority: None,
+                    }),
+            );
         }
     }
     if matches!(
@@ -696,12 +704,14 @@ fn emit_candidates_for_arg(
                 }
                 crate::spec_parser::Generator::Filepaths { folders_only } => {
                     if let Some(paths) = filepaths_at(cwd, prefix, *folders_only) {
-                        out.extend(paths.into_iter().map(|(insertion, display, description)| Suggestion {
-                            insertion,
-                            display,
-                            description,
-                            kind: SuggestionKind::Argument,
-                            priority: None,
+                        out.extend(paths.into_iter().map(|(insertion, display, description)| {
+                            Suggestion {
+                                insertion,
+                                display,
+                                description,
+                                kind: SuggestionKind::Argument,
+                                priority: None,
+                            }
                         }));
                     }
                 }
@@ -878,8 +888,8 @@ fn emit_candidates_for_arg(
 fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
     let n = name?.trim().to_ascii_lowercase();
     match n.as_str() {
-        "path" | "file" | "files" | "filepath" | "filename" | "src" | "dest"
-        | "source" | "destination" | "input" | "output" => Some(false),
+        "path" | "file" | "files" | "filepath" | "filename" | "src" | "dest" | "source"
+        | "destination" | "input" | "output" => Some(false),
         "dir" | "directory" | "folder" | "dirname" | "dirpath" => Some(true),
         _ => None,
     }
@@ -891,18 +901,16 @@ fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
 /// `-f / --file`, `-o / --output`, `-d / --directory`. Long names
 /// take precedence — short flags (`-d` could be delete OR
 /// directory) only count when no long form is present.
-fn infer_filepaths_kind_from_opt_names(
-    opt: Option<&crate::spec_parser::Opt>,
-) -> Option<bool> {
+fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) -> Option<bool> {
     let opt = opt?;
     let names: Vec<String> = opt.names.iter().map(|n| n.to_ascii_lowercase()).collect();
     for n in &names {
         if let Some(long) = n.strip_prefix("--") {
             match long {
-                "file" | "files" | "filename" | "filepath" | "input" | "output"
-                | "log" | "log-file" | "input-file" | "output-file" => return Some(false),
-                "dir" | "directory" | "folder" | "input-dir" | "output-dir"
-                | "workdir" | "working-dir" | "chdir" => return Some(true),
+                "file" | "files" | "filename" | "filepath" | "input" | "output" | "log"
+                | "log-file" | "input-file" | "output-file" => return Some(false),
+                "dir" | "directory" | "folder" | "input-dir" | "output-dir" | "workdir"
+                | "working-dir" | "chdir" => return Some(true),
                 _ => {}
             }
         }
@@ -1845,11 +1853,7 @@ fn filepaths_at(
     Some(out)
 }
 
-fn filepaths_desc(
-    entry: &std::fs::DirEntry,
-    is_dir: bool,
-    is_symlink: bool,
-) -> Option<String> {
+fn filepaths_desc(entry: &std::fs::DirEntry, is_dir: bool, is_symlink: bool) -> Option<String> {
     if is_symlink {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             return Some(format!("→ {}", target.display()));
@@ -2408,19 +2412,13 @@ mod tests {
     #[test]
     fn extract_enum_ignores_single_value_braces() {
         // `{foo}` is not an enum — likely a placeholder.
-        assert_eq!(
-            extract_enum_from_description("Path: {file}"),
-            None
-        );
+        assert_eq!(extract_enum_from_description("Path: {file}"), None);
     }
 
     #[test]
     fn extract_enum_ignores_braces_with_disallowed_chars() {
         // `{a b|c d}` has spaces inside entries — not an enum list.
-        assert_eq!(
-            extract_enum_from_description("usage: {a b|c d}"),
-            None
-        );
+        assert_eq!(extract_enum_from_description("usage: {a b|c d}"), None);
     }
 
     #[test]
@@ -2513,11 +2511,7 @@ mod tests {
 
     #[test]
     fn priority_sort_higher_first() {
-        let mut v = vec![
-            sug("a", Some(50)),
-            sug("b", Some(75)),
-            sug("c", Some(25)),
-        ];
+        let mut v = vec![sug("a", Some(50)), sug("b", Some(75)), sug("c", Some(25))];
         v.sort_by(sort_by_priority_then_alpha);
         assert_eq!(v[0].display, "b");
         assert_eq!(v[1].display, "a");
@@ -2526,7 +2520,7 @@ mod tests {
 
     #[test]
     fn priority_sort_default_50_ties_break_alpha() {
-        let mut v = vec![sug("zeta", None), sug("alpha", None)];
+        let mut v = [sug("zeta", None), sug("alpha", None)];
         v.sort_by(sort_by_priority_then_alpha);
         assert_eq!(v[0].display, "alpha");
         assert_eq!(v[1].display, "zeta");
@@ -2534,7 +2528,7 @@ mod tests {
 
     #[test]
     fn priority_sort_explicit_50_equals_none() {
-        let mut v = vec![sug("a", None), sug("b", Some(50))];
+        let mut v = [sug("a", None), sug("b", Some(50))];
         v.sort_by(sort_by_priority_then_alpha);
         // Same priority → alpha sort wins
         assert_eq!(v[0].display, "a");
@@ -2548,5 +2542,57 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(infer_filepaths_kind_from_opt_names(Some(&opt)), Some(false));
+    }
+
+    #[test]
+    fn emit_appends_eq_for_requires_separator_with_args() {
+        let node = Subcommand {
+            name: "ls".into(),
+            options: vec![Opt {
+                names: vec!["--color".into()],
+                requires_separator: true,
+                args: vec![Arg::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--c");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].insertion, "--color=");
+        assert_eq!(out[0].display, "--color", "display stays clean");
+    }
+
+    #[test]
+    fn emit_does_not_append_eq_when_no_args() {
+        // requires_separator on a flag-only option is meaningless;
+        // make sure we don't tack on `=` when there's nothing after.
+        let node = Subcommand {
+            name: "ls".into(),
+            options: vec![Opt {
+                names: vec!["--flag".into()],
+                requires_separator: true,
+                args: vec![],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--f");
+        assert_eq!(out[0].insertion, "--flag");
+    }
+
+    #[test]
+    fn emit_no_eq_when_separator_not_required() {
+        let node = Subcommand {
+            name: "ls".into(),
+            options: vec![Opt {
+                names: vec!["--color".into()],
+                requires_separator: false,
+                args: vec![Arg::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--c");
+        assert_eq!(out[0].insertion, "--color");
     }
 }

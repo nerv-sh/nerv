@@ -79,6 +79,7 @@ type FigOpt = {
   hidden?: boolean;
   isPersistent?: boolean;
   priority?: number;
+  requiresSeparator?: boolean | string;
 };
 
 type FigSpec = {
@@ -126,6 +127,7 @@ type NervOpt = {
   hidden: boolean;
   isPersistent?: boolean;
   priority?: number;
+  requiresSeparator?: boolean;
 };
 
 type NervSpec = {
@@ -624,6 +626,9 @@ const convertOpt = async (o: FigOpt): Promise<NervOpt> => {
     hidden: o.hidden ?? false,
     ...(o.isPersistent === true ? { isPersistent: true } : {}),
     ...(typeof o.priority === "number" ? { priority: o.priority } : {}),
+    // Fig allows a string separator (e.g. `:`) — we collapse to bool.
+    // Any truthy value (including non-empty string) means `=` required.
+    ...(o.requiresSeparator ? { requiresSeparator: true } : {}),
   };
 };
 
