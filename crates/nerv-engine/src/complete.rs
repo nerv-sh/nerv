@@ -360,7 +360,9 @@ pub fn complete_in(
         if arg_has_dynamic_source(current) {
             subs.extend(emit_arg_candidates(current, &prefix, cwd));
         }
-        subs.sort_by(|a, b| a.display.cmp(&b.display));
+        // Sort by priority first (script results get priority 75
+        // and float above default-50 subcommands), then alpha.
+        subs.sort_by(sort_by_priority_then_alpha);
         subs.dedup_by(|a, b| a.display == b.display);
         subs
     } else {
@@ -766,8 +768,12 @@ fn emit_candidates_for_arg(
                                     display: name,
                                     description: Some(cmd),
                                     kind: SuggestionKind::Argument,
-                                    priority: None,
-                                    icon: None,
+                                    // Boost scripts above default-50
+                                    // subcommands so they surface at
+                                    // the top when both lists merge
+                                    // (yarn-shorthand path).
+                                    priority: Some(75),
+                                    icon: Some("📜".into()),
                                 }),
                         );
                     }

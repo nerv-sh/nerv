@@ -106,8 +106,24 @@ __nerv_show_popup() {
   local foot_hint=$max_desc
   (( foot_hint > 60 )) && foot_hint=60
 
-  # Layout: " $ "(4) + display + " "(1)
-  local body=$(( 4 + max_disp + 1 ))
+  # Pre-scan items: if any row carries an emoji icon (4th field
+  # contains a non-ASCII byte), the glyph occupies 2 cells. Reserve
+  # an extra column in body so the right border doesn't clip.
+  local has_wide_icon=0
+  for (( i=1; i<=total; i++ )); do
+    local _l="${items[$i]}"
+    local _t="${_l#*	}"; _t="${_t#*	}"
+    local _ic="${_t#*	}"; [[ "$_ic" == "$_t" ]] && _ic=""
+    [[ "$_ic" == *[^[:ascii:]]* ]] && { has_wide_icon=1; break; }
+  done
+  # Layout: " G " + display + " " — slot is 3 cols (ASCII glyph) or
+  # 4 cols (emoji) depending on whether ANY row uses an emoji.
+  local body
+  if (( has_wide_icon )); then
+    body=$(( 5 + max_disp + 1 ))
+  else
+    body=$(( 4 + max_disp + 1 ))
+  fi
   # Footer needs " " + desc + " " (= foot_hint + 2). Pick whichever
   # is wider so neither row wraps.
   local W=$body
@@ -163,12 +179,16 @@ __nerv_show_popup() {
     local glyph=" "
     [[ -n "$row_icon" ]] && glyph="$row_icon"
 
-    # Layout inside one row: " <glyph> display<padding>"
-    # (slot takes 3 cols including bracketing spaces.) Right-pad
-    # with spaces to fill row_body so the right vertical bar lines
-    # up. Glyph width is approximated as 1 col; emojis can be 2
-    # wide and may bleed one cell — accepted MVP tradeoff.
-    local visible_chars=$(( 3 + ${#display} ))  # " G " + display
+    # Glyph slot width (display cells, not bytes). Emoji = 2 cells,
+    # ASCII/space = 1. When the popup has ANY emoji row, ascii rows
+    # need an extra trailing space so display columns align.
+    local glyph_w=1
+    [[ "$glyph" == *[^[:ascii:]]* ]] && glyph_w=2
+    if (( has_wide_icon && glyph_w == 1 )); then
+      glyph="$glyph "
+      glyph_w=2
+    fi
+    local visible_chars=$(( 2 + glyph_w + ${#display} ))  # " G " + display
     local pad_n=$(( row_body - visible_chars ))
     (( pad_n < 0 )) && pad_n=0
     local row_pad=""
