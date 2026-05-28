@@ -80,6 +80,7 @@ type FigOpt = {
   isPersistent?: boolean;
   priority?: number;
   requiresSeparator?: boolean | string;
+  icon?: string;
 };
 
 type FigSpec = {
@@ -93,6 +94,8 @@ type FigSpec = {
   parserDirectives?: { flagsArePosixNoncompliant?: boolean };
   loadSpec?: any;
   generators?: any;
+  icon?: string;
+  priority?: number;
 };
 
 type NervSuggestion =
@@ -128,6 +131,7 @@ type NervOpt = {
   isPersistent?: boolean;
   priority?: number;
   requiresSeparator?: boolean;
+  icon?: string;
 };
 
 type NervSpec = {
@@ -140,6 +144,7 @@ type NervSpec = {
   requires_double_dash: boolean;
   hidden: boolean;
   priority?: number;
+  icon?: string;
 };
 
 type NervGenerator =
@@ -590,7 +595,7 @@ const convertArg = async (a: FigArg): Promise<NervArg> => {
         ...(s.description != null ? { description: s.description } : {}),
         ...(s.displayName != null ? { displayName: s.displayName } : {}),
         ...(s.insertValue != null ? { insertValue: s.insertValue } : {}),
-        ...(s.icon != null ? { icon: s.icon } : {}),
+        ...(sanitizeIcon(s.icon) !== undefined ? { icon: sanitizeIcon(s.icon)! } : {}),
         ...(s.priority != null ? { priority: s.priority } : {}),
       };
     }
@@ -629,7 +634,20 @@ const convertOpt = async (o: FigOpt): Promise<NervOpt> => {
     // Fig allows a string separator (e.g. `:`) — we collapse to bool.
     // Any truthy value (including non-empty string) means `=` required.
     ...(o.requiresSeparator ? { requiresSeparator: true } : {}),
+    ...(sanitizeIcon(o.icon) !== undefined
+      ? { icon: sanitizeIcon(o.icon)! }
+      : {}),
   };
+};
+
+// Strip Fig's icon-registry URL refs (`fig://icon?type=...`) — they
+// mean nothing in a terminal. Trim short visible glyphs only (≤4
+// bytes). Returns undefined when the input is missing or unusable.
+const sanitizeIcon = (raw: unknown): string | undefined => {
+  if (typeof raw !== "string") return undefined;
+  const s = raw.trim();
+  if (!s || s.startsWith("fig://") || s.length > 4) return undefined;
+  return s;
 };
 
 type Ctx = {
@@ -743,6 +761,9 @@ const convertSpec = async (
     hidden: s.hidden ?? false,
     ...(typeof (s as any).priority === "number"
       ? { priority: (s as any).priority }
+      : {}),
+    ...(sanitizeIcon((s as any).icon) !== undefined
+      ? { icon: sanitizeIcon((s as any).icon)! }
       : {}),
   };
 };

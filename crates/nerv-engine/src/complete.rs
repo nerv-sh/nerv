@@ -438,6 +438,20 @@ fn sort_by_priority_then_alpha(a: &Suggestion, b: &Suggestion) -> std::cmp::Orde
     pb.cmp(&pa).then_with(|| a.display.cmp(&b.display))
 }
 
+/// Fig parity icon sanitizer. Many specs reference Fig's icon
+/// registry via `fig://icon?type=...` URLs which mean nothing in a
+/// terminal. Strip those and accept only short visible glyphs
+/// (typically a single emoji or one ASCII char). Anything longer
+/// than 4 bytes is also rejected as defense against accidental
+/// long-string injection that would distort popup row widths.
+fn sanitize_icon(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() || s.starts_with("fig://") || s.len() > 4 {
+        return None;
+    }
+    Some(s.to_string())
+}
+
 fn walk_to_current<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand> {
     let mut node = root;
     for name in path.iter().skip(1) {
@@ -477,6 +491,7 @@ fn emit_subcommands(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
             description: sc.description.clone(),
             kind: SuggestionKind::Subcommand,
             priority: sc.priority,
+            icon: sanitize_icon(sc.icon.as_deref()),
         })
         .collect();
     out.sort_by(sort_by_priority_then_alpha);
@@ -506,6 +521,7 @@ fn emit_options_with_ancestors(
                 description: opt.description.clone(),
                 kind: SuggestionKind::Flag,
                 priority: opt.priority,
+                icon: sanitize_icon(opt.icon.as_deref()),
             })
             .collect()
     };
@@ -597,6 +613,7 @@ fn emit_candidates_for_arg(
             description: desc_for_extract.map(|d| d.to_string()),
             kind: SuggestionKind::Argument,
             priority: None,
+            icon: None,
         })
         .collect();
 
@@ -615,6 +632,7 @@ fn emit_candidates_for_arg(
                 description: s.description.clone(),
                 kind: SuggestionKind::Argument,
                 priority: s.priority,
+                icon: sanitize_icon(s.icon.as_deref()),
             }),
     );
 
@@ -639,6 +657,7 @@ fn emit_candidates_for_arg(
                         description,
                         kind: SuggestionKind::Argument,
                         priority: None,
+                        icon: None,
                     }),
             );
         }
@@ -658,6 +677,7 @@ fn emit_candidates_for_arg(
                         description: Some("history".into()),
                         kind: SuggestionKind::Argument,
                         priority: None,
+                        icon: None,
                     }),
             );
         }
@@ -682,6 +702,7 @@ fn emit_candidates_for_arg(
                                     description: None,
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -698,6 +719,7 @@ fn emit_candidates_for_arg(
                                     description: Some(cmd),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -711,6 +733,7 @@ fn emit_candidates_for_arg(
                                 description,
                                 kind: SuggestionKind::Argument,
                                 priority: None,
+                                icon: None,
                             }
                         }));
                     }
@@ -727,6 +750,7 @@ fn emit_candidates_for_arg(
                                     description: Some("SSH host".into()),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -740,6 +764,7 @@ fn emit_candidates_for_arg(
                                 description: Some("make target".into()),
                                 kind: SuggestionKind::Argument,
                                 priority: None,
+                                icon: None,
                             },
                         ));
                     }
@@ -756,6 +781,7 @@ fn emit_candidates_for_arg(
                                     description: Some("man page".into()),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -771,6 +797,7 @@ fn emit_candidates_for_arg(
                                     description: Some(kind.into()),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -790,6 +817,7 @@ fn emit_candidates_for_arg(
                                 description: Some("k8s resource".into()),
                                 kind: SuggestionKind::Argument,
                                 priority: None,
+                                icon: None,
                             },
                         ));
                     }
@@ -810,6 +838,7 @@ fn emit_candidates_for_arg(
                                     }),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -835,6 +864,7 @@ fn emit_candidates_for_arg(
                                     description: Some(format!("{path} (score {score:.1})")),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -867,6 +897,7 @@ fn emit_candidates_for_arg(
                             description,
                             kind: SuggestionKind::Argument,
                             priority: None,
+                            icon: None,
                         }),
                 );
             }
@@ -2506,6 +2537,7 @@ mod tests {
             description: None,
             kind: SuggestionKind::Argument,
             priority: prio,
+            icon: None,
         }
     }
 
@@ -2594,5 +2626,56 @@ mod tests {
         };
         let out = emit_options_with_ancestors(&node, &[], "--c");
         assert_eq!(out[0].insertion, "--color");
+    }
+
+    #[test]
+    fn sanitize_icon_strips_fig_urls() {
+        assert_eq!(sanitize_icon(Some("fig://icon?type=string")), None);
+        assert_eq!(sanitize_icon(Some("fig://template?color=red")), None);
+    }
+
+    #[test]
+    fn sanitize_icon_keeps_emoji_and_short_glyph() {
+        assert_eq!(sanitize_icon(Some("📦")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some(">")), Some(">".into()));
+    }
+
+    #[test]
+    fn sanitize_icon_drops_empty_and_long() {
+        assert_eq!(sanitize_icon(None), None);
+        assert_eq!(sanitize_icon(Some("")), None);
+        assert_eq!(sanitize_icon(Some("   ")), None);
+        assert_eq!(sanitize_icon(Some("toolong")), None);
+    }
+
+    #[test]
+    fn subcommand_icon_propagates_to_suggestion() {
+        let node = Subcommand {
+            name: "git".into(),
+            subcommands: vec![Subcommand {
+                name: "commit".into(),
+                icon: Some("📝".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_subcommands(&node, "com");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].icon.as_deref(), Some("📝"));
+    }
+
+    #[test]
+    fn opt_icon_strips_fig_url() {
+        let node = Subcommand {
+            name: "git".into(),
+            options: vec![Opt {
+                names: vec!["--all".into()],
+                icon: Some("fig://icon?type=command".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--a");
+        assert_eq!(out[0].icon, None, "fig:// URL must not leak");
     }
 }
