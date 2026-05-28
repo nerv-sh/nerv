@@ -1927,10 +1927,46 @@ fn filepaths_desc(entry: &std::fs::DirEntry, is_dir: bool, is_symlink: bool) -> 
         return Some("symlink".into());
     }
     if is_dir {
-        return Some("dir".into());
+        // Smart fallback for cd / z: every row would otherwise just
+        // say "dir" — uninformative. Show item count when cheap
+        // (~50µs per read_dir on typical sizes). Skip on read error
+        // (perm denied / unreadable) and fall back to "dir".
+        return Some(dir_summary(&entry.path()));
     }
     let meta = entry.metadata().ok()?;
     Some(human_size(meta.len()))
+}
+
+/// One-line summary for a directory entry. Reads the dir to count
+/// visible children (excluding dotfiles). Cap the iteration at 200
+/// entries to keep latency bounded for huge dirs (node_modules).
+fn dir_summary(path: &std::path::Path) -> String {
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return "dir".into();
+    };
+    let mut count: u32 = 0;
+    let mut truncated = false;
+    for (i, e) in rd.flatten().enumerate() {
+        if i >= 200 {
+            truncated = true;
+            break;
+        }
+        let name = e.file_name();
+        let s = name.to_string_lossy();
+        if s.starts_with('.') {
+            continue;
+        }
+        count += 1;
+    }
+    if count == 0 {
+        "empty".into()
+    } else if truncated {
+        format!("{count}+ items")
+    } else if count == 1 {
+        "1 item".into()
+    } else {
+        format!("{count} items")
+    }
 }
 
 fn human_size(bytes: u64) -> String {
@@ -2751,6 +2787,34 @@ mod tests {
         assert_eq!(out[0].display, "serde");
         // Insertion preserves the pre-comma context.
         assert_eq!(out[0].insertion, "tokio,serde");
+    }
+
+    #[test]
+    fn dir_summary_empty_returns_empty_label() {
+        let tmp = std::env::temp_dir().join(format!("nerv-test-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(dir_summary(&tmp), "empty");
+        let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn dir_summary_skips_dotfiles_and_pluralizes() {
+        let tmp = std::env::temp_dir().join(format!("nerv-test-count-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.txt"), "x").unwrap();
+        std::fs::write(tmp.join("b.txt"), "x").unwrap();
+        std::fs::write(tmp.join(".hidden"), "x").unwrap();
+        assert_eq!(dir_summary(&tmp), "2 items");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn dir_summary_singular_for_one_item() {
+        let tmp = std::env::temp_dir().join(format!("nerv-test-one-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("only.txt"), "x").unwrap();
+        assert_eq!(dir_summary(&tmp), "1 item");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
