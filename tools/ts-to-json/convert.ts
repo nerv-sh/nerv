@@ -145,6 +145,7 @@ type NervSpec = {
   hidden: boolean;
   priority?: number;
   icon?: string;
+  flagsArePosixNoncompliant?: boolean;
 };
 
 type NervGenerator =
@@ -764,6 +765,9 @@ const convertSpec = async (
       : {}),
     ...(sanitizeIcon((s as any).icon) !== undefined
       ? { icon: sanitizeIcon((s as any).icon)! }
+      : {}),
+    ...(s.parserDirectives?.flagsArePosixNoncompliant === true
+      ? { flagsArePosixNoncompliant: true }
       : {}),
   };
 };
