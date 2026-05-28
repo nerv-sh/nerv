@@ -495,6 +495,24 @@ __nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
 zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
 
+# Esc closes an active popup. When no popup is up, falls through to
+# zsh's usual Esc handling (send-break — same as the unbound default).
+# Note: binding `\e` adds a KEYTIMEOUT-bounded wait (default 40 =
+# 0.4s) before firing, because zsh first tries to match longer
+# escape sequences like `\e[A`. Users who notice the lag can shorten
+# it with `KEYTIMEOUT=10` in their .zshrc (= 0.1s).
+__nerv_escape() {
+  if (( __NERV_ACTIVE )); then
+    __nerv_hide_popup
+    __NERV_PREV_LBUFFER=""
+    POSTDISPLAY=''
+  else
+    zle .send-break 2>/dev/null || true
+  fi
+}
+zle -N __nerv_escape
+bindkey '\e' __nerv_escape
+
 # Bracketed paste: suppress completions during paste
 __nerv_bracketed_paste() {
   __NERV_PASTING=1
