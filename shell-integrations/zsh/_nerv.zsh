@@ -324,9 +324,18 @@ __nerv_insert_selected() {
 # ---------------------------------------------------------------------------
 __nerv_complete() {
   if [[ -n "${NERV_DEBUG:-}" ]]; then
-    print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS}" >> /tmp/nerv-debug.log
+    print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS} CURSOR=$CURSOR" >> /tmp/nerv-debug.log
   fi
   (( __NERV_PASTING )) && return
+  # Popup only when cursor is at the end of the buffer (LBUFFER ==
+  # full BUFFER, i.e. RBUFFER empty). Fig behavior: typing →
+  # popup; left-arrow into the middle → popup hides; right-arrow
+  # back to the end → popup reappears.
+  if [[ -n "$RBUFFER" ]]; then
+    __nerv_hide_popup
+    __NERV_PREV_LBUFFER=""
+    return
+  fi
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=1
@@ -483,7 +492,9 @@ bindkey $'\eOA' __nerv_select_up
 # Right-Arrow: accept ghost text (POSTDISPLAY) when at end of line.
 # Falls back to plain forward-char in the middle of the buffer or
 # when there's no ghost — matches user expectation for cursor
-# movement inside an existing edit.
+# movement inside an existing edit. After forward-char, re-trigger
+# __nerv_complete so the popup reappears when the cursor lands back
+# at the end of the buffer.
 __nerv_accept_ghost() {
   if (( ${+POSTDISPLAY} )) && [[ -n "$POSTDISPLAY" ]] && [[ -z "$RBUFFER" ]]; then
     LBUFFER+="$POSTDISPLAY"
@@ -492,11 +503,37 @@ __nerv_accept_ghost() {
     __nerv_hide_popup
   else
     zle forward-char
+    __nerv_complete
   fi
 }
 zle -N __nerv_accept_ghost
 bindkey $'\e[C' __nerv_accept_ghost
 bindkey $'\eOC' __nerv_accept_ghost
+
+# Cursor-position state tracking. The pre-redraw hook below fires
+# on every ZLE redraw and uses this to detect transitions between
+# "at end of buffer" and "in the middle" without having to bind
+# every individual movement key (left, ctrl-a, home, etc.).
+typeset -gi __NERV_LAST_AT_END=1
+
+__nerv_pre_redraw() {
+  local at_end=0
+  [[ -z "$RBUFFER" ]] && at_end=1
+  # Only act on state TRANSITIONS to avoid running the heavy
+  # __nerv_complete path on every redraw.
+  if (( at_end != __NERV_LAST_AT_END )); then
+    __NERV_LAST_AT_END=$at_end
+    if (( ! at_end )); then
+      __nerv_hide_popup
+      __NERV_PREV_LBUFFER=""
+    else
+      # Cursor returned to end → re-trigger completion query.
+      __NERV_PREV_LBUFFER=""
+      __nerv_complete
+    fi
+  fi
+}
+zle -N zle-line-pre-redraw __nerv_pre_redraw
 
 __nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
 zle -N __nerv_dismiss
