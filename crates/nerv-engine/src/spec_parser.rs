@@ -148,6 +148,18 @@ pub struct Arg {
     /// Dynamic-generator markers. M0-5 surfaces these as
     /// metadata only; M1 + `rquickjs` opt-in executes them.
     pub generators: Vec<Generator>,
+    /// Fig parity: characters that split the typed token into
+    /// "context prefix + query". e.g. `cargo search "tokio,serde"` →
+    /// after comma, only the trailing `serde` is the query; the
+    /// completion preserves `tokio,` in the insertion. Stored as
+    /// a string of single-byte delimiter chars (`","`, `"@"`, etc.).
+    /// Function-form `getQueryTerm` is Tier C and deferred to M1.
+    #[serde(
+        default,
+        rename = "getQueryTerm",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub get_query_term: Option<String>,
 }
 
 /// Rich suggestion entry. Mirrors the relevant fields of

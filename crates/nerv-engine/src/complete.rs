@@ -438,6 +438,32 @@ fn sort_by_priority_then_alpha(a: &Suggestion, b: &Suggestion) -> std::cmp::Orde
     pb.cmp(&pa).then_with(|| a.display.cmp(&b.display))
 }
 
+/// Fig parity getQueryTerm splitter. Given the raw typed token and
+/// a string of delimiter chars (`","`, `"@"`, …), return
+/// `(query, insert_prefix)` where `query` is the substring AFTER
+/// the last delimiter (or whole token when no delim found), and
+/// `insert_prefix` is the part to preserve in the insertion so
+/// pressing Tab doesn't clobber the already-typed leading text.
+fn split_by_query_term<'a>(prefix: &'a str, delims: Option<&str>) -> (&'a str, &'a str) {
+    let Some(delims) = delims else {
+        return (prefix, "");
+    };
+    if delims.is_empty() {
+        return (prefix, "");
+    }
+    // Find last byte position where any delimiter char occurs.
+    let mut last: Option<usize> = None;
+    for (i, ch) in prefix.char_indices() {
+        if delims.chars().any(|d| d == ch) {
+            last = Some(i + ch.len_utf8());
+        }
+    }
+    match last {
+        Some(idx) => (&prefix[idx..], &prefix[..idx]),
+        None => (prefix, ""),
+    }
+}
+
 /// Fig parity icon sanitizer. Many specs reference Fig's icon
 /// registry via `fig://icon?type=...` URLs which mean nothing in a
 /// terminal. Strip those and accept only short visible glyphs
@@ -596,6 +622,12 @@ fn emit_candidates_for_arg(
     enclosing_opt: Option<&crate::spec_parser::Opt>,
 ) -> Vec<Suggestion> {
     let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
+    // Fig parity getQueryTerm: when the arg declares delimiter chars
+    // (e.g. ',' for `cargo search "tokio,serde"`), split the typed
+    // token into context-prefix + query-prefix. Matches operate on
+    // the query part; the insertion preserves the context prefix so
+    // the existing typed text isn't clobbered on Tab.
+    let (query, insert_prefix) = split_by_query_term(prefix, arg.get_query_term.as_deref());
     // Description-extracted enum suggestions (Tier A-ish). Many Fig
     // specs put `{a|b|c}` directly in the description text instead
     // of populating `suggestions[]` — recover those as candidates
@@ -606,9 +638,9 @@ fn emit_candidates_for_arg(
         .and_then(extract_enum_from_description)
         .into_iter()
         .flatten()
-        .filter(|s| s.starts_with(prefix))
+        .filter(|s| s.starts_with(query))
         .map(|s| Suggestion {
-            insertion: s.clone(),
+            insertion: format!("{insert_prefix}{s}"),
             display: s,
             description: desc_for_extract.map(|d| d.to_string()),
             kind: SuggestionKind::Argument,
@@ -625,14 +657,17 @@ fn emit_candidates_for_arg(
     out.extend(
         arg.suggestions
             .iter()
-            .filter(|s| s.name.starts_with(prefix))
-            .map(|s| Suggestion {
-                insertion: s.insert_value.clone().unwrap_or_else(|| s.name.clone()),
-                display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
-                description: s.description.clone(),
-                kind: SuggestionKind::Argument,
-                priority: s.priority,
-                icon: sanitize_icon(s.icon.as_deref()),
+            .filter(|s| s.name.starts_with(query))
+            .map(|s| {
+                let base = s.insert_value.clone().unwrap_or_else(|| s.name.clone());
+                Suggestion {
+                    insertion: format!("{insert_prefix}{base}"),
+                    display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
+                    description: s.description.clone(),
+                    kind: SuggestionKind::Argument,
+                    priority: s.priority,
+                    icon: sanitize_icon(s.icon.as_deref()),
+                }
             }),
     );
 
@@ -2662,6 +2697,60 @@ mod tests {
         let out = emit_subcommands(&node, "com");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].icon.as_deref(), Some("📝"));
+    }
+
+    #[test]
+    fn split_by_query_term_no_delim_returns_whole_prefix() {
+        let (q, ip) = split_by_query_term("tokio,serde", None);
+        assert_eq!(q, "tokio,serde");
+        assert_eq!(ip, "");
+    }
+
+    #[test]
+    fn split_by_query_term_after_last_delim() {
+        let (q, ip) = split_by_query_term("tokio,serde,async", Some(","));
+        assert_eq!(q, "async");
+        assert_eq!(ip, "tokio,serde,");
+    }
+
+    #[test]
+    fn split_by_query_term_multi_delim_set() {
+        // delim set "@,": last `@` wins for `pkg@1.0,foo@`
+        let (q, ip) = split_by_query_term("pkg@1.0,foo@", Some("@,"));
+        assert_eq!(q, "");
+        assert_eq!(ip, "pkg@1.0,foo@");
+    }
+
+    #[test]
+    fn split_by_query_term_no_match_returns_whole() {
+        let (q, ip) = split_by_query_term("tokio", Some(","));
+        assert_eq!(q, "tokio");
+        assert_eq!(ip, "");
+    }
+
+    #[test]
+    fn arg_with_get_query_term_preserves_prefix_in_insertion() {
+        use crate::spec_parser::{Arg, RawSuggestion};
+        let arg = Arg {
+            get_query_term: Some(",".into()),
+            suggestions: vec![
+                RawSuggestion {
+                    name: "serde".into(),
+                    ..Default::default()
+                },
+                RawSuggestion {
+                    name: "async-trait".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None);
+        // Only "serde" matches "se" prefix.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].display, "serde");
+        // Insertion preserves the pre-comma context.
+        assert_eq!(out[0].insertion, "tokio,serde");
     }
 
     #[test]
