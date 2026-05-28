@@ -154,11 +154,13 @@ __nerv_show_popup() {
     local rest="${line#*	}"
     local display="${rest%%	*}"
     (( ${#display} > max_disp )) && display="${display:0:$max_disp}"
-    # Pull icon (4th field). Empty → fallback to `$` literal.
+    # Pull icon (4th field). Empty → blank space (slot reserved
+    # for alignment). `$` placeholder previously cluttered cd / ls
+    # lists where every row would say `$ foo/` with no signal.
     local trail="${rest#*	}"           # description + tab + icon
     local row_icon="${trail#*	}"        # everything after description tab
     [[ "$row_icon" == "$trail" ]] && row_icon=""  # no tab → no icon
-    local glyph="$"
+    local glyph=" "
     [[ -n "$row_icon" ]] && glyph="$row_icon"
 
     # Layout inside one row: " <glyph> display<padding>"
