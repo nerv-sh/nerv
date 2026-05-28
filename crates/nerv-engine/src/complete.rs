@@ -778,7 +778,12 @@ fn emit_candidates_for_arg(
                                         description: Some(cmd),
                                         kind: SuggestionKind::Argument,
                                         priority: Some(if is_header { 25 } else { 75 }),
-                                        icon: Some("📜".into()),
+                                        // Q-style glyph: `$` colored
+                                        // purple by the widget's ICON
+                                        // escape. Visually distinct
+                                        // from folder (📁) and bare
+                                        // subcommand rows (blank).
+                                        icon: Some("$".into()),
                                     }
                                 }),
                         );
