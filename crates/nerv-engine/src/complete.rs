@@ -699,13 +699,13 @@ fn emit_candidates_for_arg(
             out.extend(
                 paths
                     .into_iter()
-                    .map(|(insertion, display, description)| Suggestion {
+                    .map(|(insertion, display, description, icon)| Suggestion {
                         insertion,
                         display,
                         description,
                         kind: SuggestionKind::Argument,
                         priority: None,
-                        icon: None,
+                        icon,
                     }),
             );
         }
@@ -774,16 +774,16 @@ fn emit_candidates_for_arg(
                 }
                 crate::spec_parser::Generator::Filepaths { folders_only } => {
                     if let Some(paths) = filepaths_at(cwd, prefix, *folders_only) {
-                        out.extend(paths.into_iter().map(|(insertion, display, description)| {
-                            Suggestion {
+                        out.extend(paths.into_iter().map(
+                            |(insertion, display, description, icon)| Suggestion {
                                 insertion,
                                 display,
                                 description,
                                 kind: SuggestionKind::Argument,
                                 priority: None,
-                                icon: None,
-                            }
-                        }));
+                                icon,
+                            },
+                        ));
                     }
                 }
                 crate::spec_parser::Generator::SshHosts => {
@@ -939,13 +939,13 @@ fn emit_candidates_for_arg(
                 out.extend(
                     paths
                         .into_iter()
-                        .map(|(insertion, display, description)| Suggestion {
+                        .map(|(insertion, display, description, icon)| Suggestion {
                             insertion,
                             display,
                             description,
                             kind: SuggestionKind::Argument,
                             priority: None,
-                            icon: None,
+                            icon,
                         }),
                 );
             }
@@ -1883,14 +1883,16 @@ fn man_path_roots() -> Vec<std::path::PathBuf> {
 
 /// List directory entries matching the trailing-basename portion of
 /// `prefix`. Honours `folders_only` (e.g. `cd` uses showFolders=only).
-/// Returns `(insertion, display)` pairs — insertion preserves the
-/// user's typed directory prefix so the widget's word-level replace
-/// doesn't lose context (`cd ./fo<Tab>` → `cd ./encl/`, not `cd encl/`).
+/// `(insertion, display, description, icon)` row tuple emitted by
+/// the filesystem walker. Insertion preserves the user's typed
+/// directory prefix so `cd ./fo<Tab>` → `cd ./encl/`, not `encl/`.
+type FilepathRow = (String, String, Option<String>, Option<String>);
+
 fn filepaths_at(
     cwd: Option<&std::path::Path>,
     prefix: &str,
     folders_only: bool,
-) -> Option<Vec<(String, String, Option<String>)>> {
+) -> Option<Vec<FilepathRow>> {
     // Split prefix into (dir_part_preserve_trailing_slash, basename_filter).
     let (dir_part, filter) = match prefix.rfind('/') {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),
@@ -1898,7 +1900,7 @@ fn filepaths_at(
     };
     let resolved = resolve_filepaths_root(cwd, dir_part)?;
     let entries = std::fs::read_dir(&resolved).ok()?;
-    let mut out: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut out: Vec<FilepathRow> = Vec::new();
     for e in entries.flatten() {
         let name_os = e.file_name();
         let Some(name) = name_os.to_str() else {
@@ -1919,14 +1921,20 @@ fn filepaths_at(
         let trailing = if is_dir { "/" } else { "" };
         let insertion = format!("{dir_part}{name}{trailing}");
         let display = format!("{name}{trailing}");
-        // Description fallback: file size for regular files, "dir"
-        // for folders, "→ target" for symlinks. One metadata() per
-        // entry — cheap (~10µs each, ~500µs for a 50-entry dir).
-        // Keeps the footer line in the popup informative; was
-        // empty before for cd / ls / cat / vim / ...
         let is_symlink = ft.map(|t| t.is_symlink()).unwrap_or(false);
         let desc = filepaths_desc(&e, is_dir, is_symlink);
-        out.push((insertion, display, desc));
+        // Per-row icon: 🔗 for symlinks (checked first; a symlink
+        // pointing at a dir still gets the link glyph), 📁 for
+        // dirs, 📄 for regular files. All 4-byte UTF-8, pass
+        // sanitize_icon's ≤4 byte gate.
+        let icon = if is_symlink {
+            Some("🔗".to_string())
+        } else if is_dir {
+            Some("📁".to_string())
+        } else {
+            Some("📄".to_string())
+        };
+        out.push((insertion, display, desc, icon));
     }
     out.sort_by(|a, b| a.1.cmp(&b.1));
     Some(out)
