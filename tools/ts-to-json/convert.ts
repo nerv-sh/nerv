@@ -67,6 +67,7 @@ type FigArg = {
   template?: string | string[];
   generators?: any | any[];
   getQueryTerm?: string | string[] | ((token: string) => string);
+  filterStrategy?: "prefix" | "fuzzy" | "default";
 };
 
 type FigOpt = {
@@ -119,6 +120,7 @@ type NervArg = {
   template: string | null;
   generators: NervGenerator[];
   getQueryTerm?: string;
+  filterStrategy?: string;
 };
 
 type NervOpt = {
@@ -625,6 +627,11 @@ const convertArg = async (a: FigArg): Promise<NervArg> => {
       : Array.isArray(a.getQueryTerm)
         ? { getQueryTerm: a.getQueryTerm.join("") }
         : {}),
+    // Fig filterStrategy: pass through known values. Fuzzy is M1
+    // opt-in only — engine silently downgrades to prefix in v1.0.
+    ...(typeof a.filterStrategy === "string"
+      ? { filterStrategy: a.filterStrategy }
+      : {}),
   };
 };
 

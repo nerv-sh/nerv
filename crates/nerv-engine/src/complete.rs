@@ -438,6 +438,18 @@ fn sort_by_priority_then_alpha(a: &Suggestion, b: &Suggestion) -> std::cmp::Orde
     pb.cmp(&pa).then_with(|| a.display.cmp(&b.display))
 }
 
+/// Fig parity filterStrategy matcher. Default is prefix matching;
+/// `"substring"` checks `contains`. **`"fuzzy"` is M1 opt-in only**
+/// (PLAN §5.1) — silently downgraded to prefix in v1.0 so specs
+/// declaring `filterStrategy: "fuzzy"` still work, just stricter.
+fn matches_filter(name: &str, query: &str, strategy: Option<&str>) -> bool {
+    match strategy {
+        Some("substring") => name.contains(query),
+        // "prefix" / "default" / None / "fuzzy" (M1 opt-in) → prefix
+        _ => name.starts_with(query),
+    }
+}
+
 /// Fig parity getQueryTerm splitter. Given the raw typed token and
 /// a string of delimiter chars (`","`, `"@"`, …), return
 /// `(query, insert_prefix)` where `query` is the substring AFTER
@@ -628,6 +640,7 @@ fn emit_candidates_for_arg(
     // the query part; the insertion preserves the context prefix so
     // the existing typed text isn't clobbered on Tab.
     let (query, insert_prefix) = split_by_query_term(prefix, arg.get_query_term.as_deref());
+    let strategy = arg.filter_strategy.as_deref();
     // Description-extracted enum suggestions (Tier A-ish). Many Fig
     // specs put `{a|b|c}` directly in the description text instead
     // of populating `suggestions[]` — recover those as candidates
@@ -638,7 +651,7 @@ fn emit_candidates_for_arg(
         .and_then(extract_enum_from_description)
         .into_iter()
         .flatten()
-        .filter(|s| s.starts_with(query))
+        .filter(|s| matches_filter(s, query, strategy))
         .map(|s| Suggestion {
             insertion: format!("{insert_prefix}{s}"),
             display: s,
@@ -657,7 +670,7 @@ fn emit_candidates_for_arg(
     out.extend(
         arg.suggestions
             .iter()
-            .filter(|s| s.name.starts_with(query))
+            .filter(|s| matches_filter(&s.name, query, strategy))
             .map(|s| {
                 let base = s.insert_value.clone().unwrap_or_else(|| s.name.clone());
                 Suggestion {
@@ -2815,6 +2828,58 @@ mod tests {
         std::fs::write(tmp.join("only.txt"), "x").unwrap();
         assert_eq!(dir_summary(&tmp), "1 item");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn matches_filter_prefix_is_default() {
+        assert!(matches_filter("foobar", "foo", None));
+        assert!(!matches_filter("foobar", "bar", None));
+    }
+
+    #[test]
+    fn matches_filter_substring_matches_anywhere() {
+        assert!(matches_filter("foobar", "oob", Some("substring")));
+        assert!(matches_filter("foobar", "bar", Some("substring")));
+        assert!(matches_filter("foobar", "foo", Some("substring")));
+        assert!(!matches_filter("foobar", "xyz", Some("substring")));
+    }
+
+    #[test]
+    fn matches_filter_fuzzy_downgrades_to_prefix() {
+        // M1 constraint: fuzzy code path forbidden in v1.0. Silently
+        // treated as prefix matching so specs still work.
+        assert!(matches_filter("foobar", "foo", Some("fuzzy")));
+        assert!(!matches_filter("foobar", "bar", Some("fuzzy")));
+        assert!(!matches_filter("foobar", "fbr", Some("fuzzy")));
+    }
+
+    #[test]
+    fn substring_filter_works_on_arg_suggestions() {
+        use crate::spec_parser::{Arg, RawSuggestion};
+        let arg = Arg {
+            filter_strategy: Some("substring".into()),
+            suggestions: vec![
+                RawSuggestion {
+                    name: "foobar".into(),
+                    ..Default::default()
+                },
+                RawSuggestion {
+                    name: "barfoo".into(),
+                    ..Default::default()
+                },
+                RawSuggestion {
+                    name: "xyz".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let out = emit_candidates_for_arg(&arg, "foo", None, None);
+        // Both "foobar" and "barfoo" contain "foo".
+        let names: Vec<_> = out.iter().map(|s| s.display.as_str()).collect();
+        assert!(names.contains(&"foobar"));
+        assert!(names.contains(&"barfoo"));
+        assert!(!names.contains(&"xyz"));
     }
 
     #[test]
