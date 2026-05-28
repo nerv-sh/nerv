@@ -73,6 +73,12 @@ pub struct Subcommand {
     /// by the TS converter for `fig://*` URLs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Fig parity `parserDirectives.flagsArePosixNoncompliant`: when
+    /// true, single-dash multi-char tokens (`-foo`) are treated as
+    /// long options, not chained short flags. Common with Go-style
+    /// CLIs (`docker`, `kubectl`).
+    #[serde(default, rename = "flagsArePosixNoncompliant")]
+    pub flags_are_posix_noncompliant: bool,
 }
 
 /// A long / short option flag, possibly with one or more attached
@@ -711,6 +717,26 @@ fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
         }
         TokenShape::ShortOption { chars } => {
             // Single short → normal option; chain (≥2) → ChainedOption.
+            // Exception: `parserDirectives.flagsArePosixNoncompliant`
+            // at the root spec treats `-foo` as a long option named
+            // `-foo`, not as chained shorts. Common with Go-style
+            // CLIs (`-format`, `-output`).
+            if chars.len() > 1 && root.flags_are_posix_noncompliant {
+                let lookup: String = std::iter::once('-').chain(chars.iter().copied()).collect();
+                let Some(opt) = find_option_inherited(root, &state.subcommand_path, &lookup) else {
+                    return TokenKind::Unknown;
+                };
+                if !can_consume_option(opt, &state.consumed_options) {
+                    return TokenKind::Unknown;
+                }
+                state.consumed_options.push(opt.clone());
+                state.option_args = if opt.requires_separator {
+                    None
+                } else {
+                    ArgState::new(&opt.args)
+                };
+                return TokenKind::OptionName;
+            }
             if chars.len() == 1 {
                 let lookup = format!("-{}", chars[0]);
                 let Some(opt) = find_option_inherited(root, &state.subcommand_path, &lookup) else {
@@ -1574,6 +1600,51 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn posix_noncompliant_treats_multichar_short_as_long() {
+        // Go-style CLI: `-format json` is one option named `-format`,
+        // not chained `-f -o -r -m -a -t`.
+        let s = Subcommand {
+            name: "go".into(),
+            flags_are_posix_noncompliant: true,
+            options: vec![Opt {
+                names: vec!["-format".into()],
+                args: vec![Arg::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("go -format json");
+        let r = parse_arguments(&s, &toks, 999);
+        // `-format` should be matched as the option (not Unknown).
+        let kinds: Vec<_> = r.annotations.iter().map(|a| a.kind).collect();
+        assert!(
+            kinds.contains(&TokenKind::OptionName),
+            "expected -format to bind as long-style option, got {:?}",
+            kinds
+        );
+    }
+
+    #[test]
+    fn posix_compliant_default_chains_shorts() {
+        // Without the directive, `-foo` is chained `-f -o -o` and
+        // is Unknown unless all single-char flags exist.
+        let s = Subcommand {
+            name: "git".into(),
+            options: vec![Opt {
+                names: vec!["-format".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("git -format");
+        let r = parse_arguments(&s, &toks, 999);
+        // `-format` does NOT bind as long option in posix mode →
+        // each char lookup fails → Unknown.
+        let last = r.annotations.last().unwrap();
+        assert_eq!(last.kind, TokenKind::Unknown);
     }
 
     #[test]
