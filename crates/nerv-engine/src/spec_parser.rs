@@ -160,6 +160,16 @@ pub struct Arg {
         skip_serializing_if = "Option::is_none"
     )]
     pub get_query_term: Option<String>,
+    /// Fig parity: how typed prefix matches against candidates.
+    /// Values: `"prefix"` (default) | `"substring"` | `"fuzzy"`.
+    /// **Fuzzy is M1 opt-in only** (PLAN §5.1) — v1.0 silently
+    /// downgrades `"fuzzy"` to prefix matching.
+    #[serde(
+        default,
+        rename = "filterStrategy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub filter_strategy: Option<String>,
 }
 
 /// Rich suggestion entry. Mirrors the relevant fields of
