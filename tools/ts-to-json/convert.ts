@@ -600,7 +600,7 @@ const convertArg = async (a: FigArg): Promise<NervArg> => {
         ...(s.description != null ? { description: s.description } : {}),
         ...(s.displayName != null ? { displayName: s.displayName } : {}),
         ...(s.insertValue != null ? { insertValue: s.insertValue } : {}),
-        ...(sanitizeIcon(s.icon) !== undefined ? { icon: sanitizeIcon(s.icon)! } : {}),
+        ...iconField(s.icon),
         ...(s.priority != null ? { priority: s.priority } : {}),
       };
     }
@@ -651,9 +651,7 @@ const convertOpt = async (o: FigOpt): Promise<NervOpt> => {
     // Fig allows a string separator (e.g. `:`) — we collapse to bool.
     // Any truthy value (including non-empty string) means `=` required.
     ...(o.requiresSeparator ? { requiresSeparator: true } : {}),
-    ...(sanitizeIcon(o.icon) !== undefined
-      ? { icon: sanitizeIcon(o.icon)! }
-      : {}),
+    ...iconField(o.icon),
   };
 };
 
@@ -665,6 +663,14 @@ const sanitizeIcon = (raw: unknown): string | undefined => {
   const s = raw.trim();
   if (!s || s.startsWith("fig://") || s.length > 4) return undefined;
   return s;
+};
+
+// Spread-friendly wrapper: call sanitizeIcon once per emit site
+// instead of twice (one in guard, one in value). Returns `{}` to
+// drop the field cleanly via object spread.
+const iconField = (raw: unknown): { icon?: string } => {
+  const ic = sanitizeIcon(raw);
+  return ic !== undefined ? { icon: ic } : {};
 };
 
 type Ctx = {
@@ -779,9 +785,7 @@ const convertSpec = async (
     ...(typeof (s as any).priority === "number"
       ? { priority: (s as any).priority }
       : {}),
-    ...(sanitizeIcon((s as any).icon) !== undefined
-      ? { icon: sanitizeIcon((s as any).icon)! }
-      : {}),
+    ...iconField((s as any).icon),
     ...(s.parserDirectives?.flagsArePosixNoncompliant === true
       ? { flagsArePosixNoncompliant: true }
       : {}),
