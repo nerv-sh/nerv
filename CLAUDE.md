@@ -24,7 +24,7 @@
 **M0 흡수 스파이크 (v0.6 재정의)** — 산출물 8개 중 7개 완료:
 
 - ✅ M0-9 (v0.5 산출물): `withfig/autocomplete` subtree pin (`aef52acf…`, 1,484 TS spec, ISC)
-- ✅ cargo workspace 스캐폴딩 (16 active crates, 450 workspace test 통과)
+- ✅ cargo workspace 스캐폴딩 (16 active crates, 503 workspace test 통과)
 - ✅ NOTICE / LICENSE / `.github/workflows/{ci,upstream-monitor}.yml`
 - ✅ M0-1: `vendor/aws-autocomplete/` subtree add + NOTICE Apache+MIT
 - ✅ M0-2: `git filter-repo` 로 10개 crate 추출 → `crates/nerv-{pty,term,ipc,proto,integrations,util,settings,os,log,diag}/`. chunk 3d 완료로 nerv-pty 도 workspace 합류 (런타임 opt-in 은 NERV_PTY=1, M1)
@@ -63,6 +63,15 @@
 - ✅ **CI 확장**: rust 1.85 핀 + `brew install protobuf` (nerv-proto build.rs 회피) + `build-specs-smoke` (plain+gzip vs 9 fixture) + `ts-to-json` (bun convert:one + JSON sanity) job. **ARM64-only** 매트릭스 (macos-13 queue 너무 길어서 drop).
 - ✅ **release.yml 워크플로**: `v*.*.*` tag push → macos-14 빌드 + tarball (sha256) + GitHub Release 생성. `gh release create … --clobber` 로 idempotent.
 - ✅ **e2e-isolated.sh 스모크 하네스**: `scripts/e2e-isolated.sh` 가 격리 `/tmp/nerv-test/.zshrc` 로 새 zsh 진입. Q/oh-my-zsh 등 영향 zero. 매번 무조건 rebuild + spec install + daemon 재시작.
+- ✅ **Fig parity batch (alpha.7 후보)**: 6개 스키마 필드 + 엔진/위젯 wire-up. 715 spec 변환 시 자동 추출 + 707 loaded. 필드별 침투율:
+  - `isPersistent` (104 spec) — option 상속, find_option_inherited 가 ancestor chain 까지 탐색
+  - `priority` (77 spec) — `sort_by_priority_then_alpha` 가 emit 전체에서 균일 적용 (default 50)
+  - `requiresSeparator` (67 spec) — `--color=` 강제, 위젯 insertion 에 `=` 첨가, parser 가 space-form 의 arg 바인딩 거부
+  - `icon` (59 spec) — sanitize_icon 으로 `fig://*` URL strip + ≤4 byte 만 통과, 4-field wire format 로 위젯에 전달
+  - `flagsArePosixNoncompliant` (41 spec) — go/docker/kubectl 스타일 `-foo` 를 long option 으로 라우팅
+  - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 v1.0 prefix 로 downgrade (M1 opt-in 까지)
+  - `getQueryTerm` (0 spec but infra ready) — `cargo search "tokio,serde"` 같은 delim split. 현재 Fig spec 은 closure form 만 쓰지만 M1 회복 시 사용 예정
+- ✅ **smart description fallback**: cd/z 같은 folder-only emit 의 footer 가 모두 "dir" 이던 문제. `dir_summary` 가 read_dir 1회로 `n items` / `empty` / `1 item` 출력. dotfile 제외, 200 entries cap (latency bound). 50µs/dir 추정.
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
@@ -74,7 +83,9 @@
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`)
 - E5 manifest, inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
-- smart description fallback (cd/z 같은 desc 없는 spec footer 에 file count 등 보조 정보)
+- fuzzy matching (M1 opt-in, `[matching] mode = "fuzzy"` 토글) — 현재는 spec 의 `filterStrategy: "fuzzy"` 도 prefix 로 downgrade
+- icon 글리프 width 보정 (emoji 2 col 시 alignment 1 cell 밀림 — 현재는 MVP tradeoff)
+- aws 624 closure-form generators (`rquickjs` opt-in 필요)
 
 ## 4. 절대 깨면 안 되는 불변식
 
@@ -97,6 +108,11 @@
 | PTY shim | `figterm` (`nerv-pty`) 는 **M1 opt-in only**. M0 ZLE widget 과 상호 배타. `NERV_PTY=1` 환경변수로 분기 | PLAN §5.8 / §6.2 |
 | Rust | toolchain 1.85, **edition 2024** (upstream 정합). v0.5.1 의 edition 2021 폐기. 변경 시 PLAN §7 + `rust-toolchain.toml` + 본 §4 동시 갱신 | `rust-toolchain.toml` |
 | vendor 편집 | `vendor/withfig-autocomplete/` 와 `vendor/aws-autocomplete/` **양쪽 모두 직접 편집 금지**. 변경은 `vendor-patches/{upstream,self}/` 또는 upstream PR | spec-conversion-policy §5.2 |
+| icon sanitize | `Suggestion.icon` 은 절대 `fig://*` URL 통과 금지 — `sanitize_icon` 으로 strip. ≤4 byte (대략 emoji 1개 + ASCII 1글자) 만 허용. 위젯이 raw bytes 를 그대로 prefix 로 출력함 | `nerv-engine/src/complete.rs::sanitize_icon` |
+| filterStrategy fuzzy | `"fuzzy"` 값을 받으면 v1.0 에서는 prefix 로 silent downgrade. **fuzzy 코드 경로 자체 추가 금지** — M1 `[matching] mode = "fuzzy"` opt-in 까지 | PLAN §5.1 / `nerv-engine/src/complete.rs::matches_filter` |
+| 4-field wire format | `nerv _complete` 출력은 `insertion\tdisplay\tdescription\ticon` 4-tab. icon 비면 빈 문자열. **field 추가 시 widget parser 동시 갱신 필수** | `crates/nerv-cli/src/main.rs::print_suggestion` + `_nerv.zsh` |
+| parserDirectives 적용 | `flagsArePosixNoncompliant` 는 root spec 의 directive 만 체크 (subcommand chain 상속 X). Go/docker/kubectl 처럼 root 부터 일관된 스타일이 권장 | `nerv-engine/src/spec_parser.rs::ShortOption` arm |
+| getQueryTerm 범위 | string form 만 (single-byte delim chars). function form 은 Tier C → M1. delim chars 마지막 위치에서 split, insertion 에 context prefix 보존 | `nerv-engine/src/complete.rs::split_by_query_term` |
 
 ## 5. 자주 쓰는 명령
 
