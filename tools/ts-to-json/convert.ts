@@ -66,6 +66,7 @@ type FigArg = {
   suggestions?: Array<string | { name?: string }>;
   template?: string | string[];
   generators?: any | any[];
+  getQueryTerm?: string | string[] | ((token: string) => string);
 };
 
 type FigOpt = {
@@ -117,6 +118,7 @@ type NervArg = {
   suggestions: NervSuggestion[];
   template: string | null;
   generators: NervGenerator[];
+  getQueryTerm?: string;
 };
 
 type NervOpt = {
@@ -616,6 +618,13 @@ const convertArg = async (a: FigArg): Promise<NervArg> => {
     suggestions,
     template: convertTemplate(a.template),
     generators: await convertGenerators(a.generators),
+    // Fig getQueryTerm: string → as-is; string[] → join (each entry is
+    // a delim char); function → defer to M1 (Tier C closure exec).
+    ...(typeof a.getQueryTerm === "string"
+      ? { getQueryTerm: a.getQueryTerm }
+      : Array.isArray(a.getQueryTerm)
+        ? { getQueryTerm: a.getQueryTerm.join("") }
+        : {}),
   };
 };
 
