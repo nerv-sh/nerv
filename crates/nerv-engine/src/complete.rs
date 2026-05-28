@@ -763,17 +763,23 @@ fn emit_candidates_for_arg(
                             scripts
                                 .into_iter()
                                 .filter(|(name, _)| name.starts_with(prefix))
-                                .map(|(name, cmd)| Suggestion {
-                                    insertion: name.clone(),
-                                    display: name,
-                                    description: Some(cmd),
-                                    kind: SuggestionKind::Argument,
-                                    // Boost scripts above default-50
-                                    // subcommands so they surface at
-                                    // the top when both lists merge
-                                    // (yarn-shorthand path).
-                                    priority: Some(75),
-                                    icon: Some("📜".into()),
+                                .map(|(name, cmd)| {
+                                    // `!`-prefixed scripts are widely
+                                    // used as visual headers/dividers
+                                    // (e.g. `"!cli": "─── CLI scripts
+                                    // ──"`). They're not meant to run.
+                                    // Push them below subcommands so
+                                    // real scripts surface first; keep
+                                    // them visible at the bottom.
+                                    let is_header = name.starts_with('!');
+                                    Suggestion {
+                                        insertion: name.clone(),
+                                        display: name,
+                                        description: Some(cmd),
+                                        kind: SuggestionKind::Argument,
+                                        priority: Some(if is_header { 25 } else { 75 }),
+                                        icon: Some("📜".into()),
+                                    }
                                 }),
                         );
                     }
