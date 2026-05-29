@@ -155,12 +155,21 @@ impl SpecRegistry {
     /// Resolve a spec by binary name, loading from disk on first hit
     /// or when the file's mtime has advanced past the cached value.
     /// Returns `None` if the spec doesn't exist or failed to parse.
+    ///
+    /// **Lock-poison policy**: every `cache.read()` / `cache.write()`
+    /// in this module discards `PoisonError` via `.ok()` /
+    /// `if let Ok(...)`. The fallback path is graceful degradation —
+    /// on a poisoned cache, lookup bypasses the cache and re-reads
+    /// from disk on every call (slower, but correct). A poison can
+    /// only fire if a worker panics while holding the lock; that
+    /// panic itself surfaces via the daemon's stderr already.
     pub fn lookup(&self, name: &str) -> Option<Arc<Spec>> {
         // Drain any FS-watcher invalidations queued since the last
         // lookup. Each drained stem evicts its cache entry so the
         // next read goes back to disk.
         self.drain_invalidations();
-        // Fast path: cache hit + mtime unchanged.
+        // Fast path: cache hit + mtime unchanged. Poisoned read →
+        // None → falls through to load_from_disk (no incorrectness).
         let cached = self.cache.read().ok().and_then(|c| c.get(name).cloned());
         if let Some(entry) = cached {
             let disk_mtime = self.disk_mtime(name);

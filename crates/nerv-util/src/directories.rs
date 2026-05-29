@@ -319,22 +319,6 @@ pub fn utc_backup_dir() -> Result<PathBuf> {
     Ok(backups_dir()?.join(now))
 }
 
-/// The directory to the directory containing config for the `/context` feature in `q chat`.
-pub fn chat_global_context_path<Ctx: FsProvider + EnvProvider>(ctx: &Ctx) -> Result<PathBuf> {
-    Ok(home_dir_ctx(ctx)?
-        .join(".aws")
-        .join("amazonq")
-        .join("global_context.json"))
-}
-
-/// The directory to the directory containing config for the `/context` feature in `q chat`.
-pub fn chat_profiles_dir<Ctx: FsProvider + EnvProvider>(ctx: &Ctx) -> Result<PathBuf> {
-    Ok(home_dir_ctx(ctx)?
-        .join(".aws")
-        .join("amazonq")
-        .join("profiles"))
-}
-
 /// The desktop app socket path
 ///
 /// - MacOS: `$TMPDIR/nervrun/desktop.sock`
@@ -468,80 +452,6 @@ pub fn update_lock_path(ctx: &impl FsProvider) -> Result<PathBuf> {
     Ok(fig_data_dir_ctx(ctx)?.join("update.lock"))
 }
 
-/// The path to the midway cookie
-///
-/// Path: `$HOME/.midway/cookie`
-pub fn midway_cookie_path() -> Result<PathBuf> {
-    Ok(home_dir()?.join(".midway").join("cookie"))
-}
-
-/// The path to the .zip bundle containing the GNOME Shell Extension identified by
-/// `extension_uuid`.
-pub fn bundled_gnome_extension_zip_path<Ctx: EnvProvider + PlatformProvider>(
-    ctx: &Ctx,
-    extension_uuid: &str,
-) -> Result<PathBuf> {
-    let os = ctx.platform().os();
-    if os != Os::Linux {
-        return Err(DirectoryError::UnsupportedOs(os));
-    }
-    Ok(resources_path_ctx(ctx)?
-        .join(extension_uuid)
-        .join(format!("{}.zip", extension_uuid)))
-}
-
-/// The path to the text file containing the version of the bundled GNOME Shell Extension.
-/// identified by `extension_uuid`.
-pub fn bundled_gnome_extension_version_path<Ctx: EnvProvider + PlatformProvider>(
-    ctx: &Ctx,
-    extension_uuid: &str,
-) -> Result<PathBuf> {
-    let os = ctx.platform().os();
-    if os != Os::Linux {
-        return Err(DirectoryError::UnsupportedOs(os));
-    }
-    Ok(resources_path_ctx(ctx)?
-        .join(extension_uuid)
-        .join(format!("{}.version.txt", extension_uuid)))
-}
-
-/// The path to the desktop entry bundled with the AppImage.
-///
-/// Only applicable to the desktop app binary when ran as an AppImage.
-pub fn appimage_desktop_entry_path<Ctx: EnvProvider>(ctx: &Ctx) -> Result<PathBuf> {
-    if !ctx.env().in_appimage() {
-        return Err(DirectoryError::NotAppImage);
-    }
-    Ok(ctx
-        .env()
-        .current_dir()?
-        .join("share/applications/q-desktop.desktop"))
-}
-
-/// The path to the icon bundled with the AppImage to be used for the desktop entry file.
-///
-/// Only applicable to the desktop app binary when ran as an AppImage.
-pub fn appimage_desktop_entry_icon_path<Ctx: EnvProvider>(ctx: &Ctx) -> Result<PathBuf> {
-    if !ctx.env().in_appimage() {
-        return Err(DirectoryError::NotAppImage);
-    }
-    Ok(ctx
-        .env()
-        .current_dir()?
-        .join("share/icons/hicolor/128x128/apps/q-desktop.png"))
-}
-
-/// The path to the data directory auto-created by the Linux windowing application.
-pub fn local_webview_data_dir<Ctx: FsProvider + EnvProvider + PlatformProvider>(
-    ctx: &Ctx,
-) -> Result<PathBuf> {
-    let os = ctx.platform().os();
-    if os != Os::Linux {
-        return Err(DirectoryError::UnsupportedOs(os));
-    }
-    Ok(local_data_dir(ctx)?.join(crate::consts::linux::DESKTOP_APP_WM_CLASS))
-}
-
 utf8_dir!(home_dir);
 #[cfg(unix)]
 utf8_dir!(home_local_bin);
@@ -575,7 +485,6 @@ mod linux_tests {
         assert!(logs_dir().is_ok());
         assert!(settings_path().is_ok());
         assert!(update_lock_path(&ctx).is_ok());
-        assert!(midway_cookie_path().is_ok());
     }
 }
 
@@ -785,13 +694,6 @@ mod tests {
         linux!(update_lock_path(&ctx), @"$HOME/.local/share/nerv/update.lock");
         macos!(update_lock_path(&ctx), @"$HOME/Library/Application Support/nerv/update.lock");
         windows!(update_lock_path(&ctx), @r"C:\Users\$USER\AppData\Local\AmazonQ\update.lock");
-    }
-
-    #[test]
-    fn snapshot_midway_cookie_path() {
-        linux!(midway_cookie_path(), @"$HOME/.midway/cookie");
-        macos!(midway_cookie_path(), @"$HOME/.midway/cookie");
-        windows!(midway_cookie_path(), @r"C:\Users\$USER\.midway\cookie");
     }
 
     #[test]
