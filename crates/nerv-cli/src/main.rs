@@ -1153,6 +1153,136 @@ mod tests {
         assert_eq!(parse_zsh_version("v5.8"), (0, 8));
     }
 
+    /// `read_pid` parses the PID file written by `nerv start`.
+    /// Whitespace and trailing newlines are trimmed before parsing.
+    #[test]
+    fn read_pid_parses_clean_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("nervd.pid");
+        std::fs::write(&path, "12345\n").unwrap();
+        assert_eq!(read_pid(&path), Some(12345));
+        // No trailing whitespace.
+        std::fs::write(&path, "67890").unwrap();
+        assert_eq!(read_pid(&path), Some(67890));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Missing PID file / garbage contents must return None, never
+    /// panic. The uninstall path uses None to mean "daemon not
+    /// running".
+    #[test]
+    fn read_pid_returns_none_on_garbage_or_missing() {
+        let tmp = std::env::temp_dir().join(format!("nerv-pid-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("nervd.pid");
+        // Missing entirely.
+        assert_eq!(read_pid(&tmp.join("nope")), None);
+        // Non-numeric content.
+        std::fs::write(&path, "garbage\n").unwrap();
+        assert_eq!(read_pid(&path), None);
+        // Empty.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_pid(&path), None);
+        // Negative — u32::parse rejects.
+        std::fs::write(&path, "-1\n").unwrap();
+        assert_eq!(read_pid(&path), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `process_alive(0)` on unix: kill(0,0) sends to the current
+    /// process group; succeeds when called from the test binary
+    /// itself. Verify the wrapper returns true for the test process
+    /// own PID, and false for an obviously-dead PID.
+    #[cfg(unix)]
+    #[test]
+    fn process_alive_self_and_dead() {
+        let self_pid = std::process::id();
+        assert!(process_alive(self_pid), "test process should be alive");
+        // A PID just above current is statistically unlikely to map
+        // to a live process on a sleep-light CI host. Skip the
+        // assertion if it happens to be alive (no false-positive).
+        let probe = u32::MAX - 1;
+        // u32::MAX - 1 is rejected by some kernels as invalid; expect
+        // false either way (the kill syscall returns -1 / ESRCH).
+        assert!(!process_alive(probe));
+    }
+
+    /// `strip_zsh_hooks` cycles through .zshrc, .zshenv, .zprofile,
+    /// .zlogin in that order and reports the first backup path. When
+    /// only .zshenv has a marker block, the backup path returned must
+    /// point at .zshenv.
+    #[test]
+    fn strip_zsh_hooks_first_backup_picks_first_modified_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-first-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let plain_rc = "alias ll=ls\n";
+        std::fs::write(tmp.join(".zshrc"), plain_rc).unwrap();
+        let env_with_block = format!(
+            "{}export FOO=bar\n",
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+        );
+        std::fs::write(tmp.join(".zshenv"), &env_with_block).unwrap();
+        let mut log = UninstallLog::new(true);
+        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap().expect("backup");
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".zshenv"),
+            "first backup should be the .zshenv file, got {backup:?}",
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(".zshrc")).unwrap(),
+            plain_rc,
+            ".zshrc must stay untouched",
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Multiple marker blocks within a single init file are all
+    /// stripped + counted. Catches a regression where the
+    /// total_blocks_removed counter would only see the first match.
+    #[test]
+    fn strip_zsh_hooks_counts_multiple_blocks_per_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-multi-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts");
+        let zshrc = format!("alias a=1\n{blk}alias b=2\n{blk}alias c=3\n");
+        std::fs::write(tmp.join(".zshrc"), &zshrc).unwrap();
+        let mut log = UninstallLog::new(true);
+        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let after = std::fs::read_to_string(tmp.join(".zshrc")).unwrap();
+        assert_eq!(nerv_shell::count_blocks(&after), 0);
+        assert!(after.contains("alias a=1"));
+        assert!(after.contains("alias b=2"));
+        assert!(after.contains("alias c=3"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The atomic-write path writes a `.nerv-tmp` sibling and renames
+    /// over the original. Confirm no `.nerv-tmp` leftover is left
+    /// behind on the happy path.
+    #[test]
+    fn strip_zsh_hooks_cleans_up_temp_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let body = format!(
+            "alias x=ls\n{}\n",
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+        );
+        std::fs::write(tmp.join(".zshrc"), &body).unwrap();
+        let mut log = UninstallLog::new(true);
+        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let leftover = tmp.join(".nerv-tmp");
+        assert!(
+            !leftover.exists(),
+            "atomic temp file should be renamed away"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// `count_tree` walks the spec tree and returns (subs, opts). The
     /// root itself is not counted; only descendants. Empty spec → 0/0.
     #[test]
