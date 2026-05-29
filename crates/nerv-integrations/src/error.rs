@@ -145,3 +145,90 @@ impl<T, E: Into<Error>> ErrorExt<T, E> for Result<T, E> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Error::FileDoesNotExist` formats the path into Display so the
+    /// doctor table can echo it back. Lock the format.
+    #[test]
+    fn file_does_not_exist_display_includes_path() {
+        let path: Cow<'static, Path> = Cow::Owned(PathBuf::from("/tmp/missing.zshrc"));
+        let err = Error::FileDoesNotExist(path);
+        let s = err.to_string();
+        assert!(s.starts_with("File does not exist:"));
+        assert!(s.contains("/tmp/missing.zshrc"));
+    }
+
+    /// `VerboseMessage::Display` writes title + optional body. None
+    /// body should not add the trailing blank lines.
+    #[test]
+    fn verbose_message_display_without_body() {
+        let vm = VerboseMessage {
+            title: "uh oh".into(),
+            message: None,
+        };
+        let s = vm.to_string();
+        assert_eq!(s, "uh oh\n");
+    }
+
+    #[test]
+    fn verbose_message_display_with_body() {
+        let vm = VerboseMessage {
+            title: "uh oh".into(),
+            message: Some("details here".into()),
+        };
+        let s = vm.to_string();
+        assert!(s.starts_with("uh oh\n"));
+        assert!(s.contains("details here"));
+    }
+
+    /// `Error::PermissionDenied`'s verbose message surfaces the
+    /// `debug fix-permissions` recovery hint; non-permission errors
+    /// keep the plain title with no body. Two arms cover both.
+    #[test]
+    fn verbose_message_permission_denied_has_hint() {
+        let err = Error::PermissionDenied {
+            path: PathBuf::from("/tmp/x.log"),
+            inner: io::Error::new(io::ErrorKind::PermissionDenied, "no"),
+        };
+        let vm = err.verbose_message();
+        assert!(vm.title.contains("/tmp/x.log"));
+        let body = vm.message.expect("permission body");
+        assert!(body.contains("fix-permissions"));
+    }
+
+    #[test]
+    fn verbose_message_other_error_has_no_body() {
+        let err = Error::Custom("nope".into());
+        let vm = err.verbose_message();
+        assert_eq!(vm.title, "nope");
+        assert!(vm.message.is_none());
+    }
+
+    /// `ErrorExt::with_path` rewrites a PermissionDenied io::Error
+    /// into `Error::PermissionDenied` carrying the supplied path.
+    /// Other io::Error kinds pass through as `Error::Io` untouched.
+    #[test]
+    fn with_path_promotes_permission_denied() {
+        let denied: std::io::Result<()> = Err(io::Error::new(ErrorKind::PermissionDenied, "nope"));
+        match denied.with_path("/tmp/secret") {
+            Err(Error::PermissionDenied { path, .. }) => {
+                assert_eq!(path, PathBuf::from("/tmp/secret"));
+            }
+            other => panic!("expected PermissionDenied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_path_leaves_other_io_errors_alone() {
+        let nf: std::io::Result<()> = Err(io::Error::new(ErrorKind::NotFound, "nope"));
+        match nf.with_path("/tmp/secret") {
+            Err(Error::Io(inner)) => {
+                assert_eq!(inner.kind(), ErrorKind::NotFound);
+            }
+            other => panic!("expected Io(NotFound), got {other:?}"),
+        }
+    }
+}
