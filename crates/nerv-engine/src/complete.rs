@@ -11,6 +11,7 @@
 //!
 //! Refs: PLAN.md §10 M0-6, docs/first-5-min.md §1-5
 
+use crate::config::MatchMode;
 use crate::ipc::{Suggestion, SuggestionKind};
 use crate::spec_loader::{SpecLoadError, load_spec_file};
 use crate::spec_parser::{
@@ -33,10 +34,27 @@ use std::sync::{Arc, RwLock};
 /// reinstalled / regenerated the spec), the cache entry is dropped
 /// and the spec is re-read. Adds ~1µs per lookup on top of the
 /// HashMap hit (cheap compared to even the fastest UDS roundtrip).
-#[derive(Debug)]
 pub struct SpecRegistry {
     dir: Option<PathBuf>,
     cache: RwLock<HashMap<String, CacheEntry>>,
+    /// Spec stems (binary names) marked dirty by the FS watcher. Drained
+    /// at lookup-time so any cached entry gets re-read from disk on the
+    /// very next call. `None` when no watcher is active (e.g. empty
+    /// registry, dir doesn't exist, or notify failed to start).
+    pending_invalidations: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
+    /// Held to keep the watcher thread alive for the registry's lifetime.
+    /// Dropping the watcher stops the FS event stream.
+    _watcher: Option<Box<dyn notify::Watcher + Send + Sync>>,
+}
+
+impl std::fmt::Debug for SpecRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpecRegistry")
+            .field("dir", &self.dir)
+            .field("cache", &self.cache)
+            .field("watcher_active", &self._watcher.is_some())
+            .finish()
+    }
 }
 
 impl Default for SpecRegistry {
@@ -44,6 +62,8 @@ impl Default for SpecRegistry {
         Self {
             dir: None,
             cache: RwLock::new(HashMap::new()),
+            pending_invalidations: None,
+            _watcher: None,
         }
     }
 }
@@ -65,10 +85,20 @@ impl SpecRegistry {
     }
 
     /// Build a registry rooted at `dir`. Disk reads are lazy.
+    ///
+    /// Also starts a filesystem watcher (FSEvents on macOS) that
+    /// invalidates the cache when spec files change on disk —
+    /// `build-specs` reinstall is picked up on the next lookup without
+    /// restarting the daemon. The mtime check in `lookup` stays as a
+    /// belt-and-suspenders fallback if the watcher fails or drops events.
     pub fn at_dir(dir: &Path) -> Self {
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let watcher = start_spec_watcher(dir, pending.clone());
         Self {
             dir: Some(dir.to_path_buf()),
             cache: RwLock::new(HashMap::new()),
+            pending_invalidations: Some(pending),
+            _watcher: watcher,
         }
     }
 
@@ -76,7 +106,8 @@ impl SpecRegistry {
     /// errors. Useful at daemon startup so problems show up in logs
     /// without waiting for a user keystroke. Returns the registry +
     /// every error encountered during the scan; positive results are
-    /// kept in the cache so subsequent lookups are O(1).
+    /// kept in the cache so subsequent lookups are O(1). FS watcher
+    /// is spawned the same way as `at_dir`.
     pub fn load_dir(dir: &Path) -> (Self, Vec<SpecLoadError>) {
         let registry = Self::at_dir(dir);
         let mut errors = Vec::new();
@@ -125,6 +156,10 @@ impl SpecRegistry {
     /// or when the file's mtime has advanced past the cached value.
     /// Returns `None` if the spec doesn't exist or failed to parse.
     pub fn lookup(&self, name: &str) -> Option<Arc<Spec>> {
+        // Drain any FS-watcher invalidations queued since the last
+        // lookup. Each drained stem evicts its cache entry so the
+        // next read goes back to disk.
+        self.drain_invalidations();
         // Fast path: cache hit + mtime unchanged.
         let cached = self.cache.read().ok().and_then(|c| c.get(name).cloned());
         if let Some(entry) = cached {
@@ -181,6 +216,29 @@ impl SpecRegistry {
             return (mtime, spec);
         }
         (None, None)
+    }
+
+    /// Move every queued FS-watcher invalidation into the cache:
+    /// each stem maps to a cache entry that gets dropped, so the
+    /// next `lookup(stem)` re-reads the spec file. No-op when no
+    /// watcher is active.
+    fn drain_invalidations(&self) {
+        let Some(pending) = self.pending_invalidations.as_ref() else {
+            return;
+        };
+        let Ok(mut pending) = pending.lock() else {
+            return;
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let names: Vec<String> = pending.drain().collect();
+        drop(pending);
+        if let Ok(mut cache) = self.cache.write() {
+            for name in &names {
+                cache.remove(name);
+            }
+        }
     }
 
     /// Insert a spec into the cache directly. Used by tests that
@@ -256,6 +314,58 @@ impl SpecRegistry {
     }
 }
 
+/// Spawn a filesystem watcher over `dir` and forward changed-file
+/// events into `pending` as spec stems. Returns `None` when the
+/// watcher fails to start (the registry stays correct via mtime
+/// polling so this is a soft failure).
+fn start_spec_watcher(
+    dir: &Path,
+    pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) -> Option<Box<dyn notify::Watcher + Send + Sync>> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(event) = res else {
+            return;
+        };
+        // Only Create / Modify / Remove signal an actual cache
+        // invalidation. Access / Metadata events would needlessly
+        // drop entries (e.g. when `nerv doctor` stat's the file).
+        if !matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        ) {
+            return;
+        }
+        let Ok(mut q) = pending.lock() else {
+            return;
+        };
+        for path in &event.paths {
+            if let Some(stem) = spec_stem_from_path(path) {
+                q.insert(stem);
+            }
+        }
+    })
+    .ok()?;
+    // NonRecursive: the specs directory is flat (Caches/nerv/specs).
+    watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
+    Some(Box::new(watcher))
+}
+
+/// Pull the spec stem out of a watched path, accepting both `<name>.json`
+/// and `<name>.json.gz`. Returns `None` for paths that don't look like
+/// spec files (rejects e.g. swap files, tmp files).
+fn spec_stem_from_path(path: &Path) -> Option<String> {
+    let name = path.file_name().and_then(|n| n.to_str())?;
+    if let Some(stem) = name.strip_suffix(".json.gz") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = name.strip_suffix(".json") {
+        return Some(stem.to_string());
+    }
+    None
+}
+
 /// Pipeline result: completion candidates at the cursor.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompleteResult {
@@ -266,8 +376,9 @@ pub struct CompleteResult {
 }
 
 /// Run the full pipeline against `line` + `cursor` byte offset.
+/// Default match mode = prefix (the v1.0 contract).
 pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteResult {
-    complete_in(line, cursor, registry, None)
+    complete_in(line, cursor, registry, None, MatchMode::Prefix)
 }
 
 /// Same as [`complete`], but uses `cwd` as the working-directory
@@ -279,6 +390,7 @@ pub fn complete_in(
     cursor: usize,
     registry: &SpecRegistry,
     cwd: Option<&std::path::Path>,
+    mode: MatchMode,
 ) -> CompleteResult {
     let cursor = clamp_cursor_to_char_boundary(line, cursor);
     let tokens = tokenize(&line[..cursor]);
@@ -340,7 +452,7 @@ pub fn complete_in(
     if let Some((opt_name, arg_idx)) = result.active_option_arg.as_ref() {
         if let Some(opt) = current.options.iter().find(|o| o.names.contains(opt_name)) {
             if let Some(arg) = opt.args.get(*arg_idx) {
-                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt));
+                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens);
                 return CompleteResult {
                     items,
                     reason: None,
@@ -350,15 +462,15 @@ pub fn complete_in(
     }
 
     let items = if prefix_is_option {
-        emit_options_with_ancestors(current, &ancestor_refs, &prefix)
+        emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
     } else if prefer_subcommands {
         // yarn-style shorthand: `yarn web` should match both yarn
         // subcommands (none start with "web") and the root args
         // generator (npmScriptsGenerator → web:start, web:build:dev,
         // …). Merge whenever the level has args with dynamic source.
-        let mut subs = emit_subcommands(current, &prefix);
+        let mut subs = emit_subcommands(current, &prefix, mode);
         if arg_has_dynamic_source(current) {
-            subs.extend(emit_arg_candidates(current, &prefix, cwd));
+            subs.extend(emit_arg_candidates(current, &prefix, cwd, mode, &tokens));
         }
         // Sort by priority first (script results get priority 75
         // and float above default-50 subcommands), then alpha.
@@ -367,11 +479,11 @@ pub fn complete_in(
         subs
     } else {
         match result.cursor_context {
-            CursorContext::Subcommand => emit_subcommands(current, &prefix),
+            CursorContext::Subcommand => emit_subcommands(current, &prefix, mode),
             CursorContext::OptionName => {
-                emit_options_with_ancestors(current, &ancestor_refs, &prefix)
+                emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
             }
-            CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd),
+            CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd, mode, &tokens),
             CursorContext::Done => vec![],
         }
     };
@@ -440,16 +552,51 @@ fn sort_by_priority_then_alpha(a: &Suggestion, b: &Suggestion) -> std::cmp::Orde
     pb.cmp(&pa).then_with(|| a.display.cmp(&b.display))
 }
 
-/// Fig parity filterStrategy matcher. Default is prefix matching;
-/// `"substring"` checks `contains`. **`"fuzzy"` is M1 opt-in only**
-/// (PLAN §5.1) — silently downgraded to prefix in v1.0 so specs
-/// declaring `filterStrategy: "fuzzy"` still work, just stricter.
-fn matches_filter(name: &str, query: &str, strategy: Option<&str>) -> bool {
-    match strategy {
-        Some("substring") => name.contains(query),
-        // "prefix" / "default" / None / "fuzzy" (M1 opt-in) → prefix
-        _ => name.starts_with(query),
+/// Fig parity filterStrategy matcher.
+///
+/// Precedence:
+/// 1. Spec `filterStrategy: "substring"` always wins (per-arg override).
+/// 2. Otherwise user [`MatchMode`] applies — `Fuzzy` enables case-insensitive
+///    subsequence matching; `Prefix` is the v1.0 default.
+fn matches_filter(name: &str, query: &str, strategy: Option<&str>, mode: MatchMode) -> bool {
+    if let Some("substring") = strategy {
+        return name.contains(query);
     }
+    match mode {
+        MatchMode::Fuzzy => fuzzy_subsequence_match(name, query),
+        MatchMode::Prefix => name.starts_with(query),
+    }
+}
+
+/// Mode-aware name gate for subcommand / option / generator outputs
+/// that don't carry a `filterStrategy` of their own.
+fn matches_name(name: &str, prefix: &str, mode: MatchMode) -> bool {
+    match mode {
+        MatchMode::Fuzzy => fuzzy_subsequence_match(name, prefix),
+        MatchMode::Prefix => name.starts_with(prefix),
+    }
+}
+
+/// Case-insensitive subsequence match — every char of `query` appears
+/// in `name` in order, with arbitrary gaps. Empty query matches
+/// everything (the `git ⎵` case stays valid).
+fn fuzzy_subsequence_match(name: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let mut q = query.chars();
+    let mut next = q.next();
+    for nc in name.chars() {
+        if let Some(qc) = next {
+            if nc.eq_ignore_ascii_case(&qc) {
+                next = q.next();
+                if next.is_none() {
+                    return true;
+                }
+            }
+        }
+    }
+    next.is_none()
 }
 
 /// Fig parity getQueryTerm splitter. Given the raw typed token and
@@ -519,12 +666,12 @@ fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
     chain
 }
 
-fn emit_subcommands(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
+fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = node
         .subcommands
         .iter()
         .filter(|sc| !sc.hidden)
-        .filter(|sc| name_or_aliases_match(&sc.name, &sc.aliases, prefix))
+        .filter(|sc| name_or_aliases_match(&sc.name, &sc.aliases, prefix, mode))
         .map(|sc| Suggestion {
             insertion: sc.name.clone(),
             display: sc.name.clone(),
@@ -546,6 +693,7 @@ fn emit_options_with_ancestors(
     node: &Subcommand,
     ancestors: &[&Subcommand],
     prefix: &str,
+    mode: MatchMode,
 ) -> Vec<Suggestion> {
     let emit = |opt: &crate::spec_parser::Opt| -> Vec<Suggestion> {
         // Fig parity: when `requiresSeparator` is set and the option
@@ -554,7 +702,7 @@ fn emit_options_with_ancestors(
         let needs_eq = opt.requires_separator && !opt.args.is_empty();
         opt.names
             .iter()
-            .filter(|n| n.starts_with(prefix))
+            .filter(|n| matches_name(n, prefix, mode))
             .map(|n| Suggestion {
                 insertion: if needs_eq { format!("{n}=") } else { n.clone() },
                 display: n.clone(),
@@ -616,11 +764,13 @@ fn emit_arg_candidates(
     node: &Subcommand,
     prefix: &str,
     cwd: Option<&std::path::Path>,
+    mode: MatchMode,
+    tokens: &[Annotation],
 ) -> Vec<Suggestion> {
     let Some(arg) = node.args.first() else {
         return vec![];
     };
-    emit_candidates_for_arg(arg, prefix, cwd, None)
+    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens)
 }
 
 /// `enclosing_opt` lets the caller pass the OPTION wrapping the arg
@@ -634,6 +784,8 @@ fn emit_candidates_for_arg(
     prefix: &str,
     cwd: Option<&std::path::Path>,
     enclosing_opt: Option<&crate::spec_parser::Opt>,
+    mode: MatchMode,
+    tokens: &[Annotation],
 ) -> Vec<Suggestion> {
     let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
     // Fig parity getQueryTerm: when the arg declares delimiter chars
@@ -653,7 +805,7 @@ fn emit_candidates_for_arg(
         .and_then(extract_enum_from_description)
         .into_iter()
         .flatten()
-        .filter(|s| matches_filter(s, query, strategy))
+        .filter(|s| matches_filter(s, query, strategy, mode))
         .map(|s| Suggestion {
             insertion: format!("{insert_prefix}{s}"),
             display: s,
@@ -672,7 +824,7 @@ fn emit_candidates_for_arg(
     out.extend(
         arg.suggestions
             .iter()
-            .filter(|s| matches_filter(&s.name, query, strategy))
+            .filter(|s| matches_filter(&s.name, query, strategy, mode))
             .map(|s| {
                 let base = s.insert_value.clone().unwrap_or_else(|| s.name.clone());
                 Suggestion {
@@ -720,7 +872,7 @@ fn emit_candidates_for_arg(
             out.extend(
                 entries
                     .into_iter()
-                    .filter(|s| s.starts_with(prefix))
+                    .filter(|s| matches_name(s, prefix, mode))
                     .map(|s| Suggestion {
                         insertion: s.clone(),
                         display: s,
@@ -745,7 +897,7 @@ fn emit_candidates_for_arg(
                             lines
                                 .into_iter()
                                 .map(|line| split_id_label(&line))
-                                .filter(|(ins, _)| ins.starts_with(prefix))
+                                .filter(|(ins, _)| matches_name(ins, prefix, mode))
                                 .map(|(insertion, display)| Suggestion {
                                     insertion,
                                     display,
@@ -762,7 +914,7 @@ fn emit_candidates_for_arg(
                         out.extend(
                             scripts
                                 .into_iter()
-                                .filter(|(name, _)| name.starts_with(prefix))
+                                .filter(|(name, _)| matches_name(name, prefix, mode))
                                 .map(|(name, cmd)| {
                                     // `!`-prefixed scripts are widely
                                     // used as visual headers/dividers
@@ -808,7 +960,7 @@ fn emit_candidates_for_arg(
                         out.extend(
                             hosts
                                 .into_iter()
-                                .filter(|h| h.starts_with(prefix))
+                                .filter(|h| matches_name(h, prefix, mode))
                                 .map(|h| Suggestion {
                                     insertion: h.clone(),
                                     display: h,
@@ -822,16 +974,19 @@ fn emit_candidates_for_arg(
                 }
                 crate::spec_parser::Generator::MakefileTargets => {
                     if let Some(targets) = makefile_targets(cwd) {
-                        out.extend(targets.into_iter().filter(|t| t.starts_with(prefix)).map(
-                            |t| Suggestion {
-                                insertion: t.clone(),
-                                display: t,
-                                description: Some("make target".into()),
-                                kind: SuggestionKind::Argument,
-                                priority: None,
-                                icon: None,
-                            },
-                        ));
+                        out.extend(
+                            targets
+                                .into_iter()
+                                .filter(|t| matches_name(t, prefix, mode))
+                                .map(|t| Suggestion {
+                                    insertion: t.clone(),
+                                    display: t,
+                                    description: Some("make target".into()),
+                                    kind: SuggestionKind::Argument,
+                                    priority: None,
+                                    icon: None,
+                                }),
+                        );
                     }
                 }
                 crate::spec_parser::Generator::ManPages => {
@@ -839,7 +994,7 @@ fn emit_candidates_for_arg(
                         out.extend(
                             pages
                                 .into_iter()
-                                .filter(|p| p.starts_with(prefix))
+                                .filter(|p| matches_name(p, prefix, mode))
                                 .map(|p| Suggestion {
                                     insertion: p.clone(),
                                     display: p,
@@ -855,7 +1010,7 @@ fn emit_candidates_for_arg(
                     if let Some(deps) = package_json_deps(cwd) {
                         out.extend(
                             deps.into_iter()
-                                .filter(|(name, _)| name.starts_with(prefix))
+                                .filter(|(name, _)| matches_name(name, prefix, mode))
                                 .map(|(name, kind)| Suggestion {
                                     insertion: name.clone(),
                                     display: name,
@@ -875,16 +1030,19 @@ fn emit_candidates_for_arg(
                         "name".to_string(),
                     ];
                     if let Some(lines) = cached_template_generator(&key) {
-                        out.extend(lines.into_iter().filter(|s| s.starts_with(prefix)).map(
-                            |line| Suggestion {
-                                insertion: line.clone(),
-                                display: line,
-                                description: Some("k8s resource".into()),
-                                kind: SuggestionKind::Argument,
-                                priority: None,
-                                icon: None,
-                            },
-                        ));
+                        out.extend(
+                            lines
+                                .into_iter()
+                                .filter(|s| matches_name(s, prefix, mode))
+                                .map(|line| Suggestion {
+                                    insertion: line.clone(),
+                                    display: line,
+                                    description: Some("k8s resource".into()),
+                                    kind: SuggestionKind::Argument,
+                                    priority: None,
+                                    icon: None,
+                                }),
+                        );
                     }
                 }
                 crate::spec_parser::Generator::CargoTargets { kind } => {
@@ -892,7 +1050,7 @@ fn emit_candidates_for_arg(
                         out.extend(
                             targets
                                 .into_iter()
-                                .filter(|(name, _, _)| name.starts_with(prefix))
+                                .filter(|(name, _, _)| matches_name(name, prefix, mode))
                                 .map(|(name, kind, path)| Suggestion {
                                     insertion: name.clone(),
                                     display: name,
@@ -906,6 +1064,61 @@ fn emit_candidates_for_arg(
                                     icon: None,
                                 }),
                         );
+                    }
+                }
+                crate::spec_parser::Generator::AwsList {
+                    service,
+                    verb,
+                    lookup_flags,
+                    parent_key,
+                    id_field,
+                } => {
+                    let cmd = build_aws_list_command(service, verb, lookup_flags, tokens);
+                    if let Some(lines) = cached_template_generator(&cmd) {
+                        let stdout = lines.join("\n");
+                        if let Some(names) =
+                            extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
+                        {
+                            out.extend(
+                                names
+                                    .into_iter()
+                                    .filter(|s| matches_name(s, prefix, mode))
+                                    .map(|name| Suggestion {
+                                        insertion: name.clone(),
+                                        display: name,
+                                        description: Some("aws".into()),
+                                        kind: SuggestionKind::Argument,
+                                        priority: None,
+                                        icon: None,
+                                    }),
+                            );
+                        }
+                    }
+                }
+                crate::spec_parser::Generator::ScriptWithJsonPath {
+                    script,
+                    parent_key,
+                    id_field,
+                } => {
+                    if let Some(lines) = cached_template_generator(script) {
+                        let stdout = lines.join("\n");
+                        if let Some(names) =
+                            extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
+                        {
+                            out.extend(
+                                names
+                                    .into_iter()
+                                    .filter(|s| matches_name(s, prefix, mode))
+                                    .map(|name| Suggestion {
+                                        insertion: name.clone(),
+                                        display: name,
+                                        description: Some("aws".into()),
+                                        kind: SuggestionKind::Argument,
+                                        priority: None,
+                                        icon: None,
+                                    }),
+                            );
+                        }
                     }
                 }
                 crate::spec_parser::Generator::ZoxideQuery => {
@@ -1287,6 +1500,62 @@ fn scalar_to_string(v: &serde_json::Value) -> Option<String> {
         serde_json::Value::Number(n) => Some(n.to_string()),
         _ => None,
     }
+}
+
+/// Mirror of `postPrecessGenerator(out, parentKey, idField)` from the
+/// vendor aws specs: parse `stdout` as JSON, descend to `parent_key`,
+/// then map each array element to either `element[id_field]` (when
+/// `id_field` is `Some`) or the element itself (scalar).
+///
+/// When the value at `parent_key` is NOT an array but a single object,
+/// the upstream closure emits a single suggestion from `elm[childKey]`.
+/// Preserved here for parity.
+fn extract_aws_json_names(
+    stdout: &str,
+    parent_key: &str,
+    id_field: Option<&str>,
+) -> Option<Vec<String>> {
+    let root: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let target = root.get(parent_key)?;
+    match target {
+        serde_json::Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(|elm| match id_field {
+                    Some(key) => elm.get(key).and_then(scalar_to_string),
+                    None => scalar_to_string(elm),
+                })
+                .collect(),
+        ),
+        single => id_field
+            .and_then(|key| single.get(key))
+            .and_then(scalar_to_string)
+            .map(|s| vec![s]),
+    }
+}
+
+/// Build the `aws <service> <verb> [<flag> <captured>]*` command line
+/// from the currently-typed tokens. For each flag in `lookup_flags`,
+/// scan the tokens for an exact match and grab the next token as its
+/// value — mirroring the upstream closure's `tokens.indexOf(flag)`.
+/// Flags whose token doesn't appear yet are dropped (the closure
+/// would also call aws without them).
+fn build_aws_list_command(
+    service: &str,
+    verb: &str,
+    lookup_flags: &[String],
+    tokens: &[Annotation],
+) -> Vec<String> {
+    let mut cmd: Vec<String> = vec!["aws".into(), service.into(), verb.into()];
+    for flag in lookup_flags {
+        if let Some(i) = tokens.iter().position(|t| t.text == *flag) {
+            if let Some(next) = tokens.get(i + 1) {
+                cmd.push(flag.clone());
+                cmd.push(next.text.clone());
+            }
+        }
+    }
+    cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -2108,11 +2377,11 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
-fn name_or_aliases_match(name: &str, aliases: &[String], prefix: &str) -> bool {
-    if name.starts_with(prefix) {
+fn name_or_aliases_match(name: &str, aliases: &[String], prefix: &str, mode: MatchMode) -> bool {
+    if matches_name(name, prefix, mode) {
         return true;
     }
-    aliases.iter().any(|a| a.starts_with(prefix))
+    aliases.iter().any(|a| matches_name(a, prefix, mode))
 }
 
 /// Build the workspace fixture path — used by `nerv-daemon` e2e tests
@@ -2697,7 +2966,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--c");
+        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].insertion, "--color=");
         assert_eq!(out[0].display, "--color", "display stays clean");
@@ -2717,7 +2986,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--f");
+        let out = emit_options_with_ancestors(&node, &[], "--f", MatchMode::Prefix);
         assert_eq!(out[0].insertion, "--flag");
     }
 
@@ -2733,7 +3002,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--c");
+        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix);
         assert_eq!(out[0].insertion, "--color");
     }
 
@@ -2768,9 +3037,76 @@ mod tests {
             }],
             ..Default::default()
         };
-        let out = emit_subcommands(&node, "com");
+        let out = emit_subcommands(&node, "com", MatchMode::Prefix);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].icon.as_deref(), Some("📝"));
+    }
+
+    #[test]
+    fn emit_subcommands_fuzzy_mode_matches_subsequence() {
+        let node = Subcommand {
+            name: "git".into(),
+            subcommands: vec![
+                Subcommand {
+                    name: "commit".into(),
+                    ..Default::default()
+                },
+                Subcommand {
+                    name: "checkout".into(),
+                    ..Default::default()
+                },
+                Subcommand {
+                    name: "config".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        // Prefix mode: "co" matches commit + config (not checkout).
+        let prefix = emit_subcommands(&node, "co", MatchMode::Prefix);
+        let prefix_names: Vec<&str> = prefix.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(prefix_names, vec!["commit", "config"]);
+
+        // Fuzzy mode: "cmt" matches commit (c-o-m-m-i-T → c-m-t).
+        let fuzzy = emit_subcommands(&node, "cmt", MatchMode::Fuzzy);
+        assert_eq!(fuzzy.len(), 1);
+        assert_eq!(fuzzy[0].display, "commit");
+
+        // Fuzzy mode: "ck" matches checkout but NOT commit / config.
+        let fuzzy_ck = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
+        assert_eq!(fuzzy_ck.len(), 1);
+        assert_eq!(fuzzy_ck[0].display, "checkout");
+    }
+
+    #[test]
+    fn emit_subcommands_fuzzy_mode_matches_aliases() {
+        let node = Subcommand {
+            name: "git".into(),
+            subcommands: vec![Subcommand {
+                name: "checkout".into(),
+                aliases: vec!["co".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        // Prefix "co" hits the alias.
+        let prefix = emit_subcommands(&node, "co", MatchMode::Prefix);
+        assert_eq!(prefix.len(), 1);
+        // Fuzzy "ck" hits the canonical name (alias is shorter than query).
+        let fuzzy = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
+        assert_eq!(fuzzy.len(), 1);
+    }
+
+    #[test]
+    fn fuzzy_subsequence_match_basics() {
+        assert!(fuzzy_subsequence_match("checkout", "chk"));
+        assert!(fuzzy_subsequence_match("checkout", ""));
+        assert!(fuzzy_subsequence_match("checkout", "checkout"));
+        assert!(!fuzzy_subsequence_match("checkout", "checkouts"));
+        assert!(!fuzzy_subsequence_match("checkout", "xyz"));
+        // Out-of-order: query 't' before 'c' in name → fail.
+        assert!(!fuzzy_subsequence_match("checkout", "tc"));
     }
 
     #[test]
@@ -2819,7 +3155,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None);
+        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[]);
         // Only "serde" matches "se" prefix.
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].display, "serde");
@@ -2857,25 +3193,94 @@ mod tests {
 
     #[test]
     fn matches_filter_prefix_is_default() {
-        assert!(matches_filter("foobar", "foo", None));
-        assert!(!matches_filter("foobar", "bar", None));
+        assert!(matches_filter("foobar", "foo", None, MatchMode::Prefix));
+        assert!(!matches_filter("foobar", "bar", None, MatchMode::Prefix));
     }
 
     #[test]
     fn matches_filter_substring_matches_anywhere() {
-        assert!(matches_filter("foobar", "oob", Some("substring")));
-        assert!(matches_filter("foobar", "bar", Some("substring")));
-        assert!(matches_filter("foobar", "foo", Some("substring")));
-        assert!(!matches_filter("foobar", "xyz", Some("substring")));
+        assert!(matches_filter(
+            "foobar",
+            "oob",
+            Some("substring"),
+            MatchMode::Prefix
+        ));
+        assert!(matches_filter(
+            "foobar",
+            "bar",
+            Some("substring"),
+            MatchMode::Prefix
+        ));
+        assert!(matches_filter(
+            "foobar",
+            "foo",
+            Some("substring"),
+            MatchMode::Prefix
+        ));
+        assert!(!matches_filter(
+            "foobar",
+            "xyz",
+            Some("substring"),
+            MatchMode::Prefix
+        ));
     }
 
     #[test]
-    fn matches_filter_fuzzy_downgrades_to_prefix() {
-        // M1 constraint: fuzzy code path forbidden in v1.0. Silently
-        // treated as prefix matching so specs still work.
-        assert!(matches_filter("foobar", "foo", Some("fuzzy")));
-        assert!(!matches_filter("foobar", "bar", Some("fuzzy")));
-        assert!(!matches_filter("foobar", "fbr", Some("fuzzy")));
+    fn matches_filter_fuzzy_strategy_is_prefix_under_prefix_mode() {
+        // Spec declares `filterStrategy: "fuzzy"` but user runs default
+        // prefix mode → behaves like prefix (no surprise subsequence).
+        assert!(matches_filter(
+            "foobar",
+            "foo",
+            Some("fuzzy"),
+            MatchMode::Prefix
+        ));
+        assert!(!matches_filter(
+            "foobar",
+            "bar",
+            Some("fuzzy"),
+            MatchMode::Prefix
+        ));
+        assert!(!matches_filter(
+            "foobar",
+            "fbr",
+            Some("fuzzy"),
+            MatchMode::Prefix
+        ));
+    }
+
+    #[test]
+    fn matches_filter_fuzzy_mode_does_subsequence() {
+        // User opts in via `[matching] mode = "fuzzy"`.
+        assert!(matches_filter("checkout", "chk", None, MatchMode::Fuzzy));
+        assert!(matches_filter("commit", "cmt", None, MatchMode::Fuzzy));
+        assert!(matches_filter("foobar", "fbr", None, MatchMode::Fuzzy));
+        // Out-of-order chars still fail.
+        assert!(!matches_filter("foobar", "rba", None, MatchMode::Fuzzy));
+    }
+
+    #[test]
+    fn matches_filter_substring_strategy_overrides_fuzzy_mode() {
+        // Per-arg `filterStrategy: "substring"` is a strong override —
+        // it must beat user fuzzy mode so spec authors keep control.
+        assert!(matches_filter(
+            "foobar",
+            "oob",
+            Some("substring"),
+            MatchMode::Fuzzy
+        ));
+        assert!(!matches_filter(
+            "foobar",
+            "xyz",
+            Some("substring"),
+            MatchMode::Fuzzy
+        ));
+    }
+
+    #[test]
+    fn matches_filter_fuzzy_mode_is_case_insensitive() {
+        assert!(matches_filter("Checkout", "chk", None, MatchMode::Fuzzy));
+        assert!(matches_filter("checkout", "CHK", None, MatchMode::Fuzzy));
     }
 
     #[test]
@@ -2899,7 +3304,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "foo", None, None);
+        let out = emit_candidates_for_arg(&arg, "foo", None, None, MatchMode::Prefix, &[]);
         // Both "foobar" and "barfoo" contain "foo".
         let names: Vec<_> = out.iter().map(|s| s.display.as_str()).collect();
         assert!(names.contains(&"foobar"));
@@ -2918,7 +3323,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--a");
+        let out = emit_options_with_ancestors(&node, &[], "--a", MatchMode::Prefix);
         assert_eq!(out[0].icon, None, "fig:// URL must not leak");
     }
 
@@ -2975,15 +3380,198 @@ mod tests {
 
     #[test]
     fn matches_filter_empty_query_matches_anything() {
-        assert!(matches_filter("foobar", "", None));
-        assert!(matches_filter("foobar", "", Some("substring")));
-        assert!(matches_filter("", "", None));
+        assert!(matches_filter("foobar", "", None, MatchMode::Prefix));
+        assert!(matches_filter(
+            "foobar",
+            "",
+            Some("substring"),
+            MatchMode::Prefix
+        ));
+        assert!(matches_filter("", "", None, MatchMode::Prefix));
+        // Fuzzy mode preserves the same property.
+        assert!(matches_filter("foobar", "", None, MatchMode::Fuzzy));
     }
 
     #[test]
     fn matches_filter_substring_empty_string_in_empty_name() {
-        assert!(matches_filter("", "", Some("substring")));
-        assert!(!matches_filter("", "foo", Some("substring")));
+        assert!(matches_filter("", "", Some("substring"), MatchMode::Prefix));
+        assert!(!matches_filter(
+            "",
+            "foo",
+            Some("substring"),
+            MatchMode::Prefix
+        ));
+    }
+
+    #[test]
+    fn extract_aws_json_names_array_with_id_field() {
+        // The canonical aws shape: parent_key resolves to an array of
+        // objects, each carrying an `Arn` (or similar) ID field.
+        let raw = r#"{"OpenIDConnectProviderList":[{"Arn":"arn:aws:iam::1:oidc/A"},{"Arn":"arn:aws:iam::1:oidc/B"}]}"#;
+        let out = extract_aws_json_names(raw, "OpenIDConnectProviderList", Some("Arn")).unwrap();
+        assert_eq!(out, vec!["arn:aws:iam::1:oidc/A", "arn:aws:iam::1:oidc/B"]);
+    }
+
+    #[test]
+    fn extract_aws_json_names_array_without_id_field() {
+        // When `id_field` is None the upstream closure emits each
+        // element as a bare scalar — mirror that.
+        let raw = r#"{"Buckets":["a","b","c"]}"#;
+        let out = extract_aws_json_names(raw, "Buckets", None).unwrap();
+        assert_eq!(out, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn extract_aws_json_names_single_object_with_id_field() {
+        // The non-array branch — Fig's helper folds a single object
+        // into a one-item list when parent_key is not an array.
+        let raw = r#"{"Function":{"Arn":"arn:aws:lambda::1:f/MyFn"}}"#;
+        let out = extract_aws_json_names(raw, "Function", Some("Arn")).unwrap();
+        assert_eq!(out, vec!["arn:aws:lambda::1:f/MyFn"]);
+    }
+
+    #[test]
+    fn extract_aws_json_names_missing_parent_returns_none() {
+        let raw = r#"{"Other":[]}"#;
+        assert!(extract_aws_json_names(raw, "Buckets", None).is_none());
+    }
+
+    #[test]
+    fn extract_aws_json_names_invalid_json_returns_none() {
+        assert!(extract_aws_json_names("not json", "Any", None).is_none());
+    }
+
+    #[test]
+    fn extract_aws_json_names_skips_elements_missing_id_field() {
+        // Defensive: an aws CLI response with sparse objects shouldn't
+        // panic; missing fields drop the entry.
+        let raw = r#"{"Items":[{"Id":"a"},{"NoId":"x"},{"Id":"b"}]}"#;
+        let out = extract_aws_json_names(raw, "Items", Some("Id")).unwrap();
+        assert_eq!(out, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn spec_stem_from_path_strips_extensions() {
+        assert_eq!(
+            spec_stem_from_path(Path::new("/tmp/specs/git.json")),
+            Some("git".to_string())
+        );
+        assert_eq!(
+            spec_stem_from_path(Path::new("/tmp/specs/docker.json.gz")),
+            Some("docker".to_string())
+        );
+        assert!(spec_stem_from_path(Path::new("/tmp/specs/.swap")).is_none());
+        assert!(spec_stem_from_path(Path::new("/tmp/specs/git.json.bak")).is_none());
+    }
+
+    #[test]
+    fn fs_watcher_invalidates_cache_on_spec_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_path = tmp.path().join("foo.json");
+        std::fs::write(
+            &spec_path,
+            r#"{"name":"foo","subcommands":[{"name":"alpha"}]}"#,
+        )
+        .unwrap();
+        let reg = SpecRegistry::at_dir(tmp.path());
+        let first = reg.lookup("foo").expect("initial load failed");
+        assert_eq!(first.subcommands.len(), 1);
+        assert_eq!(first.subcommands[0].name, "alpha");
+
+        // Rewrite the spec. The FS watcher should mark `foo` dirty so
+        // the next lookup re-reads from disk with the new subcommand
+        // list. macOS FSEvents coalesces at 500ms — wait long enough.
+        std::fs::write(
+            &spec_path,
+            r#"{"name":"foo","subcommands":[{"name":"alpha"},{"name":"beta"}]}"#,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut second = reg.lookup("foo").unwrap();
+        while second.subcommands.len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            second = reg.lookup("foo").unwrap();
+        }
+        assert_eq!(second.subcommands.len(), 2);
+    }
+
+    #[test]
+    fn build_aws_list_command_no_flags() {
+        let cmd = build_aws_list_command("ec2", "describe-instances", &[], &[]);
+        assert_eq!(cmd, vec!["aws", "ec2", "describe-instances"]);
+    }
+
+    #[test]
+    fn build_aws_list_command_with_matching_flag() {
+        let tokens = vec![
+            Annotation {
+                text: "lambda".into(),
+                span: 0..6,
+                kind: TokenKind::Unknown,
+            },
+            Annotation {
+                text: "list-layer-versions".into(),
+                span: 7..26,
+                kind: TokenKind::Unknown,
+            },
+            Annotation {
+                text: "--layer-name".into(),
+                span: 27..39,
+                kind: TokenKind::Unknown,
+            },
+            Annotation {
+                text: "MyLayer".into(),
+                span: 40..47,
+                kind: TokenKind::Unknown,
+            },
+        ];
+        let cmd = build_aws_list_command(
+            "lambda",
+            "list-layer-versions",
+            &["--layer-name".into()],
+            &tokens,
+        );
+        assert_eq!(
+            cmd,
+            vec![
+                "aws",
+                "lambda",
+                "list-layer-versions",
+                "--layer-name",
+                "MyLayer"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_aws_list_command_skips_missing_flags() {
+        // Token list lacks `--region` — the flag is silently dropped
+        // (mirrors the upstream `tokens.indexOf` continue branch).
+        let tokens = vec![Annotation {
+            text: "ecs".into(),
+            span: 0..3,
+            kind: TokenKind::Unknown,
+        }];
+        let cmd = build_aws_list_command("ecs", "list-clusters", &["--region".into()], &tokens);
+        assert_eq!(cmd, vec!["aws", "ecs", "list-clusters"]);
+    }
+
+    #[test]
+    fn build_aws_list_command_drops_trailing_flag_without_value() {
+        // The flag is the last token — no value after it. Drop the
+        // flag rather than emit a half-baked command.
+        let tokens = vec![Annotation {
+            text: "--layer-name".into(),
+            span: 0..12,
+            kind: TokenKind::Unknown,
+        }];
+        let cmd = build_aws_list_command(
+            "lambda",
+            "list-layer-versions",
+            &["--layer-name".into()],
+            &tokens,
+        );
+        assert_eq!(cmd, vec!["aws", "lambda", "list-layer-versions"]);
     }
 
     #[test]

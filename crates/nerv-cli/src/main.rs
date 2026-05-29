@@ -735,6 +735,8 @@ fn upgrade_tier<'a>(current: char, gens: impl IntoIterator<Item = &'a Generator>
             Generator::PackageJsonDeps => 'B',
             Generator::KubectlResources => 'B',
             Generator::CargoTargets { .. } => 'B',
+            Generator::ScriptWithJsonPath { .. } => 'B',
+            Generator::AwsList { .. } => 'B',
             Generator::Script { .. } | Generator::Custom { .. } => 'C',
         };
         if (g_tier == 'B' && t == 'A') || g_tier == 'C' {
