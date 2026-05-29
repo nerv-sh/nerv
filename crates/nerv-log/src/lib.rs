@@ -262,4 +262,48 @@ mod tests {
             assert!(logs.contains(i));
         }
     }
+
+    /// `Error::Io` wraps the underlying io::Error via #[from] — verify
+    /// the Display impl forwards rather than swallowing the source
+    /// message. Pure type-level test; no globals touched.
+    #[test]
+    fn error_io_display_forwards_source() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+        let wrapped: Error = io_err.into();
+        let s = wrapped.to_string();
+        assert!(
+            s.contains("no such file"),
+            "Error::Io display should forward source: {s}"
+        );
+    }
+
+    /// `LogArgs` is the public surface for `initialize_logging`. Verify
+    /// it accepts both `Option<&Path>` and `Option<PathBuf>` so callers
+    /// don't need to coerce paths into a specific owned/borrowed shape.
+    #[test]
+    fn log_args_accepts_path_borrow_and_owned() {
+        use std::path::{Path, PathBuf};
+        let owned = PathBuf::from("/tmp/x.log");
+        let _borrowed: LogArgs<&Path> = LogArgs {
+            log_level: None,
+            log_to_stdout: false,
+            log_file_path: Some(owned.as_path()),
+            delete_old_log_file: false,
+        };
+        let _owned: LogArgs<PathBuf> = LogArgs {
+            log_level: Some("debug".into()),
+            log_to_stdout: true,
+            log_file_path: Some(owned),
+            delete_old_log_file: true,
+        };
+    }
+
+    /// `MAX_FILE_SIZE` is the rotation threshold (10 MiB). It's not
+    /// public but the constant value is part of the on-disk contract
+    /// — bumping it changes log retention. Lock the current value so
+    /// any change must be intentional + reviewed.
+    #[test]
+    fn max_file_size_constant_locked() {
+        assert_eq!(MAX_FILE_SIZE, 10 * 1024 * 1024);
+    }
 }

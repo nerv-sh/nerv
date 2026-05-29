@@ -288,4 +288,76 @@ mod tests {
         let toml = diagnostics.user_readable().unwrap();
         assert!(!toml.is_empty());
     }
+
+    /// `BuildDetails::new()` pulls version from CARGO_PKG_VERSION at
+    /// compile time. Verify the version is populated (the rest of
+    /// fields are env-dependent and may be None — e.g. local builds
+    /// without git metadata won't have hash/date).
+    #[test]
+    fn build_details_has_version() {
+        let d = BuildDetails::new();
+        assert!(!d.version.is_empty());
+        assert_eq!(d.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// PLAN.md v0.6 §0.2 strips fig_telemetry. The InstallMethod stub
+    /// only carries `Unknown`. Lock both Debug + Display so the
+    /// downstream `nerv doctor` table stays stable.
+    #[test]
+    fn install_method_unknown_renders() {
+        assert_eq!(InstallMethod::Unknown.to_string(), "unknown");
+        assert_eq!(format!("{:?}", InstallMethod::Unknown), "Unknown");
+    }
+
+    /// `is_false` is the serde `skip_serializing_if` predicate for
+    /// CurrentEnvironment's optional `in_*` flags. Verify both arms.
+    #[test]
+    fn is_false_skip_predicate() {
+        assert!(is_false(&false));
+        assert!(!is_false(&true));
+    }
+
+    /// `SystemInfo::new()` synchronously queries sysinfo. Memory
+    /// should always populate (sysinfo can read total memory on any
+    /// supported host); CPU may be missing under containers.
+    #[test]
+    fn system_info_populates_memory() {
+        let s = SystemInfo::new();
+        let mem = s.memory.expect("memory should populate");
+        assert!(mem.ends_with(" GB"), "memory format: {mem}");
+    }
+
+    /// Diagnostics serializes to TOML with the known top-level
+    /// section names. Locks the public report layout — adding fields
+    /// is fine, but renaming `q-details` (a forward-compat alias kept
+    /// for the doctor output) needs to be intentional.
+    #[tokio::test]
+    async fn diagnostics_serialize_contains_top_sections() {
+        let d = Diagnostics::new().await;
+        let toml = d.user_readable().unwrap();
+        for key in ["[q-details]", "[system-info]", "[environment]"] {
+            assert!(
+                toml.contains(key),
+                "missing section {key}\n--- toml ---\n{toml}"
+            );
+        }
+    }
+
+    /// `EnvVarDiagnostic::new()` filters env vars to a known
+    /// whitelist (plus `env_var::ALL`). PATH is in the explicit list.
+    /// Set an env var the constructor should NOT capture to verify
+    /// the filter actually drops unknowns.
+    #[test]
+    fn env_var_diagnostic_filters_unknown_vars() {
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin");
+            std::env::set_var("NERV_DIAG_TEST_UNCAPTURED_xyz", "should-not-appear");
+        }
+        let d = EnvVarDiagnostic::new();
+        assert!(d.env_vars.contains_key("PATH"));
+        assert!(!d.env_vars.contains_key("NERV_DIAG_TEST_UNCAPTURED_xyz"));
+        unsafe {
+            std::env::remove_var("NERV_DIAG_TEST_UNCAPTURED_xyz");
+        }
+    }
 }
