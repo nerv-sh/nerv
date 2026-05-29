@@ -1,5 +1,11 @@
-pub const APP_BUNDLE_ID: &str = "com.amazon.codewhisperer";
-pub const APP_BUNDLE_NAME: &str = "Amazon Q.app";
+// Reserved for the eventual Apple Developer signing / notarization
+// pass (M0-8). The bundle id must match what the developer cert
+// is registered under; "sh.nerv.nerv" follows reverse-DNS of the
+// project's nerv.sh domain. APP_BUNDLE_NAME is only consulted by
+// the `.app` bundle-path detection fallback in lib.rs — Nerv ships
+// as a Homebrew binary today, so this is best-effort future-proofing.
+pub const APP_BUNDLE_ID: &str = "sh.nerv.nerv";
+pub const APP_BUNDLE_NAME: &str = "Nerv.app";
 
 #[cfg(target_os = "macos")]
 pub const APP_PROCESS_NAME: &str = "q_desktop";
@@ -12,16 +18,14 @@ pub const APP_PROCESS_NAME: &str = "q_desktop.exe";
 /// The name configured under `"package.productName"` in the tauri.conf.json file.
 pub const TAURI_PRODUCT_NAME: &str = "q_desktop";
 
-pub const CLI_BINARY_NAME: &str = "q";
-pub const CLI_BINARY_NAME_MINIMAL: &str = "q-minimal";
-pub const CHAT_BINARY_NAME: &str = "qchat";
-pub const PTY_BINARY_NAME: &str = "qterm";
+pub const CLI_BINARY_NAME: &str = "nerv";
+pub const PTY_BINARY_NAME: &str = "nerv-pty";
 
-pub const CLI_CRATE_NAME: &str = "q_cli";
+pub const CLI_CRATE_NAME: &str = "nerv-cli";
 
-pub const URL_SCHEMA: &str = "q";
+pub const URL_SCHEMA: &str = "nerv";
 
-pub const PRODUCT_NAME: &str = "Amazon Q";
+pub const PRODUCT_NAME: &str = "Nerv";
 
 pub const RUNTIME_DIR_NAME: &str = "cwrun";
 
@@ -34,26 +38,7 @@ pub const DATA_DIR_NAME: &str = "AmazonQ";
 /// Backup directory name
 pub const BACKUP_DIR_NAME: &str = ".amazon-q.dotfiles.bak";
 
-// These are the old "CodeWhisperer" branding, used anywhere we will not update to Amazon Q
-pub const OLD_PRODUCT_NAME: &str = "CodeWhisperer";
-pub const OLD_CLI_BINARY_NAMES: &[&str] = &["cw"];
-pub const OLD_PTY_BINARY_NAMES: &[&str] = &["cwterm"];
-
-pub const GITHUB_REPO_NAME: &str = "aws/amazon-q-developer-cli";
-
-pub mod url {
-    pub const USER_MANUAL: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line.html";
-    pub const AUTOCOMPLETE_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-autocomplete.html";
-    pub const AUTOCOMPLETE_SSH_WIKI: &str = "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-autocomplete-ssh.html";
-    pub const CHAT_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-chat.html";
-    pub const TRANSLATE_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-conversation.html";
-    pub const TELEMETRY_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/opt-out-IDE.html";
-}
+pub const GITHUB_REPO_NAME: &str = "nerv-sh/nerv";
 
 /// Build time env vars
 pub mod build {
