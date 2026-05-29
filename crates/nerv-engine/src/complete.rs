@@ -955,6 +955,32 @@ fn emit_candidates_for_arg(
                         );
                     }
                 }
+                crate::spec_parser::Generator::ScriptWithJsonPath {
+                    script,
+                    parent_key,
+                    id_field,
+                } => {
+                    if let Some(lines) = cached_template_generator(script) {
+                        let stdout = lines.join("\n");
+                        if let Some(names) =
+                            extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
+                        {
+                            out.extend(
+                                names
+                                    .into_iter()
+                                    .filter(|s| matches_name(s, prefix, mode))
+                                    .map(|name| Suggestion {
+                                        insertion: name.clone(),
+                                        display: name,
+                                        description: Some("aws".into()),
+                                        kind: SuggestionKind::Argument,
+                                        priority: None,
+                                        icon: None,
+                                    }),
+                            );
+                        }
+                    }
+                }
                 crate::spec_parser::Generator::ZoxideQuery => {
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
@@ -1333,6 +1359,38 @@ fn scalar_to_string(v: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
         serde_json::Value::Number(n) => Some(n.to_string()),
         _ => None,
+    }
+}
+
+/// Mirror of `postPrecessGenerator(out, parentKey, idField)` from the
+/// vendor aws specs: parse `stdout` as JSON, descend to `parent_key`,
+/// then map each array element to either `element[id_field]` (when
+/// `id_field` is `Some`) or the element itself (scalar).
+///
+/// When the value at `parent_key` is NOT an array but a single object,
+/// the upstream closure emits a single suggestion from `elm[childKey]`.
+/// Preserved here for parity.
+fn extract_aws_json_names(
+    stdout: &str,
+    parent_key: &str,
+    id_field: Option<&str>,
+) -> Option<Vec<String>> {
+    let root: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let target = root.get(parent_key)?;
+    match target {
+        serde_json::Value::Array(items) => Some(
+            items
+                .iter()
+                .filter_map(|elm| match id_field {
+                    Some(key) => elm.get(key).and_then(scalar_to_string),
+                    None => scalar_to_string(elm),
+                })
+                .collect(),
+        ),
+        single => id_field
+            .and_then(|key| single.get(key))
+            .and_then(scalar_to_string)
+            .map(|s| vec![s]),
     }
 }
 
@@ -3179,6 +3237,53 @@ mod tests {
             Some("substring"),
             MatchMode::Prefix
         ));
+    }
+
+    #[test]
+    fn extract_aws_json_names_array_with_id_field() {
+        // The canonical aws shape: parent_key resolves to an array of
+        // objects, each carrying an `Arn` (or similar) ID field.
+        let raw = r#"{"OpenIDConnectProviderList":[{"Arn":"arn:aws:iam::1:oidc/A"},{"Arn":"arn:aws:iam::1:oidc/B"}]}"#;
+        let out = extract_aws_json_names(raw, "OpenIDConnectProviderList", Some("Arn")).unwrap();
+        assert_eq!(out, vec!["arn:aws:iam::1:oidc/A", "arn:aws:iam::1:oidc/B"]);
+    }
+
+    #[test]
+    fn extract_aws_json_names_array_without_id_field() {
+        // When `id_field` is None the upstream closure emits each
+        // element as a bare scalar — mirror that.
+        let raw = r#"{"Buckets":["a","b","c"]}"#;
+        let out = extract_aws_json_names(raw, "Buckets", None).unwrap();
+        assert_eq!(out, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn extract_aws_json_names_single_object_with_id_field() {
+        // The non-array branch — Fig's helper folds a single object
+        // into a one-item list when parent_key is not an array.
+        let raw = r#"{"Function":{"Arn":"arn:aws:lambda::1:f/MyFn"}}"#;
+        let out = extract_aws_json_names(raw, "Function", Some("Arn")).unwrap();
+        assert_eq!(out, vec!["arn:aws:lambda::1:f/MyFn"]);
+    }
+
+    #[test]
+    fn extract_aws_json_names_missing_parent_returns_none() {
+        let raw = r#"{"Other":[]}"#;
+        assert!(extract_aws_json_names(raw, "Buckets", None).is_none());
+    }
+
+    #[test]
+    fn extract_aws_json_names_invalid_json_returns_none() {
+        assert!(extract_aws_json_names("not json", "Any", None).is_none());
+    }
+
+    #[test]
+    fn extract_aws_json_names_skips_elements_missing_id_field() {
+        // Defensive: an aws CLI response with sparse objects shouldn't
+        // panic; missing fields drop the entry.
+        let raw = r#"{"Items":[{"Id":"a"},{"NoId":"x"},{"Id":"b"}]}"#;
+        let out = extract_aws_json_names(raw, "Items", Some("Id")).unwrap();
+        assert_eq!(out, vec!["a", "b"]);
     }
 
     #[test]
