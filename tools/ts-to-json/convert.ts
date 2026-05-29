@@ -39,7 +39,7 @@ import { resolve, basename, extname, dirname, join } from "node:path";
  *
  * False-positive risk is low: `"-1ApL"` is rare outside this lib.
  */
-const detectFilepathsGenerator = (
+export const detectFilepathsGenerator = (
   g: any,
 ): { kind: "filepaths"; foldersOnly: boolean } | null => {
   if (g == null || typeof g !== "object") return null;
