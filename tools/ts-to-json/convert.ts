@@ -58,6 +58,35 @@ const detectFilepathsGenerator = (
   return { kind: "filepaths", foldersOnly };
 };
 
+/**
+ * Detect aws-style `postPrecessGenerator(out, "ParentKey", "IdField")`
+ * inside a `postProcess` closure. The helper is locally defined per
+ * aws spec file (iam.ts / ec2.ts / iam-roles-anywhere.ts / …) — what
+ * stays stable across all of them is the call shape.
+ *
+ * Returns the captured `parent_key` and `id_field` (the latter is
+ * optional in upstream; some calls omit it and emit the array element
+ * itself).
+ */
+const detectAwsJsonPath = (
+  postProcess: any,
+): { parent_key: string; id_field: string | null } | null => {
+  if (typeof postProcess !== "function") return null;
+  let src: string;
+  try {
+    src = postProcess.toString();
+  } catch {
+    return null;
+  }
+  // Match the canonical `postPrecessGenerator(out, "Parent", "Child")`
+  // call. Allow single OR double quotes; tolerate stray whitespace.
+  const m = src.match(
+    /postPrecessGenerator\s*\(\s*\w+\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?\s*\)/,
+  );
+  if (!m) return null;
+  return { parent_key: m[1], id_field: m[2] ?? null };
+};
+
 type FigArg = {
   name?: string | string[];
   description?: string;
@@ -164,7 +193,13 @@ type NervGenerator =
   | { type: "man_pages" }
   | { type: "package_json_deps" }
   | { type: "kubectl_resources" }
-  | { type: "cargo_targets"; kind: string | null };
+  | { type: "cargo_targets"; kind: string | null }
+  | {
+      type: "script_with_json_path";
+      script: string[];
+      parent_key: string;
+      id_field: string | null;
+    };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -505,6 +540,20 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
       // JSON.parse closure). Reused by npm/yarn/pnpm/bun/rushx/nr.
       if (isPackageJsonScriptsSignature(scriptArr)) {
         return { type: "package_json_scripts" };
+      }
+      // Well-known: aws `postPrecessGenerator(out, parentKey, idField)`
+      // — recurring across iam/ec2/cloudfront/route53/etc. The closure
+      // boils down to `JSON.parse(stdout)[parentKey]` then mapping
+      // each element to `elm[idField]`. Capture as data so the Rust
+      // engine can recover the same shape with no JS runtime.
+      const jsonPath = detectAwsJsonPath(g.postProcess);
+      if (jsonPath) {
+        return {
+          type: "script_with_json_path",
+          script: scriptArr,
+          parent_key: jsonPath.parent_key,
+          id_field: jsonPath.id_field,
+        };
       }
       // For everything else with a postProcess: still execute the
       // script as a Template. The engine streams raw stdout lines as

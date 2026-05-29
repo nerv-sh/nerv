@@ -344,6 +344,19 @@ pub enum Generator {
         #[serde(default)]
         kind: Option<String>,
     },
+    /// Well-known: script-form generators (e.g. aws ec2 / iam) whose
+    /// `postProcess` closure runs `JSON.parse(stdout)[parentKey]` then
+    /// maps to either each element directly or `elm[idField]`. The
+    /// Rust engine recovers the same shape without a JS runtime:
+    /// run `script`, parse stdout as JSON, walk to `parent_key`,
+    /// emit either the array elements (when `id_field` is None) or
+    /// `array[i][id_field]`.
+    ScriptWithJsonPath {
+        script: Vec<String>,
+        parent_key: String,
+        #[serde(default)]
+        id_field: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
