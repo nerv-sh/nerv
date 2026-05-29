@@ -33,9 +33,7 @@ use nerv_settings::state;
 use nerv_term::Term;
 use nerv_term::ansi::Processor;
 use nerv_term::event::EventListener;
-use nerv_term::grid::Dimensions;
-use nerv_term::term::{ShellState, SizeInfo, TextBuffer};
-use nerv_util::consts::CLI_BINARY_NAME;
+use nerv_term::term::{ShellState, SizeInfo};
 use nerv_util::env_var::{Q_LOG_LEVEL, Q_SHELL, Q_TERM, QTERM_SESSION_ID};
 use nerv_util::process_info::{Pid, PidExt};
 use nerv_util::{PRODUCT_NAME, PTY_BINARY_NAME, Terminal as FigTerminal, directories};
@@ -556,8 +554,6 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
             newline_mode: false,
         };
 
-        let ai_enabled = nerv_settings::settings::get_bool_or("ai.terminal-hash-sub", true);
-
         if let Ok(shell) = get_parent_shell() {
             let path = std::path::Path::new(&shell);
             let name = path.file_name().and_then(|name| name.to_str()).unwrap_or(shell.as_str());
@@ -679,31 +675,6 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                         let preexec = term.shell_state().preexec;
 
                                         debug!(?event, ?raw, %preexec,  "Got key event");
-
-                                        if !preexec && ai_enabled && event.key == KeyCode::Enter && event.modifiers == input::Modifiers::NONE {
-                                            if let Some(TextBuffer { buffer, cursor_idx }) = term.get_current_buffer() {
-                                                let buffer = buffer.trim();
-                                                if buffer.len() > 1 && buffer.starts_with('#') && term.columns() > buffer.len() {
-                                                    write_buffer.extend(
-                                                        &std::iter::repeat_n(b'\x08', buffer.len()
-                                                            .max(cursor_idx.unwrap_or(0)))
-                                                            .collect::<Vec<_>>()
-                                                    );
-                                                    write_buffer.extend(
-                                                        format!(
-                                                            "{} translate '{}'\r",
-                                                            CLI_BINARY_NAME,
-                                                            buffer
-                                                                .trim_start_matches('#')
-                                                                .trim()
-                                                                .replace('\'', "'\"'\"'")
-                                                            ).as_bytes()
-                                                    );
-                                                    master.write_all(&write_buffer).await?;
-                                                    continue 'select_loop;
-                                                }
-                                            }
-                                        }
 
                                         // if we are in CSI u mode we try to encode first, otherwise we try to send the raw bytes first
                                         let raw = if csi_u_set {
@@ -932,7 +903,7 @@ fn main() {
 
     logger::stdio_debug_log(format!("{Q_LOG_LEVEL}={}", nerv_log::get_log_level()));
 
-    if !state::get_bool_or("qterm.enabled", true) {
+    if !state::get_bool_or("pty.enabled", true) {
         println!("[NOTE] qterm is disabled. Autocomplete will not work.");
         logger::stdio_debug_log("qterm is disabled. `qterm.enabled` == false");
         return;
