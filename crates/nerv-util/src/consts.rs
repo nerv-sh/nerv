@@ -1,73 +1,67 @@
-pub const APP_BUNDLE_ID: &str = "com.amazon.codewhisperer";
-pub const APP_BUNDLE_NAME: &str = "Amazon Q.app";
+// Reserved for the eventual Apple Developer signing / notarization
+// pass (M0-8). The bundle id must match what the developer cert
+// is registered under; "sh.nerv.nerv" follows reverse-DNS of the
+// project's nerv.sh domain. APP_BUNDLE_NAME is only consulted by
+// the `.app` bundle-path detection fallback in lib.rs — Nerv ships
+// as a Homebrew binary today, so this is best-effort future-proofing.
+pub const APP_BUNDLE_ID: &str = "sh.nerv.nerv";
+pub const APP_BUNDLE_NAME: &str = "Nerv.app";
 
+// Nerv has no desktop app today. These names are kept so the absorbed
+// Linux/Windows integration code still compiles — they only feed
+// `.desktop` icon paths (Linux) and tauri AppImage lib dir (Linux).
+// macOS arm is dead on the v1 ship.
 #[cfg(target_os = "macos")]
-pub const APP_PROCESS_NAME: &str = "q_desktop";
+pub const APP_PROCESS_NAME: &str = "nerv-desktop";
 #[cfg(target_os = "linux")]
-pub const APP_PROCESS_NAME: &str = "q-desktop";
+pub const APP_PROCESS_NAME: &str = "nerv-desktop";
 
 #[cfg(windows)]
-pub const APP_PROCESS_NAME: &str = "q_desktop.exe";
+pub const APP_PROCESS_NAME: &str = "nerv-desktop.exe";
 
 /// The name configured under `"package.productName"` in the tauri.conf.json file.
-pub const TAURI_PRODUCT_NAME: &str = "q_desktop";
+pub const TAURI_PRODUCT_NAME: &str = "nerv-desktop";
 
-pub const CLI_BINARY_NAME: &str = "q";
-pub const CLI_BINARY_NAME_MINIMAL: &str = "q-minimal";
-pub const CHAT_BINARY_NAME: &str = "qchat";
-pub const PTY_BINARY_NAME: &str = "qterm";
+pub const CLI_BINARY_NAME: &str = "nerv";
+pub const PTY_BINARY_NAME: &str = "nerv-pty";
 
-pub const CLI_CRATE_NAME: &str = "q_cli";
+pub const CLI_CRATE_NAME: &str = "nerv-cli";
 
-pub const URL_SCHEMA: &str = "q";
+pub const URL_SCHEMA: &str = "nerv";
 
-pub const PRODUCT_NAME: &str = "Amazon Q";
+pub const PRODUCT_NAME: &str = "Nerv";
 
-pub const RUNTIME_DIR_NAME: &str = "cwrun";
+// Runtime + data + backup dir names. Renamed from cwrun / amazon-q /
+// AmazonQ / .amazon-q.dotfiles.bak. No on-disk migration is needed —
+// the only crates that read these (nerv-pty PTY runtime, settings
+// state store, fig_data_dir) are M1 opt-in and have no live users
+// pointing at the old paths.
+pub const RUNTIME_DIR_NAME: &str = "nervrun";
 
 /// Data directory name used in paths like ~/.local/share/{DATA_DIR_NAME}
 #[cfg(unix)]
-pub const DATA_DIR_NAME: &str = "amazon-q";
+pub const DATA_DIR_NAME: &str = "nerv";
 #[cfg(windows)]
-pub const DATA_DIR_NAME: &str = "AmazonQ";
+pub const DATA_DIR_NAME: &str = "Nerv";
 
 /// Backup directory name
-pub const BACKUP_DIR_NAME: &str = ".amazon-q.dotfiles.bak";
+pub const BACKUP_DIR_NAME: &str = ".nerv.dotfiles.bak";
 
-// These are the old "CodeWhisperer" branding, used anywhere we will not update to Amazon Q
-pub const OLD_PRODUCT_NAME: &str = "CodeWhisperer";
-pub const OLD_CLI_BINARY_NAMES: &[&str] = &["cw"];
-pub const OLD_PTY_BINARY_NAMES: &[&str] = &["cwterm"];
-
-pub const GITHUB_REPO_NAME: &str = "aws/amazon-q-developer-cli";
-
-pub mod url {
-    pub const USER_MANUAL: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line.html";
-    pub const AUTOCOMPLETE_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-autocomplete.html";
-    pub const AUTOCOMPLETE_SSH_WIKI: &str = "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-autocomplete-ssh.html";
-    pub const CHAT_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-chat.html";
-    pub const TRANSLATE_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/command-line-conversation.html";
-    pub const TELEMETRY_WIKI: &str =
-        "https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/opt-out-IDE.html";
-}
+pub const GITHUB_REPO_NAME: &str = "nerv-sh/nerv";
 
 /// Build time env vars
 pub mod build {
     /// The target of the current build, e.g. "aarch64-unknown-linux-musl"
-    pub const TARGET_TRIPLE: Option<&str> = option_env!("AMAZON_Q_BUILD_TARGET_TRIPLE");
+    pub const TARGET_TRIPLE: Option<&str> = option_env!("NERV_BUILD_TARGET_TRIPLE");
 
     /// The variant of the current build
-    pub const VARIANT: Option<&str> = option_env!("AMAZON_Q_BUILD_VARIANT");
+    pub const VARIANT: Option<&str> = option_env!("NERV_BUILD_VARIANT");
 
     /// A git full sha hash of the current build
-    pub const HASH: Option<&str> = option_env!("AMAZON_Q_BUILD_HASH");
+    pub const HASH: Option<&str> = option_env!("NERV_BUILD_HASH");
 
     /// The datetime in rfc3339 format of the current build
-    pub const DATETIME: Option<&str> = option_env!("AMAZON_Q_BUILD_DATETIME");
+    pub const DATETIME: Option<&str> = option_env!("NERV_BUILD_DATETIME");
 
     /// If `fish` tests should be skipped — always true under v0.6 since
     /// fish is a v2.0 target (PLAN.md §4 비목표 / v1 이후).
@@ -75,7 +69,7 @@ pub mod build {
 
     /// If `shellcheck` tests should be skipped
     pub const SKIP_SHELLCHECK_TESTS: bool =
-        option_env!("AMAZON_Q_BUILD_SKIP_SHELLCHECK_TESTS").is_some();
+        option_env!("NERV_BUILD_SKIP_SHELLCHECK_TESTS").is_some();
 }
 
 /// macOS specific constants
@@ -87,13 +81,13 @@ pub mod macos {
 }
 
 pub mod linux {
-    pub const DESKTOP_ENTRY_NAME: &str = "amazon-q.desktop";
+    pub const DESKTOP_ENTRY_NAME: &str = "nerv.desktop";
 
     /// Name of the deb package.
-    pub const PACKAGE_NAME: &str = "amazon-q";
+    pub const PACKAGE_NAME: &str = "nerv";
 
     /// The wm_class used for the application windows.
-    pub const DESKTOP_APP_WM_CLASS: &str = "Amazon-q";
+    pub const DESKTOP_APP_WM_CLASS: &str = "Nerv";
 }
 
 pub mod env_var {
@@ -108,42 +102,46 @@ pub mod env_var {
         }
     }
 
+    // CLAUDE.md §4 invariant: absorbed crates must reroute Q_* env vars
+    // to NERV_* on activation. The figterm PTY shim (nerv-pty) is the
+    // active consumer here; downstream users who set the old Q_* names
+    // will see no effect.
     define_env_vars! {
-        /// The UUID of the current parent qterm instance
-        QTERM_SESSION_ID = "QTERM_SESSION_ID",
+        /// The UUID of the current parent nerv-pty instance.
+        NERV_PTY_SESSION_ID = "NERV_PTY_SESSION_ID",
 
-        /// The current parent socket to connect to
-        Q_PARENT = "Q_PARENT",
+        /// The current parent socket to connect to.
+        NERV_PARENT = "NERV_PARENT",
 
-        /// Set the [`Q_PARENT`] parent socket to connect to
-        Q_SET_PARENT = "Q_SET_PARENT",
+        /// Set the [`NERV_PARENT`] parent socket to connect to.
+        NERV_SET_PARENT = "NERV_SET_PARENT",
 
-        /// Guard for the [`Q_SET_PARENT`] check
-        Q_SET_PARENT_CHECK = "Q_SET_PARENT_CHECK",
+        /// Guard for the [`NERV_SET_PARENT`] check.
+        NERV_SET_PARENT_CHECK = "NERV_SET_PARENT_CHECK",
 
-        /// Set if qterm is running, contains the version
-        Q_TERM = "Q_TERM",
+        /// Set if nerv-pty is running, contains the version.
+        NERV_TERM = "NERV_TERM",
 
-        /// Sets the current log level
-        Q_LOG_LEVEL = "Q_LOG_LEVEL",
+        /// Sets the current log level.
+        NERV_LOG_LEVEL = "NERV_LOG_LEVEL",
 
-        /// Overrides the ZDOTDIR environment variable
-        Q_ZDOTDIR = "Q_ZDOTDIR",
+        /// Overrides the ZDOTDIR environment variable.
+        NERV_ZDOTDIR = "NERV_ZDOTDIR",
 
-        /// Indicates a process was launched by Amazon Q
-        PROCESS_LAUNCHED_BY_Q = "PROCESS_LAUNCHED_BY_Q",
+        /// Indicates a process was launched by Nerv.
+        PROCESS_LAUNCHED_BY_NERV = "PROCESS_LAUNCHED_BY_NERV",
 
-        /// The shell to use in qterm
-        Q_SHELL = "Q_SHELL",
+        /// The shell to use in nerv-pty.
+        NERV_SHELL = "NERV_SHELL",
 
-        /// Indicates the user is debugging the shell
-        Q_DEBUG_SHELL = "Q_DEBUG_SHELL",
+        /// Indicates the user is debugging the shell.
+        NERV_DEBUG_SHELL = "NERV_DEBUG_SHELL",
 
-        /// Indicates the user is using zsh autosuggestions which disables Inline
-        Q_USING_ZSH_AUTOSUGGESTIONS = "Q_USING_ZSH_AUTOSUGGESTIONS",
+        /// Indicates the user is using zsh autosuggestions which disables Inline.
+        NERV_USING_ZSH_AUTOSUGGESTIONS = "NERV_USING_ZSH_AUTOSUGGESTIONS",
 
         /// Overrides the path to the bundle metadata released with certain desktop builds.
-        Q_BUNDLE_METADATA_PATH = "Q_BUNDLE_METADATA_PATH"
+        NERV_BUNDLE_METADATA_PATH = "NERV_BUNDLE_METADATA_PATH"
     }
 }
 

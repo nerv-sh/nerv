@@ -2,7 +2,6 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::Mutex;
 
-use nerv_util::CHAT_BINARY_NAME;
 use thiserror::Error;
 use tracing::info;
 use tracing::level_filters::LevelFilter;
@@ -14,7 +13,7 @@ use tracing_subscriber::{EnvFilter, Registry, fmt};
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 const DEFAULT_FILTER: LevelFilter = LevelFilter::ERROR;
 
-static Q_LOG_LEVEL_GLOBAL: Mutex<Option<String>> = Mutex::new(None);
+static NERV_LOG_LEVEL_GLOBAL: Mutex<Option<String>> = Mutex::new(None);
 static MAX_LEVEL: Mutex<Option<LevelFilter>> = Mutex::new(None);
 static ENV_FILTER_RELOADABLE_HANDLE: Mutex<
     Option<tracing_subscriber::reload::Handle<EnvFilter, Registry>>,
@@ -50,7 +49,6 @@ pub struct LogArgs<T: AsRef<Path>> {
 pub struct LogGuard {
     _file_guard: Option<WorkerGuard>,
     _stdout_guard: Option<WorkerGuard>,
-    _mcp_file_guard: Option<WorkerGuard>,
 }
 
 /// Initialize our application level logging using the given LogArgs.
@@ -67,8 +65,6 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
         .lock()
         .unwrap()
         .replace(reloadable_handle);
-    let mut mcp_path = None;
-
     // First we construct the file logging layer if a file name was provided.
     let (file_layer, _file_guard) = match args.log_file_path {
         Some(log_file_path) => {
@@ -76,9 +72,6 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
 
             // Make the log path parent directory if it doesn't exist.
             if let Some(parent) = log_path.parent() {
-                if log_path.ends_with(format!("{CHAT_BINARY_NAME}.log")) {
-                    mcp_path = Some(parent.to_path_buf());
-                }
                 std::fs::create_dir_all(parent)?;
             }
 
@@ -129,63 +122,19 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
         (None, None)
     };
 
-    // Set up for mcp servers layer if we are in chat
-    let (mcp_server_layer, _mcp_file_guard) = if let Some(parent) = mcp_path {
-        let mcp_path = parent.join("mcp.log");
-        if args.delete_old_log_file {
-            std::fs::remove_file(&mcp_path).ok();
-        } else if mcp_path.exists() && std::fs::metadata(&mcp_path)?.len() > MAX_FILE_SIZE {
-            std::fs::remove_file(&mcp_path)?;
-        }
-        let file = if args.delete_old_log_file {
-            File::create(&mcp_path)?
-        } else {
-            File::options().append(true).create(true).open(&mcp_path)?
-        };
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = file.metadata() {
-                let mut permissions = metadata.permissions();
-                permissions.set_mode(0o600);
-                file.set_permissions(permissions).ok();
-            }
-        }
-        let (non_blocking, guard) = tracing_appender::non_blocking(file);
-        let file_layer = fmt::layer()
-            .with_line_number(true)
-            .with_writer(non_blocking)
-            .with_filter(EnvFilter::new("mcp=trace"));
-        (Some(file_layer), Some(guard))
-    } else {
-        (None, None)
-    };
-
     if let Some(level) = args.log_level {
         set_log_level(level)?;
     }
 
-    // Finally, initialize our logging
-    let subscriber = tracing_subscriber::registry()
+    tracing_subscriber::registry()
         .with(reloadable_filter_layer)
         .with(file_layer)
-        .with(stdout_layer);
-
-    if let Some(mcp_server_layer) = mcp_server_layer {
-        subscriber.with(mcp_server_layer).init();
-        return Ok(LogGuard {
-            _file_guard,
-            _stdout_guard,
-            _mcp_file_guard,
-        });
-    }
-
-    subscriber.init();
+        .with(stdout_layer)
+        .init();
 
     Ok(LogGuard {
         _file_guard,
         _stdout_guard,
-        _mcp_file_guard,
     })
 }
 
@@ -196,13 +145,13 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
 ///
 /// Returns a string identifying the current log level.
 pub fn get_log_level() -> String {
-    Q_LOG_LEVEL_GLOBAL
+    NERV_LOG_LEVEL_GLOBAL
         .lock()
         .unwrap()
         .clone()
         .unwrap_or_else(|| {
             nerv_os::Env::new()
-                .q_log_level()
+                .nerv_log_level()
                 .unwrap_or_else(|_| DEFAULT_FILTER.to_string())
         })
 }
@@ -216,7 +165,7 @@ pub fn set_log_level(level: String) -> Result<String, Error> {
     info!("Setting log level to {level:?}");
 
     let old_level = get_log_level();
-    *Q_LOG_LEVEL_GLOBAL.lock().unwrap() = Some(level);
+    *NERV_LOG_LEVEL_GLOBAL.lock().unwrap() = Some(level);
 
     let filter_layer = create_filter_layer();
     *MAX_LEVEL.lock().unwrap() = filter_layer.max_level_hint();
@@ -251,11 +200,11 @@ pub fn get_log_level_max() -> LevelFilter {
 fn create_filter_layer() -> EnvFilter {
     let directive = Directive::from(DEFAULT_FILTER);
 
-    let log_level = Q_LOG_LEVEL_GLOBAL
+    let log_level = NERV_LOG_LEVEL_GLOBAL
         .lock()
         .unwrap()
         .clone()
-        .or_else(|| nerv_os::Env::new().q_log_level().ok());
+        .or_else(|| nerv_os::Env::new().nerv_log_level().ok());
 
     match log_level {
         Some(level) => EnvFilter::builder()

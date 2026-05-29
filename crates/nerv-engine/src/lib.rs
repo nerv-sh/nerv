@@ -29,6 +29,9 @@ pub mod spec_parser;
 
 pub mod frecency;
 
+#[cfg(feature = "quickjs")]
+pub mod tier_c;
+
 pub use complete::{CompleteResult, SpecRegistry, complete, complete_in};
 pub use config::{MatchMode, MatchingConfig};
 pub use frecency::FrecencyStore;

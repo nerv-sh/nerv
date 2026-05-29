@@ -13,7 +13,7 @@ use nerv_proto::figterm::{self, FigtermRequestMessage, FigtermResponseMessage, T
 use nerv_proto::remote::{Clientbound, Hostbound, clientbound, hostbound};
 use nerv_term::Term;
 use nerv_term::term::ShellState;
-use nerv_util::env_var::PROCESS_LAUNCHED_BY_Q;
+use nerv_util::env_var::PROCESS_LAUNCHED_BY_NERV;
 use tokio::process::Command;
 use tracing::{debug, error, trace, warn};
 
@@ -110,7 +110,7 @@ fn create_command(executable: impl AsRef<Path>, working_directory: impl AsRef<Pa
     cmd.env_remove("CLICOLOR");
     cmd.env_remove("COLORTERM");
     cmd.envs([
-        (PROCESS_LAUNCHED_BY_Q, "1"),
+        (PROCESS_LAUNCHED_BY_NERV, "1"),
         ("HISTFILE", ""),
         ("HISTCONTROL", "ignoreboth"),
         ("TERM", "xterm-256color"),
