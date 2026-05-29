@@ -1136,6 +1136,34 @@ fn emit_candidates_for_arg(
                         }
                     }
                 }
+                #[cfg(feature = "quickjs")]
+                crate::spec_parser::Generator::Custom {
+                    source: Some(source),
+                    ..
+                } => {
+                    // Tier C: spin up a fresh QuickJS sandbox per call,
+                    // run the captured closure with the live token list,
+                    // and surface returned strings. Soft-fail on any
+                    // error (parse / throw / timeout / non-array) —
+                    // the dispatcher just falls through to the next
+                    // generator or the smart fallback.
+                    let token_strs: Vec<String> = tokens.iter().map(|a| a.text.clone()).collect();
+                    if let Some(cands) = crate::tier_c::execute_custom_source(source, &token_strs) {
+                        out.extend(
+                            cands
+                                .into_iter()
+                                .filter(|s| matches_name(s, prefix, mode))
+                                .map(|s| Suggestion {
+                                    insertion: s.clone(),
+                                    display: s,
+                                    description: None,
+                                    kind: SuggestionKind::Argument,
+                                    priority: None,
+                                    icon: None,
+                                }),
+                        );
+                    }
+                }
                 crate::spec_parser::Generator::ZoxideQuery => {
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
@@ -3762,6 +3790,123 @@ mod tests {
         let s = dir_summary(&tmp);
         assert!(s.ends_with("+ items"), "expected truncated label: {s}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Tier C closure dispatch — only compiled under `--features
+    /// quickjs`. Default builds skip these (the arm itself is feature-
+    /// gated; without it the `Custom` variant falls through to the
+    /// catch-all and emits zero candidates, which the
+    /// `custom_without_feature_falls_through` test below verifies).
+    #[cfg(feature = "quickjs")]
+    mod tier_c_dispatch {
+        use super::*;
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+
+        fn spec_with_custom(source: &str) -> Subcommand {
+            Subcommand {
+                name: "x".into(),
+                args: vec![Arg {
+                    name: Some("opt".into()),
+                    generators: vec![Generator::Custom {
+                        description_hint: None,
+                        source: Some(source.into()),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn closure_returns_string_array() {
+            // Engine post-sorts emitted candidates alphabetically;
+            // assert on the sorted set rather than insertion order.
+            let src = r#"(() => ["main", "dev", "feature/x"])()"#;
+            let r = complete("x ", 2, &registry_with(spec_with_custom(src)));
+            let mut names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+            names.sort();
+            assert_eq!(names, ["dev", "feature/x", "main"]);
+        }
+
+        #[test]
+        fn closure_sees_tokens_via_global() {
+            // Closures that capture the live token list reach it via
+            // `globalThis.__nerv_tokens`. Lower-case each token so the
+            // case-sensitive prefix gate still admits the result.
+            let src = "(tokens => tokens.map(t => t.toLowerCase()))(globalThis.__nerv_tokens)";
+            let r = complete("x gi", 4, &registry_with(spec_with_custom(src)));
+            let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+            // Tokens are ["x", "gi"]; lower-cased → ["x", "gi"]. The
+            // current-token prefix is "gi" → only "gi" survives the
+            // matches_name (prefix) gate.
+            assert_eq!(names, ["gi"]);
+        }
+
+        #[test]
+        fn closure_throw_falls_through_silently() {
+            let src = r#"(() => { throw new Error("boom") })()"#;
+            let r = complete("x ", 2, &registry_with(spec_with_custom(src)));
+            assert!(r.items.is_empty());
+        }
+
+        #[test]
+        fn closure_with_no_source_is_skipped() {
+            // Generator::Custom without `source` — the Tier C arm
+            // doesn't match, so no candidates emit. The smart
+            // filepaths fallback might fire if arg.name implies a
+            // path; here arg name is "opt" so nothing kicks in.
+            let spec = Subcommand {
+                name: "x".into(),
+                args: vec![Arg {
+                    name: Some("opt".into()),
+                    generators: vec![Generator::Custom {
+                        description_hint: None,
+                        source: None,
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let r = complete("x ", 2, &registry_with(spec));
+            assert!(r.items.is_empty());
+        }
+
+        #[test]
+        fn closure_extracts_name_from_object_array() {
+            // Fig closures often return `[{name, description}]` — the
+            // tier_c extractor reads the `name` field.
+            let src = r#"(() => [{ name: "alpha" }, { name: "beta" }])()"#;
+            let r = complete("x ", 2, &registry_with(spec_with_custom(src)));
+            let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+            assert_eq!(names, ["alpha", "beta"]);
+        }
+    }
+
+    /// When the `quickjs` feature is OFF (default), a `Generator::Custom`
+    /// with `source: Some(...)` still parses cleanly and emits no
+    /// candidates. This locks in the wire-compat guarantee: converter
+    /// JSON written by a quickjs-aware build is still loadable by the
+    /// quickjs-free default binary.
+    #[cfg(not(feature = "quickjs"))]
+    #[test]
+    fn custom_with_source_loads_in_default_build() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("opt".into()),
+                generators: vec![Generator::Custom {
+                    description_hint: None,
+                    source: Some(r#"(() => ["unused"])()"#.into()),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        // Default build: no Tier C arm, no candidates. (smart
+        // filepaths fallback ignores arg.name = "opt".)
+        assert!(r.items.is_empty());
     }
 
     #[test]
