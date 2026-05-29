@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { detectAwsJsonPath, detectAwsListCustom } from "./convert";
+import {
+  detectAwsJsonPath,
+  detectAwsListCustom,
+  detectFilepathsGenerator,
+} from "./convert";
 
 describe("detectAwsJsonPath", () => {
   test("captures parent_key + id_field from canonical aws postProcess", () => {
@@ -158,5 +162,87 @@ describe("detectAwsListCustom", () => {
       parent_key: "StackResourceSummaries",
       id_field: "LogicalResourceId",
     });
+  });
+});
+
+describe("detectFilepathsGenerator", () => {
+  // The real @fig/autocomplete-generators filepaths closure spawns
+  // `ls` with the literal flag array `["-1ApL"]`. The recognizer
+  // anchors on that exact 7-char substring (incl. quotes).
+  // Bun's runtime aggressively dead-code-eliminates closure bodies
+  // (unused `const`s vanish from toString output, equality of two
+  // string literals constant-folds away). To exercise the recognizer
+  // from a Bun runtime test we hand it a literal Function constructed
+  // from source — this preserves the source verbatim.
+  const fnFromSrc = (body: string) =>
+    new Function("_t", "_exec", `async function inner(){${body}}; return inner();`);
+
+  test("detects folders-only closure (cd-style)", () => {
+    const g = {
+      custom: fnFromSrc(
+        `const data = await _exec({ command: "ls", args: ["-1ApL"] });
+         const showFolders = "only";
+         return data.stdout.split("\\n").filter((s) => s.endsWith("/"));`,
+      ),
+    };
+    expect(detectFilepathsGenerator(g)).toEqual({
+      kind: "filepaths",
+      foldersOnly: true,
+    });
+  });
+
+  test("detects file-and-folder closure (cat-style)", () => {
+    const g = {
+      custom: fnFromSrc(
+        `const data = await _exec({ command: "ls", args: ["-1ApL"] });
+         return data.stdout.split("\\n").map((s) => ({ name: s }));`,
+      ),
+    };
+    expect(detectFilepathsGenerator(g)).toEqual({
+      kind: "filepaths",
+      foldersOnly: false,
+    });
+  });
+
+  test("detects via triple-equal showFolders compare", () => {
+    const g = {
+      custom: fnFromSrc(
+        `const showFolders = pickMode();
+         const data = await _exec({ command: "ls", args: ["-1ApL"] });
+         return data.stdout.split("\\n").filter((s) =>
+           showFolders === "only" ? s.endsWith("/") : true,
+         );`,
+      ),
+    };
+    expect(detectFilepathsGenerator(g)).toEqual({
+      kind: "filepaths",
+      foldersOnly: true,
+    });
+  });
+
+  test("returns null when the signature ls flag is missing", () => {
+    const g = {
+      custom: fnFromSrc(
+        `const data = await _exec({ command: "ls" });
+         return data.stdout.split("\\n").map((s) => ({ name: s }));`,
+      ),
+    };
+    expect(detectFilepathsGenerator(g)).toBeNull();
+  });
+
+  test("returns null when custom is absent", () => {
+    expect(detectFilepathsGenerator({})).toBeNull();
+    expect(detectFilepathsGenerator({ template: "filepaths" })).toBeNull();
+  });
+
+  test("returns null for null / non-object input", () => {
+    expect(detectFilepathsGenerator(null)).toBeNull();
+    expect(detectFilepathsGenerator(undefined)).toBeNull();
+    expect(detectFilepathsGenerator("filepaths")).toBeNull();
+  });
+
+  test("returns null when custom is present but not a function", () => {
+    expect(detectFilepathsGenerator({ custom: "ls -1ApL" })).toBeNull();
+    expect(detectFilepathsGenerator({ custom: 42 })).toBeNull();
   });
 });
