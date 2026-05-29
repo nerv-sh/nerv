@@ -194,7 +194,7 @@ fn check_zsh_env_compat() -> Result<(), String> {
                     or run: ZSH_VERSION=\"$ZSH_VERSION\" eval \"$(nerv init zsh)\""
             .into());
     }
-    let (major, minor) = parse_zsh_version_compat(&ver);
+    let (major, minor) = parse_zsh_version(&ver);
     if major > 5 || (major == 5 && minor >= 8) {
         return Ok(());
     }
@@ -222,13 +222,6 @@ fn detect_zsh_version_via_shell() -> Option<String> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     text.split_whitespace().nth(1).map(|s| s.to_string())
-}
-
-fn parse_zsh_version_compat(s: &str) -> (u32, u32) {
-    let mut it = s.split('.');
-    let major = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    let minor = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    (major, minor)
 }
 
 /// E4 (error-states.md §3.4): scan env for known widget-conflict
@@ -1158,21 +1151,6 @@ mod tests {
         assert_eq!(parse_zsh_version("nope"), (0, 0));
         // Leading non-numeric major still degrades cleanly.
         assert_eq!(parse_zsh_version("v5.8"), (0, 8));
-    }
-
-    /// `parse_zsh_version_compat` is a parallel parser the compat
-    /// check uses. Mirror behaviour with the public `parse_zsh_version`
-    /// so a future merge / dedup of the two routines doesn't drift
-    /// semantics.
-    #[test]
-    fn parse_zsh_version_compat_matches_parse_zsh_version() {
-        for s in ["5.8", "5.9.1", "5.8.2-1", "4.3.11", "", "garbage"] {
-            assert_eq!(
-                parse_zsh_version(s),
-                parse_zsh_version_compat(s),
-                "mismatch on {s:?}",
-            );
-        }
     }
 
     /// `count_tree` walks the spec tree and returns (subs, opts). The
