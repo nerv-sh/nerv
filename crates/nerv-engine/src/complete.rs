@@ -1757,9 +1757,15 @@ fn cargo_targets(
 
 /// Per-cwd cache for `cargo metadata` raw output. Keyed by cwd
 /// (canonicalized), TTL 5s. Lives separately from
-/// [`GENERATOR_CACHE`] because that cache routes JSON-shaped output
-/// through `extract_json_candidates`, which would lose the nested
+/// [`GENERATOR_CACHE`] because that cache splits stdout by lines
+/// and routes `{`-prefixed payloads through `extract_json_candidates`
+/// — both transforms would destroy the nested
 /// `packages[*].targets[*]` structure cargo_targets needs.
+///
+/// Bounded with the same LRU policy as `GENERATOR_CACHE`
+/// ([`GENERATOR_CACHE_MAX`] entries, oldest-evicted on overflow)
+/// so a long-running daemon that the user `cd`s through dozens of
+/// cargo workspaces doesn't leak.
 static CARGO_METADATA_CACHE: std::sync::LazyLock<
     std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, String)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
@@ -1788,6 +1794,15 @@ fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
     }
     let blob = String::from_utf8_lossy(&buf).into_owned();
     if let Ok(mut cache) = CARGO_METADATA_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
         cache.insert(canon, (std::time::Instant::now(), blob.clone()));
     }
     Some(blob)
