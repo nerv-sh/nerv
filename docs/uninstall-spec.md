@@ -282,6 +282,19 @@ PRD v0.6 §5.8 의 opt-in path 가 활성화되면 (`nerv init zsh --pty`) 본 �
 |---|------|---------------|----------|-------------------|
 | 8 | PTY shim 바이너리 | `~/.local/bin/nerv-pty` | `nerv init zsh --pty` | 삭제 |
 | 9 | pre.sh 의 `exec -a "<shell> (nerv-pty)" nerv-pty` 라인 | `~/.zshrc` 의 마커 블록 내부 (또는 `nerv-integrations/pre.sh` 가 sourcing 된 위치) | `nerv init zsh --pty` | 삭제 |
+| 10 | runtime 소켓 디렉터리 | `$XDG_RUNTIME_DIR/nervrun/` (Linux) / `$TMPDIR/nervrun/` (macOS) | `nerv-pty` 첫 기동 | 삭제 |
+| 11 | data 디렉터리 | `~/Library/Application Support/nerv/` (macOS) / `$XDG_DATA_HOME/nerv/` (Linux) | `nerv-pty` settings/state | **보존** |
+
+**브랜드 정합 참고**: figterm path 가 활성화되면 다음 env var 와 설정
+키가 사용자 환경에 잔존할 수 있다 — uninstall 은 이들을 *직접*
+지우지 않지만 figterm 종료 후 다음 셸 세션에는 영향이 없다 (process
+env 한정):
+
+- env vars: `NERV_PTY_SESSION_ID`, `NERV_PARENT`, `NERV_TERM`,
+  `NERV_SHELL`, `PROCESS_LAUNCHED_BY_NERV` (figterm 이 child shell 에
+  주입 — 셸 종료 시 사라짐)
+- settings keys: `pty.enabled`, `pty.csi-u.enabled` (data 디렉터리의
+  `settings.json` — `--keep-config` 가 아닐 때만 삭제 대상)
 
 uninstall 절차 (§4) 에 PTY shim 종료 단계 추가:
 
@@ -299,3 +312,4 @@ opt-in 사용자만 §11 추가분도 검증 대상.
 
 *문서 v1.1 — PLAN.md v0.5 §5.4 인수 기준의 정밀 명세. v1.0 → v1.1 변경: §2 인벤토리에서 LaunchAgent 제거 (v1.0 비대상), §4 절차에서 LaunchAgent 단계 삭제, 단계 번호 9→8 재정렬. 변경 트리거: M0-1 PoC 결과로 데몬 IPC 구조 변경 시, LaunchAgent 자동 기동 도입 (PLAN v?.x) 시.*
 *v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: §2 / §3 / §10 에 v0.6 구현 매핑 행 추가 (nerv-shell + nerv-integrations + nerv-log 흡수 정합), §11 신설 (M1 figterm opt-in 시 인벤토리 추가분 + uninstall 절차 단계 2.5). 본문 인수 기준 자체는 변경 없음 (PRD §5.4 그대로). 변경 트리거: figterm M1 도입 commit, LaunchAgent 자동 기동 도입.*
+*v1.4 — 브랜드 strip 정합. §11 에 runtime 소켓 디렉터리 (`$XDG_RUNTIME_DIR/nervrun/`, 이전 `cwrun`) 와 data 디렉터리 (`~/Library/Application Support/nerv/`, 이전 `amazon-q`) 행 추가 + figterm path env vars / settings keys 잔존 정책 절 신설. 인수 기준 / 절차 자체는 무변경 — Q→NERV 리네이밍 결과를 인벤토리에 반영한 정합 갱신. 변경 트리거: figterm runtime 정합 dogfooding 결과로 추가 인벤토리 발견 시.*

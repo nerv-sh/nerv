@@ -72,6 +72,23 @@
 | 이미지 프로토콜 (Sixel, Kitty graphics, iTerm2 imgcat) | v1 비목표 |
 | Hyperlink (OSC 8) | tmux 패스스루 미흡, 대신 텍스트 URL |
 
+### 3.1 글리프 폭 (icon)
+
+추천 popup 의 각 행은 `" <icon> <display> <pad> "` 로 leading slot
+하나를 icon 에 할당. 위젯은 **모든 non-ASCII glyph 를 2 cells 폭** 으로
+가정하고 ASCII row 에는 trailing space 1칸을 padding 으로 더한다 (행
+정렬 보존). 따라서 엔진의 `sanitize_icon` 이 다음을 *반드시* 보장한다:
+
+- ASCII 1글자 만 통과 (`$`, `>` 등) — width 1, 슬롯 1 cell + pad
+- non-ASCII 는 `unicode-width` width == 2 만 통과 (📦 📝 中 등 4-byte
+  supplementary emoji + CJK ideograph). Ambiguous-width (UAX #11 의 A)
+  나 Latin-extended (`à`, `é`) 는 width 1 로 렌더돼 행이 1 cell 밀리므로
+  거부. zero-width combiner / VS-16 같은 다중 codepoint sequence 도 거부
+  (≤4 byte 게이트가 차단).
+
+위젯 정렬 contract 가 깨지면 popup 우측 border (`│`) 가 한 cell 클리핑돼
+즉시 시각적 회귀로 잡힌다.
+
 ---
 
 ## 4. 렌더 전략 (요약)
@@ -294,3 +311,4 @@ M0 / 매 마이너 릴리즈마다 다음 체크리스트:
 
 *문서 v1.1 — PLAN.md v0.5 §11 의 정밀 명세. v1.0 → v1.1 변경: §1 매트릭스에서 Warp / VS Code / JetBrains / Hyper 제거 (Triage 정책으로 대체), §5.1 iTcerm2 오타 수정, §5.4 위치 계산 일반 원칙으로 통합. M0-5 에 zsh-autosuggestions 공존 e2e 시나리오 추가 (PLAN v0.5 정합).*
 *v1.2 — PLAN.md v0.6 정합. PRD §5.8 figterm opt-in 도입으로 §6.4 신설 (M1 nerv-pty path 와 ZLE path 의 차이 + 상호 배타 + Apple 서명 요건 + 베스트에포트 격상 검토). §1 매트릭스 자체는 변경 없음 (M0 기준 유지). 변경 트리거: figterm 의 M1 dogfooding 결과로 베스트에포트 → 보장 격상.*
+*v1.3 — §3.1 신설 (icon glyph width contract — `sanitize_icon` 이 unicode-width width==2 강제, ambiguous-width 거부). 위젯의 "non-ASCII = 2 cells" 가정을 엔진이 책임지는 contract 를 명시. 변경 트리거: 5th wire 필드 도입 (per-row width 명시 전송) 시 본 절 deprecate.*
