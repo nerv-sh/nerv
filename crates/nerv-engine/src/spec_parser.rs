@@ -344,6 +344,40 @@ pub enum Generator {
         #[serde(default)]
         kind: Option<String>,
     },
+    /// Well-known: script-form generators (e.g. aws ec2 / iam) whose
+    /// `postProcess` closure runs `JSON.parse(stdout)[parentKey]` then
+    /// maps to either each element directly or `elm[idField]`. The
+    /// Rust engine recovers the same shape without a JS runtime:
+    /// run `script`, parse stdout as JSON, walk to `parent_key`,
+    /// emit either the array elements (when `id_field` is None) or
+    /// `array[i][id_field]`.
+    ScriptWithJsonPath {
+        script: Vec<String>,
+        parent_key: String,
+        #[serde(default)]
+        id_field: Option<String>,
+    },
+    /// Well-known: aws `listCustomGenerator(tokens, exec, command,
+    /// options, parentKey, childKey)` family. The helper is locally
+    /// defined per aws spec file (lambda.ts / iam.ts / cloudformation.ts
+    /// / …) but the data shape is uniform: build
+    /// `aws <service> <verb> [<flag> <token-after-flag>]*`, run it,
+    /// then walk into `parent_key` of the JSON response and project
+    /// to `id_field`. Captured as data so no JS runtime is needed.
+    ///
+    /// `lookup_flags` lists option names whose value the closure pulls
+    /// from the currently-typed tokens (e.g. `--function-name` is
+    /// matched against `tokens` and the next token after it becomes
+    /// the CLI value).
+    AwsList {
+        service: String,
+        verb: String,
+        #[serde(default)]
+        lookup_flags: Vec<String>,
+        parent_key: String,
+        #[serde(default)]
+        id_field: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,8 @@
   "scripts": {
     "convert": "NODE_PATH=$PWD/node_modules bun convert.ts",
     "convert:one": "NODE_PATH=$PWD/node_modules bun convert.ts --input ../../vendor/withfig-autocomplete/src/hostname.ts --output /tmp/hostname.json",
-    "convert:all": "NODE_PATH=$PWD/node_modules bun convert.ts --input ../../vendor/withfig-autocomplete/src/ --output ../../crates/nerv-engine/tests/fixtures/converted/ --verbose"
+    "convert:all": "NODE_PATH=$PWD/node_modules bun convert.ts --input ../../vendor/withfig-autocomplete/src/ --output ../../crates/nerv-engine/tests/fixtures/converted/ --verbose",
+    "test": "bun test"
   },
   "devDependencies": {
     "@withfig/autocomplete-types": "^1.31.0"

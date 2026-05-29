@@ -24,14 +24,25 @@ Nerv brings back the original promise: **press a key, see the next token. That's
 - Available on Linux, Windows, or in shells other than zsh
 - Configurable via a `nerv config` command (edit TOML directly)
 
-## Install (when v1.0 ships)
+## Install
+
+Alpha releases ship as signed-pending ARM-only tarballs via Homebrew tap:
 
 ```sh
-brew install nerv-sh/tap/nerv
+brew tap nerv-sh/tap
+brew install nerv
 eval "$(nerv init zsh)"
+nerv start
 ```
 
-That's the whole installation. To leave:
+`brew services start nerv` keeps `nervd` alive across restarts (optional).
+Run `nerv doctor` to verify the install.
+
+> macOS Gatekeeper will warn on first launch — Apple Developer ID signing
+> arrives in a later alpha (M0-8). Until then, allow the binary in
+> System Settings → Privacy & Security.
+
+To leave:
 
 ```sh
 nerv uninstall

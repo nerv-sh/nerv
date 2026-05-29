@@ -117,7 +117,7 @@ M1 = 1,484 전체 자동 Tier 분류.
 - **Argument parser**: `autocomplete-parser/parseArguments.ts` (32 KB, 800+ LOC 상태머신) → Rust 포팅 (`nerv-engine/src/spec_parser.rs`).
 - **Matching**:
   - 기본 = prefix (`git co` → `commit` / `config`, 단 `checkout` 은 `git ch` 에서만)
-  - 옵션 = fuzzy (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`, M1)
+  - 옵션 = fuzzy (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`) — 활성 시 case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드, config 편집은 재시작 필요. spec per-arg `filterStrategy: "substring"` 은 user mode 무관 우선.
 - **Tier C 동적 generator UX** (M0 — rquickjs 도입 전):
   ```
   ⤷ 동적 완성은 v1.1에서 지원 예정 — 직접 입력하세요
@@ -335,7 +335,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 - **release.yml** — `v*.*.*` tag push → macos-14 빌드 + tarball + sha256 + GitHub Release 자동 생성
 - **e2e-isolated.sh 스모크 하네스** — 격리 `/tmp/nerv-test/.zshrc` zsh 진입
 
-Rquickjs Tier C 는 closure JSON 미직렬화 + deno_core 금지 정책으로 영구 deferred. M1 0-10주차 작업 대부분 선행 완료 — figterm opt-in (M1 5-10주차) + 서명/공증 인프라 (M0-8) + Homebrew tap 만 남음.
+**완전한** Tier C (closure body 임의 JS 실행) 는 deno_core 금지 + closure 가 token/scope 컨텍스트 잡아서 JSON serialize 불가 → rquickjs 도입 전까지 deferred. **단 패턴 기반 데이터 캡처 (`ScriptWithJsonPath`, `KubectlResources`, `PackageJsonScripts` 등) 는 별개 우회로** — ts-to-json 이 closure 시그니처 인식 → 의미를 추출하면 Rust 가 JS 없이 동등 결과. M1 0-10주차 작업 대부분 선행 완료 — figterm opt-in (M1 5-10주차) + 서명/공증 인프라 (M0-8) 만 남음 (Homebrew tap 인프라는 alpha 단계 완료).
 
 **M0-2 Fig 흡수 결과 의사결정 트리**:
 
@@ -364,7 +364,7 @@ v0.5.1 의 M1 (16주) 단축. Fig 엔진 흡수로 0–6주차 작업 80% 제거
 - v1.1: SQLite frecency 학습
 - v1.1: `nerv spec list --changes`
 - v1.2: **bash 지원** (figterm 경유, M1 인프라 재활용)
-- v1.2: fuzzy matching 정식 기능
+- v1.2: fuzzy matching 정식 기능 (M1 opt-in 완료, v1.2 = 기본값 검토 / ranker tuning)
 - v1.3: Linux (figterm Linux PTY 지원 — `fig_remote_ipc` strip 분 일부 회복 검토)
 - v2.0: fish
 - v2.x: spec 레지스트리, `nerv config`

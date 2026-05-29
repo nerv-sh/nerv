@@ -157,6 +157,7 @@ rusqlite = { version = "0.32.1", features = ["bundled", "serde_json"] }
 semver = { version = "1.0.26", features = ["serde"] }
 shell-color = "1.0.0"
 shellexpand = "3.0.0"
+notify = { version = "7.0", default-features = false, features = ["macos_fsevent"] }
 shlex = "1.3.0"
 strum = { version = "0.27.1", features = ["derive"] }
 sysinfo = "0.33.1"

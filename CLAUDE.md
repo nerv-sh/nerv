@@ -43,7 +43,7 @@
   - Tier A 440 / B 6 / C 246 자동 분류
   - **loadSpec depth=1 활성**: `aws ec2 <verb>`, `aws s3 <verb>`, `gcloud compute instances <verb>` 등 nested 자동완성 동작
   - cycle-safe (visited Set + MAX_DEPTH gate)
-- ✅ **SpecRegistry lazy load + mtime 기반 hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. negative cache + mtime check (~1µs/lookup overhead) — spec 재설치 시 daemon 재시작 불필요.
+- ✅ **SpecRegistry lazy load + 이벤트/mtime hybrid hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. macOS FSEvents (`notify` crate) 가 spec dir 변경 push → pending invalidations 세트에 stem 등록 → lookup() 가 drain + cache evict. mtime check 는 belt-and-suspenders (watcher 실패 / 이벤트 누락 시 fallback). spec 재설치 시 daemon 재시작 불필요 + 이벤트 latency 거의 0.
 - ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
 - ✅ **Tier B generator 실행**: 정적 shell command (예: `git branch --list`) → Rust 가 직접 spawn (200ms timeout) + TTL 5s LRU 64 cache (keystroke 마다 spawn 방지) + ANSI/git-marker line sanitization. Tier C (closure) 는 deno_core 비목표 정책 + closure JSON 직렬화 불가로 영구 defer.
 - ✅ **well-known Tier C → B 회복** (signature-based recognizer 5종):
@@ -52,6 +52,8 @@
   - `Generator::ZoxideQuery` — z/zoxide 2 spec. zoxide 우선, `~/.z` 폴백 (zsh-z 포맷). fuzzy substring (path+name).
   - **aggressive script-fn 회복** — function-form script 를 stub context 로 호출 → returns string[] 면 Template 으로 강제. **kubectl 27 / docker 117 / docker-compose 23 / gh 23 / aws 1006 generator** 회복.
   - **JSON output 자동 추출** — `gh --json=…` / `kubectl get -o json` 등 JSON 결과를 array-of-objects 로 읽고 `name/number/id/title/key/metadata.name` 우선 필드 추출.
+  - **`Generator::ScriptWithJsonPath`** — aws `postPrecessGenerator(out, parentKey, idField)` 패턴 인식. ts-to-json 이 postProcess source 에서 정규식으로 (parent_key, id_field) 캡처 → Rust 가 script spawn + JSON.parse + path 추출. 591 aws generator 회복 (iam list-users / ec2 describe-instances 등). closure body 자체 실행 없이 데이터로 우회.
+  - **`Generator::AwsList`** — aws `listCustomGenerator(tokens, exec, verb, options, parentKey, childKey)` 패턴 인식. token-aware. ts-to-json 이 파일경로에서 service 추출 + custom: closure source 에서 (verb, lookup_flags, parent_key, id_field) 캡처. Rust 가 런타임에 tokens 에서 flag 값 찾아 `aws <service> <verb> [<flag> <val>]*` 실행 + JSON 추출. 89 generator 회복 (cloudwatch list-metrics / lambda list-layer-versions 등). string-form / array-form 양쪽 지원.
 - ✅ **yarn-shorthand**: root args generator 를 subcommand emit 에 머지. `yarn web<Tab>` → `web:start/web:build:dev/...` (package.json scripts) + `yarn add` 같은 실제 subcommand 도 유지. additive merge + dedupe.
 - ✅ **cwd-aware IPC**: `Request::Complete.cwd: Option<String>` 추가. CLI bridge 가 `std::env::current_dir()` 채움. 데몬은 자기 cwd 대신 클라이언트 cwd 사용. `cd` 마다 daemon 재시작 불필요.
 - ✅ **UTF-8 char boundary 클램프**: `cursor` 가 multibyte (한글/CJK/emoji) 중간에 떨어질 때 `clamp_cursor_to_char_boundary` 로 직전 boundary 까지 감소. `'ㅊㅇ .'` 입력 시 패닉 → empty 응답.
@@ -69,21 +71,21 @@
   - `requiresSeparator` (67 spec) — `--color=` 강제, 위젯 insertion 에 `=` 첨가, parser 가 space-form 의 arg 바인딩 거부
   - `icon` (59 spec) — sanitize_icon 으로 `fig://*` URL strip + ≤4 byte 만 통과, 4-field wire format 로 위젯에 전달
   - `flagsArePosixNoncompliant` (41 spec) — go/docker/kubectl 스타일 `-foo` 를 long option 으로 라우팅
-  - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 v1.0 prefix 로 downgrade (M1 opt-in 까지)
+  - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 mode=Prefix 시 prefix downgrade / mode=Fuzzy 시 서브시퀀스
   - `getQueryTerm` (0 spec but infra ready) — `cargo search "tokio,serde"` 같은 delim split. 현재 Fig spec 은 closure form 만 쓰지만 M1 회복 시 사용 예정
 - ✅ **smart description fallback**: cd/z 같은 folder-only emit 의 footer 가 모두 "dir" 이던 문제. `dir_summary` 가 read_dir 1회로 `n items` / `empty` / `1 item` 출력. dotfile 제외, 200 entries cap (latency bound). 50µs/dir 추정.
+- ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. 서브커맨드/옵션/제너레이터 출력 전부 동일하게 게이트. 매칭 알고리즘: `nerv-engine::complete::matches_filter` + `matches_name`.
+- ✅ **Homebrew tap 인프라**: `packaging/homebrew/nerv.rb` Formula 템플릿 (ARM-only `aarch64-apple-darwin`, `brew services` 통합). `.github/workflows/homebrew-bump.yml` 가 GitHub release 발행 시 자동으로 `nerv-sh/homebrew-tap` 의 Formula 를 버전+sha256 갱신. 사용자 액션: tap repo 생성 + `HOMEBREW_TAP_TOKEN` PAT secret 추가.
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
-- Homebrew tap (`nerv-sh/homebrew-tap` repo + Formula)
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
 - bash / fish 지원 (큼)
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`)
-- E5 manifest, inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
-- fuzzy matching (M1 opt-in, `[matching] mode = "fuzzy"` 토글) — 현재는 spec 의 `filterStrategy: "fuzzy"` 도 prefix 로 downgrade
+- E5 manifest, spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
 - icon 글리프 width 보정 (emoji 2 col 시 alignment 1 cell 밀림 — 현재는 MVP tradeoff)
 - aws 624 closure-form generators (`rquickjs` opt-in 필요)
 
@@ -93,7 +95,7 @@
 
 | 영역 | 불변식 | 근거 |
 |------|--------|------|
-| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 M1 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). v1.0 코드 자체는 prefix only, fuzzy 코드 경로는 M1 도입 시 비활성 분기로 추가 | PLAN §5.1 / `nerv-engine/src/ranker.rs` 회귀 테스트 |
+| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). fuzzy 활성 시 case-insensitive 서브시퀀스. 데몬 부팅 시 1회 로드 — config 변경엔 재시작 필요 | PLAN §5.1 / `nerv-engine/src/config.rs` / `nerv-engine/src/complete.rs::matches_filter` |
 | 매칭 알고리즘 | 빈 prefix 는 모두 매치 (`git ⎵` 케이스) | first-5-min §1단계 |
 | 마커 블록 | `# >>> nerv >>>` ~ `# <<< nerv <<<` 는 **고정 문자열**. `fig_integrations` 흡수 시 marker 교체 필수 (Q 의 `# Fig pre block` 잔존 금지) | uninstall-spec §3 / `nerv-shell::MARKER_*` |
 | 경로 | `~/Library/Caches/nerv/`, `~/Library/Logs/nerv/`, `~/.config/nerv/` — `directories` 크레이트 사용 X (docs 가 contract). `fig_util` / `fig_log` / `fig_settings` 흡수 시 Q 기본 경로 (`~/.config/q/`, `~/Library/Caches/amzn/`) 전부 nerv 경로로 재배선 | uninstall-spec §2 / `nerv-engine/src/paths.rs` |
@@ -109,7 +111,7 @@
 | Rust | toolchain 1.85, **edition 2024** (upstream 정합). v0.5.1 의 edition 2021 폐기. 변경 시 PLAN §7 + `rust-toolchain.toml` + 본 §4 동시 갱신 | `rust-toolchain.toml` |
 | vendor 편집 | `vendor/withfig-autocomplete/` 와 `vendor/aws-autocomplete/` **양쪽 모두 직접 편집 금지**. 변경은 `vendor-patches/{upstream,self}/` 또는 upstream PR | spec-conversion-policy §5.2 |
 | icon sanitize | `Suggestion.icon` 은 절대 `fig://*` URL 통과 금지 — `sanitize_icon` 으로 strip. ≤4 byte (대략 emoji 1개 + ASCII 1글자) 만 허용. 위젯이 raw bytes 를 그대로 prefix 로 출력함 | `nerv-engine/src/complete.rs::sanitize_icon` |
-| filterStrategy fuzzy | `"fuzzy"` 값을 받으면 v1.0 에서는 prefix 로 silent downgrade. **fuzzy 코드 경로 자체 추가 금지** — M1 `[matching] mode = "fuzzy"` opt-in 까지 | PLAN §5.1 / `nerv-engine/src/complete.rs::matches_filter` |
+| filterStrategy 우선 | per-arg `filterStrategy: "substring"` 은 user `MatchMode` (Prefix/Fuzzy) 무관 우선. spec author 가 명시한 의도를 user mode 가 덮어쓰지 않음. `"fuzzy"` 값 자체는 user mode 와 동일 결과 (Prefix→prefix / Fuzzy→subsequence) | `nerv-engine/src/complete.rs::matches_filter` 첫 분기 |
 | 4-field wire format | `nerv _complete` 출력은 `insertion\tdisplay\tdescription\ticon` 4-tab. icon 비면 빈 문자열. **field 추가 시 widget parser 동시 갱신 필수** | `crates/nerv-cli/src/main.rs::print_suggestion` + `_nerv.zsh` |
 | parserDirectives 적용 | `flagsArePosixNoncompliant` 는 root spec 의 directive 만 체크 (subcommand chain 상속 X). Go/docker/kubectl 처럼 root 부터 일관된 스타일이 권장 | `nerv-engine/src/spec_parser.rs::ShortOption` arm |
 | getQueryTerm 범위 | string form 만 (single-byte delim chars). function form 은 Tier C → M1. delim chars 마지막 위치에서 split, insertion 에 context prefix 보존 | `nerv-engine/src/complete.rs::split_by_query_term` |
@@ -209,12 +211,14 @@ crates/
 
 shell-integrations/zsh/_nerv.zsh     # ZLE widget (M0 유지, M1 figterm 도입 시 deprecate)
 tools/ts-to-json/                    # bun-based TS→JSON 변환 (M1 entry; 715 spec 자동 변환)
+packaging/homebrew/nerv.rb           # Homebrew Formula 템플릿 (auto-bumped on release)
 vendor/withfig-autocomplete/         # subtree, ISC, pin = aef52acf… (TS specs 1,484)
 vendor/aws-autocomplete/             # M0-1 subtree, Apache+MIT, 미수정 mirror (drift 감지)
 vendor-patches/{upstream,self}/      # cherry-pick 보관소 (M1)
 docs/                                # 위 §2 6종 + reference/ (TS 포팅 참조본)
 docs/archive/PLAN.v0.5.1.md          # 이전 PRD 보존
-.github/workflows/{ci,upstream-monitor,upstream-prs}.yml  # upstream-monitor 에 aws-autocomplete 추가
+.github/workflows/{ci,release,upstream-monitor,upstream-prs,homebrew-bump}.yml
+                                     # homebrew-bump = release 시 tap Formula 자동 갱신
 ```
 
 **폐기된 v0.5 디렉터리**: `build/spec-transpile/` (loadSpec.ts 포팅이 대체), `specs-prebuilt/` (`~/Library/Caches/nerv/specs/` 로 이동).
@@ -262,7 +266,7 @@ PLAN §10 에 명시된 차단 요건을 *직접* 점검하기 전엔 다음 단
 - ❌ 흡수 crate 의 Q 경로 (`~/.config/q/`, `~/Library/Caches/amzn/`) 잔존 — `nerv-util` / `nerv-log` / `nerv-settings` 포팅 시 grep 으로 전수 검증.
 - ❌ `fig_desktop` / `fig_api_client` / `fig_auth` / `fig_telemetry*` / `amzn-*` 의 transitive dep 가 `Cargo.lock` 에 들어옴 — strip 후 `cargo tree | grep -E 'amzn|aws-sdk|tao|wry'` 0 줄 검증.
 - ❌ `parseArguments.ts` Rust 포팅 시 TS 회귀 테스트 누락 — Fig 의 fixture 디렉터리 (`packages/autocomplete-parser/tests/`) 를 `crates/nerv-engine/tests/spec_parser/` 로 그대로 흡수.
-- ❌ fuzzy matching 코드를 M0 에 작성 — M1 opt-in 까지 코드 자체 금지 (§4 불변식).
+- ❌ fuzzy matching 을 기본 활성 — `MatchMode::Prefix` 가 default. 활성 코드 경로는 `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` opt-in 뿐.
 - ❌ deno_core / boa / Node embed — `rquickjs` 만 (§4 불변식).
 
 ## 9. 추천 협업 패턴 (Claude Code)
