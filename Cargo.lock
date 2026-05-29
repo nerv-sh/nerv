@@ -1732,6 +1732,7 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "nerv-quickjs",
  "notify",
  "once_cell",
  "serde",

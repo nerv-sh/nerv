@@ -282,8 +282,20 @@ pub enum Generator {
         has_post_process: bool,
     },
     /// `generator.custom!(tokens, executeCommand, ctx)` — pure JS
-    /// closure that returns candidates. Tier C — deferred to M1.
-    Custom { description_hint: Option<String> },
+    /// closure that returns candidates. Tier C — historically deferred
+    /// because no JS runtime shipped with v0.1.
+    ///
+    /// `source` is the verbatim function body (or full closure source)
+    /// captured by the ts-to-json converter. Absent when the converter
+    /// wasn't asked to emit it; `feature = "quickjs"` builds use it as
+    /// the script body for [`crate::tier_c::execute_custom_source`].
+    /// `feature` off → field is parsed and ignored, so existing JSON
+    /// files keep loading.
+    Custom {
+        description_hint: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
+    },
     /// Well-known: `npmScriptsGenerator` from `@withfig/autocomplete`.
     /// Reused by npm / yarn / pnpm / bun / rushx / nr specs. The Rust
     /// engine walks up from the CWD to the nearest `package.json`,
