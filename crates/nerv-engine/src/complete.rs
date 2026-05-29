@@ -343,7 +343,7 @@ pub fn complete_in(
     if let Some((opt_name, arg_idx)) = result.active_option_arg.as_ref() {
         if let Some(opt) = current.options.iter().find(|o| o.names.contains(opt_name)) {
             if let Some(arg) = opt.args.get(*arg_idx) {
-                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode);
+                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens);
                 return CompleteResult {
                     items,
                     reason: None,
@@ -361,7 +361,7 @@ pub fn complete_in(
         // …). Merge whenever the level has args with dynamic source.
         let mut subs = emit_subcommands(current, &prefix, mode);
         if arg_has_dynamic_source(current) {
-            subs.extend(emit_arg_candidates(current, &prefix, cwd, mode));
+            subs.extend(emit_arg_candidates(current, &prefix, cwd, mode, &tokens));
         }
         // Sort by priority first (script results get priority 75
         // and float above default-50 subcommands), then alpha.
@@ -374,7 +374,7 @@ pub fn complete_in(
             CursorContext::OptionName => {
                 emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
             }
-            CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd, mode),
+            CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd, mode, &tokens),
             CursorContext::Done => vec![],
         }
     };
@@ -656,11 +656,12 @@ fn emit_arg_candidates(
     prefix: &str,
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
+    tokens: &[Annotation],
 ) -> Vec<Suggestion> {
     let Some(arg) = node.args.first() else {
         return vec![];
     };
-    emit_candidates_for_arg(arg, prefix, cwd, None, mode)
+    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens)
 }
 
 /// `enclosing_opt` lets the caller pass the OPTION wrapping the arg
@@ -675,6 +676,7 @@ fn emit_candidates_for_arg(
     cwd: Option<&std::path::Path>,
     enclosing_opt: Option<&crate::spec_parser::Opt>,
     mode: MatchMode,
+    tokens: &[Annotation],
 ) -> Vec<Suggestion> {
     let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
     // Fig parity getQueryTerm: when the arg declares delimiter chars
@@ -953,6 +955,35 @@ fn emit_candidates_for_arg(
                                     icon: None,
                                 }),
                         );
+                    }
+                }
+                crate::spec_parser::Generator::AwsList {
+                    service,
+                    verb,
+                    lookup_flags,
+                    parent_key,
+                    id_field,
+                } => {
+                    let cmd = build_aws_list_command(service, verb, lookup_flags, tokens);
+                    if let Some(lines) = cached_template_generator(&cmd) {
+                        let stdout = lines.join("\n");
+                        if let Some(names) =
+                            extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
+                        {
+                            out.extend(
+                                names
+                                    .into_iter()
+                                    .filter(|s| matches_name(s, prefix, mode))
+                                    .map(|name| Suggestion {
+                                        insertion: name.clone(),
+                                        display: name,
+                                        description: Some("aws".into()),
+                                        kind: SuggestionKind::Argument,
+                                        priority: None,
+                                        icon: None,
+                                    }),
+                            );
+                        }
                     }
                 }
                 crate::spec_parser::Generator::ScriptWithJsonPath {
@@ -1392,6 +1423,30 @@ fn extract_aws_json_names(
             .and_then(scalar_to_string)
             .map(|s| vec![s]),
     }
+}
+
+/// Build the `aws <service> <verb> [<flag> <captured>]*` command line
+/// from the currently-typed tokens. For each flag in `lookup_flags`,
+/// scan the tokens for an exact match and grab the next token as its
+/// value — mirroring the upstream closure's `tokens.indexOf(flag)`.
+/// Flags whose token doesn't appear yet are dropped (the closure
+/// would also call aws without them).
+fn build_aws_list_command(
+    service: &str,
+    verb: &str,
+    lookup_flags: &[String],
+    tokens: &[Annotation],
+) -> Vec<String> {
+    let mut cmd: Vec<String> = vec!["aws".into(), service.into(), verb.into()];
+    for flag in lookup_flags {
+        if let Some(i) = tokens.iter().position(|t| t.text == *flag) {
+            if let Some(next) = tokens.get(i + 1) {
+                cmd.push(flag.clone());
+                cmd.push(next.text.clone());
+            }
+        }
+    }
+    cmd
 }
 
 // ---------------------------------------------------------------------------
@@ -2991,7 +3046,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix);
+        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[]);
         // Only "serde" matches "se" prefix.
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].display, "serde");
@@ -3140,7 +3195,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "foo", None, None, MatchMode::Prefix);
+        let out = emit_candidates_for_arg(&arg, "foo", None, None, MatchMode::Prefix, &[]);
         // Both "foobar" and "barfoo" contain "foo".
         let names: Vec<_> = out.iter().map(|s| s.display.as_str()).collect();
         assert!(names.contains(&"foobar"));
@@ -3284,6 +3339,85 @@ mod tests {
         let raw = r#"{"Items":[{"Id":"a"},{"NoId":"x"},{"Id":"b"}]}"#;
         let out = extract_aws_json_names(raw, "Items", Some("Id")).unwrap();
         assert_eq!(out, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn build_aws_list_command_no_flags() {
+        let cmd = build_aws_list_command("ec2", "describe-instances", &[], &[]);
+        assert_eq!(cmd, vec!["aws", "ec2", "describe-instances"]);
+    }
+
+    #[test]
+    fn build_aws_list_command_with_matching_flag() {
+        let tokens = vec![
+            Annotation {
+                text: "lambda".into(),
+                span: 0..6,
+                kind: TokenKind::Unknown,
+            },
+            Annotation {
+                text: "list-layer-versions".into(),
+                span: 7..26,
+                kind: TokenKind::Unknown,
+            },
+            Annotation {
+                text: "--layer-name".into(),
+                span: 27..39,
+                kind: TokenKind::Unknown,
+            },
+            Annotation {
+                text: "MyLayer".into(),
+                span: 40..47,
+                kind: TokenKind::Unknown,
+            },
+        ];
+        let cmd = build_aws_list_command(
+            "lambda",
+            "list-layer-versions",
+            &["--layer-name".into()],
+            &tokens,
+        );
+        assert_eq!(
+            cmd,
+            vec![
+                "aws",
+                "lambda",
+                "list-layer-versions",
+                "--layer-name",
+                "MyLayer"
+            ]
+        );
+    }
+
+    #[test]
+    fn build_aws_list_command_skips_missing_flags() {
+        // Token list lacks `--region` — the flag is silently dropped
+        // (mirrors the upstream `tokens.indexOf` continue branch).
+        let tokens = vec![Annotation {
+            text: "ecs".into(),
+            span: 0..3,
+            kind: TokenKind::Unknown,
+        }];
+        let cmd = build_aws_list_command("ecs", "list-clusters", &["--region".into()], &tokens);
+        assert_eq!(cmd, vec!["aws", "ecs", "list-clusters"]);
+    }
+
+    #[test]
+    fn build_aws_list_command_drops_trailing_flag_without_value() {
+        // The flag is the last token — no value after it. Drop the
+        // flag rather than emit a half-baked command.
+        let tokens = vec![Annotation {
+            text: "--layer-name".into(),
+            span: 0..12,
+            kind: TokenKind::Unknown,
+        }];
+        let cmd = build_aws_list_command(
+            "lambda",
+            "list-layer-versions",
+            &["--layer-name".into()],
+            &tokens,
+        );
+        assert_eq!(cmd, vec!["aws", "lambda", "list-layer-versions"]);
     }
 
     #[test]

@@ -357,6 +357,27 @@ pub enum Generator {
         #[serde(default)]
         id_field: Option<String>,
     },
+    /// Well-known: aws `listCustomGenerator(tokens, exec, command,
+    /// options, parentKey, childKey)` family. The helper is locally
+    /// defined per aws spec file (lambda.ts / iam.ts / cloudformation.ts
+    /// / …) but the data shape is uniform: build
+    /// `aws <service> <verb> [<flag> <token-after-flag>]*`, run it,
+    /// then walk into `parent_key` of the JSON response and project
+    /// to `id_field`. Captured as data so no JS runtime is needed.
+    ///
+    /// `lookup_flags` lists option names whose value the closure pulls
+    /// from the currently-typed tokens (e.g. `--function-name` is
+    /// matched against `tokens` and the next token after it becomes
+    /// the CLI value).
+    AwsList {
+        service: String,
+        verb: String,
+        #[serde(default)]
+        lookup_flags: Vec<String>,
+        parent_key: String,
+        #[serde(default)]
+        id_field: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
