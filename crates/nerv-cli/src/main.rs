@@ -1137,4 +1137,161 @@ mod tests {
         assert!(backup.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// `parse_zsh_version` accepts the `zsh --version`-style output —
+    /// digits separated by dots, ignoring suffixes. E3 (zsh < 5.8
+    /// hint) gates entirely on this parser.
+    #[test]
+    fn parse_zsh_version_handles_common_shapes() {
+        assert_eq!(parse_zsh_version("5.8"), (5, 8));
+        assert_eq!(parse_zsh_version("5.9.1"), (5, 9));
+        assert_eq!(parse_zsh_version("5.8.2-1"), (5, 8));
+        assert_eq!(parse_zsh_version("4.3.11"), (4, 3));
+    }
+
+    /// Garbage / empty input falls back to (0, 0) — the doctor table
+    /// then prints "unknown" and the E3 gate stays open. Don't panic.
+    #[test]
+    fn parse_zsh_version_falls_back_on_garbage() {
+        assert_eq!(parse_zsh_version(""), (0, 0));
+        assert_eq!(parse_zsh_version("five.eight"), (0, 0));
+        assert_eq!(parse_zsh_version("nope"), (0, 0));
+        // Leading non-numeric major still degrades cleanly.
+        assert_eq!(parse_zsh_version("v5.8"), (0, 8));
+    }
+
+    /// `parse_zsh_version_compat` is a parallel parser the compat
+    /// check uses. Mirror behaviour with the public `parse_zsh_version`
+    /// so a future merge / dedup of the two routines doesn't drift
+    /// semantics.
+    #[test]
+    fn parse_zsh_version_compat_matches_parse_zsh_version() {
+        for s in ["5.8", "5.9.1", "5.8.2-1", "4.3.11", "", "garbage"] {
+            assert_eq!(
+                parse_zsh_version(s),
+                parse_zsh_version_compat(s),
+                "mismatch on {s:?}",
+            );
+        }
+    }
+
+    /// `count_tree` walks the spec tree and returns (subs, opts). The
+    /// root itself is not counted; only descendants. Empty spec → 0/0.
+    #[test]
+    fn count_tree_empty_returns_zero_zero() {
+        let root = SpecNode {
+            name: "x".into(),
+            ..Default::default()
+        };
+        assert_eq!(count_tree(&root), (0, 0));
+    }
+
+    /// Two levels of nesting + a few options per node — the totals
+    /// sum across the whole tree, root excluded.
+    #[test]
+    fn count_tree_sums_across_descendants() {
+        use nerv_engine::Opt;
+        let leaf = SpecNode {
+            name: "leaf".into(),
+            options: vec![Opt {
+                names: vec!["-x".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mid = SpecNode {
+            name: "mid".into(),
+            options: vec![
+                Opt {
+                    names: vec!["-a".into()],
+                    ..Default::default()
+                },
+                Opt {
+                    names: vec!["-b".into()],
+                    ..Default::default()
+                },
+            ],
+            subcommands: vec![leaf],
+            ..Default::default()
+        };
+        let root = SpecNode {
+            name: "root".into(),
+            subcommands: vec![mid],
+            ..Default::default()
+        };
+        // Subs: mid + leaf = 2. Opts: root 0 + mid 2 + leaf 1 = 3.
+        assert_eq!(count_tree(&root), (2, 3));
+    }
+
+    /// `upgrade_tier` is monotone: once C, never downgrades; B stays
+    /// when only A-level generators follow. Custom + Script-with-pp
+    /// are the only Tier C upgrades.
+    #[test]
+    fn upgrade_tier_classifies_generators() {
+        use nerv_engine::Generator;
+        // No generators → stays A.
+        assert_eq!(upgrade_tier('A', std::iter::empty()), 'A');
+        // Template → B.
+        let g = [Generator::Template {
+            script: vec!["echo".into()],
+        }];
+        assert_eq!(upgrade_tier('A', g.iter()), 'B');
+        // Custom (no source) → C.
+        let g = [Generator::Custom {
+            description_hint: None,
+            source: None,
+        }];
+        assert_eq!(upgrade_tier('A', g.iter()), 'C');
+        // Script with post-process → C, never downgrades.
+        let g = [
+            Generator::Script {
+                script: vec!["echo".into()],
+                has_post_process: true,
+            },
+            Generator::Template {
+                script: vec!["echo".into()],
+            },
+        ];
+        assert_eq!(upgrade_tier('A', g.iter()), 'C');
+        // Already C → stays C even with A-only follow-ups.
+        assert_eq!(upgrade_tier('C', std::iter::empty()), 'C');
+    }
+
+    /// `compute_tier` returns the human-readable label
+    /// `nerv spec list` prints in its TIER column.
+    #[test]
+    fn compute_tier_labels_are_stable() {
+        use nerv_engine::{Arg, Generator};
+        // Empty spec → A.
+        let root = SpecNode {
+            name: "x".into(),
+            ..Default::default()
+        };
+        assert_eq!(compute_tier(&root), "A");
+        // Spec with Template arg → B (limited).
+        let root = SpecNode {
+            name: "x".into(),
+            args: vec![Arg {
+                generators: vec![Generator::Template {
+                    script: vec!["echo".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(compute_tier(&root), "B (limited)");
+        // Spec with Custom arg → C (M1).
+        let root = SpecNode {
+            name: "x".into(),
+            args: vec![Arg {
+                generators: vec![Generator::Custom {
+                    description_hint: None,
+                    source: None,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(compute_tier(&root), "C (M1)");
+    }
 }
