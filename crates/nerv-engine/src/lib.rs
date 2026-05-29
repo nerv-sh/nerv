@@ -17,6 +17,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod complete;
+pub mod config;
 pub mod ipc;
 pub mod parser;
 pub mod paths;
@@ -29,6 +30,7 @@ pub mod spec_parser;
 pub mod frecency;
 
 pub use complete::{CompleteResult, SpecRegistry, complete, complete_in};
+pub use config::{MatchMode, MatchingConfig};
 pub use frecency::FrecencyStore;
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
 pub use parser::{Position, Token};

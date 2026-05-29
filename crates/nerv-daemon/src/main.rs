@@ -12,7 +12,9 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::{FrecencyStore, Request, Response, SpecRegistry, complete_in, paths};
+use nerv_engine::{
+    FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, complete_in, paths,
+};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
@@ -60,6 +62,12 @@ async fn main() -> anyhow::Result<()> {
         "frecency store loaded"
     );
 
+    // User matching mode — defaults to prefix; opt-in fuzzy via
+    // `~/.config/nerv/nerv.toml` (PLAN §5.1). Loaded once at boot;
+    // edits require a daemon restart.
+    let matching = MatchingConfig::load_default();
+    info!(mode = ?matching.mode, "matching config loaded");
+
     write_pid_file(&pid_path).await?;
 
     // Best-effort cleanup of any stale socket from a previous run.
@@ -84,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
                     Ok((stream, _addr)) => {
                         let registry = registry.clone();
                         let frecency = frecency.clone();
-                        tokio::spawn(handle_connection(stream, registry, frecency));
+                        tokio::spawn(handle_connection(stream, registry, frecency, matching.mode));
                     }
                     Err(e) => warn!(?e, "accept error"),
                 }
@@ -105,6 +113,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     registry: Arc<SpecRegistry>,
     frecency: Arc<FrecencyStore>,
+    mode: MatchMode,
 ) {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -119,7 +128,7 @@ async fn handle_connection(
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
             Ok(Request::Complete { line, cursor, cwd }) => {
-                engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref())
+                engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref(), mode)
             }
             Ok(Request::DoctorAutorun) => Response::Empty {
                 reason: Some("doctor-autorun-stub".to_string()),
@@ -155,9 +164,10 @@ fn engine_complete(
     line: &str,
     cursor: usize,
     cwd: Option<&str>,
+    mode: MatchMode,
 ) -> Response {
     let cwd_path = cwd.map(std::path::Path::new);
-    let mut result = complete_in(line, cursor, registry, cwd_path);
+    let mut result = complete_in(line, cursor, registry, cwd_path, mode);
     if result.items.is_empty() {
         return Response::Empty {
             reason: result.reason,
