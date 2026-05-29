@@ -58,16 +58,16 @@ pub mod url {
 /// Build time env vars
 pub mod build {
     /// The target of the current build, e.g. "aarch64-unknown-linux-musl"
-    pub const TARGET_TRIPLE: Option<&str> = option_env!("AMAZON_Q_BUILD_TARGET_TRIPLE");
+    pub const TARGET_TRIPLE: Option<&str> = option_env!("NERV_BUILD_TARGET_TRIPLE");
 
     /// The variant of the current build
-    pub const VARIANT: Option<&str> = option_env!("AMAZON_Q_BUILD_VARIANT");
+    pub const VARIANT: Option<&str> = option_env!("NERV_BUILD_VARIANT");
 
     /// A git full sha hash of the current build
-    pub const HASH: Option<&str> = option_env!("AMAZON_Q_BUILD_HASH");
+    pub const HASH: Option<&str> = option_env!("NERV_BUILD_HASH");
 
     /// The datetime in rfc3339 format of the current build
-    pub const DATETIME: Option<&str> = option_env!("AMAZON_Q_BUILD_DATETIME");
+    pub const DATETIME: Option<&str> = option_env!("NERV_BUILD_DATETIME");
 
     /// If `fish` tests should be skipped — always true under v0.6 since
     /// fish is a v2.0 target (PLAN.md §4 비목표 / v1 이후).
@@ -75,7 +75,7 @@ pub mod build {
 
     /// If `shellcheck` tests should be skipped
     pub const SKIP_SHELLCHECK_TESTS: bool =
-        option_env!("AMAZON_Q_BUILD_SKIP_SHELLCHECK_TESTS").is_some();
+        option_env!("NERV_BUILD_SKIP_SHELLCHECK_TESTS").is_some();
 }
 
 /// macOS specific constants
