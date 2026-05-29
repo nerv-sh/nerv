@@ -850,15 +850,16 @@ type Ctx = {
 
 /// loadSpec inlining depth cap.
 /// depth=0: never inline; subdir specs ship as stub subcommands.
-/// depth=1 (current): top-level loadSpec strings resolved. e.g.
-///   `aws ec2 <verb>` works; `aws ec2 run-instances <flag>` still
-///   stops at the verb's options without going into nested loadSpec.
-///   Pairs with the spec_loader gzip path so the resulting 100MB+
-///   plain JSON shrinks to ~10MB on disk.
-/// depth=2+: very large output (aws hit 100 MB at depth 4 even
-///   with cycle detection). Defer until lazy-eviction lands so
-///   memory doesn't grow with the cache.
-const MAX_DEPTH = 1;
+/// depth=1: top-level loadSpec strings resolved. `aws ec2 <verb>`,
+///   `gcloud compute <verb>` work; nested loadSpec inside the verb's
+///   own subspec is not followed.
+/// depth=2 (current): pulls the next level for the rare specs that
+///   chain (dotnet, pnpx, gcloud subgroups). Measured cost on the
+///   715-spec corpus: ~5% disk growth vs depth=1, well under the
+///   gzip path's 10× compression. The previous "depth=4 → 100 MB"
+///   warning was for a different (unfiltered + uncompressed) build;
+///   today's pipeline absorbs depth=2 comfortably.
+const MAX_DEPTH = 2;
 
 // Specs whose top-level uses `generateSpec: async (...)` to pick
 // between alternate spec trees at runtime. We can't run the closure
