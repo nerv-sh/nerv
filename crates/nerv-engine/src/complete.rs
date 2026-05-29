@@ -631,12 +631,27 @@ fn split_by_query_term<'a>(prefix: &'a str, delims: Option<&str>) -> (&'a str, &
 /// (typically a single emoji or one ASCII char). Anything longer
 /// than 4 bytes is also rejected as defense against accidental
 /// long-string injection that would distort popup row widths.
+///
+/// Width contract: the widget reserves exactly **2 cells** for any
+/// non-ASCII glyph (so all rows align). To uphold that, non-ASCII
+/// glyphs whose terminal-display width is not 2 (Latin-extended like
+/// `à`, ambiguous-width like `⚠` without VS-16, zero-width marks,
+/// etc.) are rejected too — they would render in 1 cell and shift
+/// the row by 1. ASCII single chars use the 1-cell slot.
 fn sanitize_icon(raw: Option<&str>) -> Option<String> {
+    use unicode_width::UnicodeWidthStr;
     let s = raw?.trim();
     if s.is_empty() || s.starts_with("fig://") || s.len() > 4 {
         return None;
     }
-    Some(s.to_string())
+    let w = UnicodeWidthStr::width(s);
+    if s.is_ascii() {
+        if w == 1 { Some(s.to_string()) } else { None }
+    } else if w == 2 {
+        Some(s.to_string())
+    } else {
+        None
+    }
 }
 
 fn walk_to_current<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand> {
@@ -3027,6 +3042,34 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_icon_rejects_one_cell_nonascii() {
+        // Widget reserves 2 cells for any non-ASCII glyph; chars that
+        // render in 1 cell on a default terminal (Latin-extended,
+        // ambiguous-width per UAX #11) would shift the row by 1.
+        // ⚠ (U+26A0, no VS-16) and à (U+00E0) are width 1.
+        assert_eq!(sanitize_icon(Some("\u{26A0}")), None);
+        assert_eq!(sanitize_icon(Some("\u{00E0}")), None);
+    }
+
+    #[test]
+    fn sanitize_icon_keeps_two_cell_glyphs() {
+        // CJK ideograph (3-byte) and supplementary emoji (4-byte) are
+        // both width 2 — the canonical "wide" slot.
+        assert_eq!(sanitize_icon(Some("\u{4E2D}")), Some("\u{4E2D}".into())); // 中
+        assert_eq!(sanitize_icon(Some("📦")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some("📝")), Some("📝".into()));
+    }
+
+    #[test]
+    fn sanitize_icon_rejects_multichar_ascii() {
+        // Width 2 ASCII string like "ok" would have been allowed by the
+        // old byte-length check (2 ≤ 4) and the widget would still draw
+        // one slot, mangling alignment. Force single ASCII char.
+        assert_eq!(sanitize_icon(Some("ok")), None);
+        assert_eq!(sanitize_icon(Some(">>")), None);
+    }
+
+    #[test]
     fn subcommand_icon_propagates_to_suggestion() {
         let node = Subcommand {
             name: "git".into(),
@@ -3493,6 +3536,133 @@ mod tests {
             second = reg.lookup("foo").unwrap();
         }
         assert_eq!(second.subcommands.len(), 2);
+    }
+
+    /// Poll `lookup(name)` until the closure says "good enough" or the
+    /// deadline expires. macOS FSEvents coalesces events at ~500ms so
+    /// a single immediate read after writing a file is not enough.
+    fn wait_for_lookup<F>(
+        reg: &SpecRegistry,
+        name: &str,
+        deadline: std::time::Duration,
+        ok: F,
+    ) -> Option<std::sync::Arc<Spec>>
+    where
+        F: Fn(&Option<std::sync::Arc<Spec>>) -> bool,
+    {
+        let stop = std::time::Instant::now() + deadline;
+        loop {
+            let got = reg.lookup(name);
+            if ok(&got) {
+                return got;
+            }
+            if std::time::Instant::now() >= stop {
+                return got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn fs_watcher_invalidates_on_spec_removal() {
+        // A spec file disappearing from the cache dir (e.g. `build-specs`
+        // running with a smaller --only filter) must drop the in-memory
+        // entry so subsequent lookups miss. Watcher Remove events feed
+        // the same `pending` set as Modify, so the path under test is
+        // the same drain → cache.remove → load_from_disk → None flow.
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_path = tmp.path().join("ephemeral.json");
+        std::fs::write(&spec_path, r#"{"name":"ephemeral"}"#).unwrap();
+
+        let reg = SpecRegistry::at_dir(tmp.path());
+        let first = reg.lookup("ephemeral").expect("initial load failed");
+        assert_eq!(first.name, "ephemeral");
+
+        std::fs::remove_file(&spec_path).unwrap();
+        let after = wait_for_lookup(
+            &reg,
+            "ephemeral",
+            std::time::Duration::from_secs(3),
+            |got| got.is_none(),
+        );
+        assert!(after.is_none(), "expected None after removal");
+    }
+
+    #[test]
+    fn fs_watcher_picks_up_late_arriving_spec() {
+        // Lazy SpecRegistry: a lookup that misses populates a negative
+        // cache entry. When the user runs `build-specs` mid-session and
+        // a brand-new file appears, the FS watcher's Create event must
+        // evict the negative entry so the very next lookup re-reads
+        // from disk and finds the new spec.
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = SpecRegistry::at_dir(tmp.path());
+        assert!(reg.lookup("late").is_none(), "dir starts empty");
+
+        let spec_path = tmp.path().join("late.json");
+        std::fs::write(&spec_path, r#"{"name":"late"}"#).unwrap();
+
+        let after = wait_for_lookup(&reg, "late", std::time::Duration::from_secs(3), |got| {
+            got.is_some()
+        });
+        assert!(after.is_some(), "expected late.json to be picked up");
+        assert_eq!(after.unwrap().name, "late");
+    }
+
+    #[test]
+    fn fs_watcher_reloads_gzipped_spec_files() {
+        // Production caches ship as `*.json.gz` (10× smaller). The
+        // watcher's stem extractor strips `.json.gz` the same as `.json`
+        // and `load_from_disk` falls back to the gz path when plain
+        // doesn't exist. End-to-end: rewriting a `.json.gz` should
+        // re-render the cached spec on the next lookup.
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_path = tmp.path().join("gz_spec.json.gz");
+        let write_gz = |path: &std::path::Path, body: &str| {
+            let f = std::fs::File::create(path).unwrap();
+            let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            enc.write_all(body.as_bytes()).unwrap();
+            enc.finish().unwrap();
+        };
+        write_gz(
+            &spec_path,
+            r#"{"name":"gz_spec","subcommands":[{"name":"v1"}]}"#,
+        );
+
+        let reg = SpecRegistry::at_dir(tmp.path());
+        let first = reg.lookup("gz_spec").expect("initial gz load failed");
+        assert_eq!(first.subcommands[0].name, "v1");
+
+        write_gz(
+            &spec_path,
+            r#"{"name":"gz_spec","subcommands":[{"name":"v2"}]}"#,
+        );
+        let second = wait_for_lookup(&reg, "gz_spec", std::time::Duration::from_secs(3), |got| {
+            got.as_ref()
+                .is_some_and(|s| s.subcommands.first().is_some_and(|c| c.name == "v2"))
+        })
+        .expect("expected reload");
+        assert_eq!(second.subcommands[0].name, "v2");
+    }
+
+    #[test]
+    fn drain_invalidations_is_noop_without_watcher() {
+        // SpecRegistry::default / empty has no watcher → no pending
+        // queue. drain_invalidations must early-return without touching
+        // the cache. Verified indirectly: lookup against an in-memory
+        // inserted spec still returns it after a drain pass.
+        let reg = SpecRegistry::empty();
+        let spec = Spec {
+            name: "in_memory".into(),
+            ..Default::default()
+        };
+        reg.insert(spec);
+        // Force drain via lookup — must NOT evict our entry.
+        let got = reg
+            .lookup("in_memory")
+            .expect("in-memory entry must survive");
+        assert_eq!(got.name, "in_memory");
     }
 
     #[test]

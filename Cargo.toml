@@ -22,6 +22,10 @@ members = [
     "crates/nerv-diag",
     "crates/nerv-test-macro",
     "crates/nerv-test-utils",
+    # M1 opt-in Tier C closure executor. Lives behind an opt-in feature
+    # in the daemon; not linked by default so the v0.1 binary stays
+    # rquickjs-free. PRD §0.2 / CLAUDE.md §4 invariant.
+    "crates/nerv-quickjs",
 ]
 
 [workspace.package]
@@ -170,6 +174,16 @@ time = { version = "0.3.39", features = [
     "serde",
 ] }
 toml = "0.8.12"
+# rquickjs = QuickJS bindings for the M1 Tier C closure executor
+# (PRD §0.2 / §5.7 / CLAUDE.md §4 invariant: deno_core 임베드 금지,
+# rquickjs ~1MB opt-in only). `loader`+`array-buffer` are needed for
+# evaluating module-style sources without surprise side effects;
+# `parallel` keeps the runtime Send so a tokio task pool can own it.
+rquickjs = { version = "0.6.2", default-features = false, features = [
+    "loader",
+    "array-buffer",
+    "parallel",
+] }
 unicode-width = "0.2.0"
 url = "2.5.4"
 uuid = { version = "1.15.1", features = ["v4", "serde"] }

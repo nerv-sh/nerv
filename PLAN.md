@@ -2,7 +2,7 @@
 
 > **한 줄 요약**: 사라진 Fig의 인라인 자동완성을 **AWS가 보존한 Fig Rust 코드 (amazon-q-developer-cli-autocomplete)** 위에 macOS + zsh 단일 정적 바이너리로 다시 살린다. 자작 엔진 폐기, Fig 엔진 흡수 + TS → Rust 포팅. AI / 로그인 / 텔레메트리 / Electron 없음.
 
-> **상태**: v0.5.1 의 "Rust 자작" thesis 폐기 → "Fig Rust 엔진 흡수 + TS 부분 Rust 포팅" thesis로 전환. PRD 재작성 draft (구현 진입 전 사용자 승인 대기).
+> **상태 (2026-05-29)**: M0 종료 (8개 산출물 중 7개 완료, M0-8 서명/공증만 인프라 차단). M1 진입 — alpha.7~alpha.10 후보 누적: fuzzy matching opt-in, FSEvents push hot-reload, aws Phase 1+2 (680 generator 회복: ScriptWithJsonPath 591 + AwsList 89), Homebrew tap 자동화, icon glyph width 보정. 흡수 crate 브랜드 strip 단계: env_var 모듈 (Q_*→NERV_*) + dead 메서드 14개 삭제 + CLI binary "q"→"nerv" / PRODUCT_NAME "Amazon Q"→"Nerv" / bundle id sh.nerv.nerv / "# Q pre block" 마커 / qterm.* 설정 키 → pty.* / AI translate hook 제거. Q/Amazon 사용자 표면 잔존 0. 1,484 spec 자동 변환 (715 loaded, depth=1, gzip 10×). 558+ workspace test, CI 1차 budget 90% 도달 시 workflow_dispatch 게이트.
 
 ---
 
@@ -41,6 +41,33 @@
 | `build/spec-transpile/` | **폐기** | `loadSpec.ts` 포팅이 대체 |
 | `shell-integrations/zsh/_nerv.zsh` | **M0 유지 / M1 figterm 도입 시 deprecate** | hybrid stage 전략 |
 | `vendor/withfig-autocomplete/` | **유지** (M0-9 산출물) | spec 데이터 소스. subtree pin 갱신만 |
+
+### 0.4 v0.6 구현 진척 (2026-05 시점)
+
+PRD 승인 이후의 핵심 마일스톤. PLAN.md 정책은 변경 없음 — *진척 추적용* 단일 출처는 `CLAUDE.md §3` 이고 PLAN.md 는 큰 묶음만 박는다.
+
+| 묶음 | 상태 | 비고 |
+|------|------|------|
+| M0 흡수 (8개 산출물) | 7/8 완료 | M0-8 (Apple Developer ID 서명/공증) 만 인프라 차단 |
+| TS→JSON 변환 파이프라인 | ✅ `tools/ts-to-json/` | bun 기반, 715 spec, Tier A 440 / B 6 / C 246 분류, depth=1 (`aws ec2 <verb>` 등) |
+| Spec store | ✅ lazy load + FSEvents hot-reload + gzip 10× 압축 | `~/Library/Caches/nerv/specs/*.json.gz` |
+| aws closure 회복 (Phase 1) | ✅ `Generator::ScriptWithJsonPath` | 591 generator (iam list-users / ec2 describe-instances) — rquickjs 우회 |
+| aws closure 회복 (Phase 2) | ✅ `Generator::AwsList` | 89 token-aware generator (cloudwatch list-metrics 등) |
+| well-known Tier C→B 회복 | ✅ 5 recognizer | npm scripts / Filepaths / ZoxideQuery / function-form script-fn / JSON output |
+| Matching opt-in | ✅ `[matching] mode = "fuzzy"` | M1 정책 — config 변경엔 데몬 재시작 필요 |
+| Fig parity batch | ✅ 6 스키마 필드 | isPersistent / priority / requiresSeparator / icon (width==2 강제) / flagsArePosixNoncompliant / filterStrategy / getQueryTerm |
+| Homebrew tap 자동화 | ✅ `nerv-sh/homebrew-tap` | release 발행 시 Formula 자동 bump |
+| Release 인프라 | ✅ `release.yml` + ARM-only tarball | `v*.*.*` tag → GitHub Release |
+| 흡수 crate 브랜드 strip | ✅ 진행 중 (active surface) | Q_*→NERV_* (env vars, methods), CLI binary "q"→"nerv", PRODUCT_NAME "Amazon Q"→"Nerv", bundle id `sh.nerv.nerv`, "# Q pre block" 마커 자동 reflow, qterm.* 설정 키 → pty.*, AI translate hook 제거 (CLAUDE.md §4 invariant) |
+| CI 정책 | ⚠️ workflow_dispatch only (2026-06-01 reset 까지) | 1차 무료 budget 90% 도달, restore 한 줄 패치 |
+
+**아직 인 진척 (M1 이후)**:
+- M0-8 서명/공증 (Apple Developer 계정 + 인프라 의존)
+- aws Phase 3 (closure 가 token 에 의존하는 624 케이스 — rquickjs opt-in 필요)
+- bash / fish 지원 (큼)
+- Linux / Windows 지원 (큼)
+- figterm PTY shim opt-in 실런타임 (`NERV_PTY=1`) — main.rs 980줄 + figterm-ipc + remote-ipc 정합 필요
+- E5 manifest, spec depth=2+ (압축으로 무난, memory cost 평가)
 
 ---
 

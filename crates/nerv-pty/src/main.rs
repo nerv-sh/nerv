@@ -33,10 +33,8 @@ use nerv_settings::state;
 use nerv_term::Term;
 use nerv_term::ansi::Processor;
 use nerv_term::event::EventListener;
-use nerv_term::grid::Dimensions;
-use nerv_term::term::{ShellState, SizeInfo, TextBuffer};
-use nerv_util::consts::CLI_BINARY_NAME;
-use nerv_util::env_var::{Q_LOG_LEVEL, Q_SHELL, Q_TERM, QTERM_SESSION_ID};
+use nerv_term::term::{ShellState, SizeInfo};
+use nerv_util::env_var::{NERV_LOG_LEVEL, NERV_PTY_SESSION_ID, NERV_SHELL, NERV_TERM};
 use nerv_util::process_info::{Pid, PidExt};
 use nerv_util::{PRODUCT_NAME, PTY_BINARY_NAME, Terminal as FigTerminal, directories};
 #[cfg(unix)]
@@ -274,10 +272,10 @@ where
     shell_enabled && !insertion_locked && !preexec
 }
 
-const Q_DISABLE_AUTOCOMPLETE: &str = "Q_DISABLE_AUTOCOMPLETE";
+const NERV_DISABLE_AUTOCOMPLETE: &str = "NERV_DISABLE_AUTOCOMPLETE";
 
 fn autocomplete_enabled(env: &Env) -> bool {
-    env.get_os(Q_DISABLE_AUTOCOMPLETE)
+    env.get_os(NERV_DISABLE_AUTOCOMPLETE)
         .is_none_or(|s| s.is_empty())
 }
 
@@ -327,12 +325,12 @@ where
 }
 
 fn get_parent_shell() -> Result<String> {
-    match env::var(Q_SHELL).ok().filter(|s| !s.is_empty()) {
+    match env::var(NERV_SHELL).ok().filter(|s| !s.is_empty()) {
         Some(v) => Ok(v),
         None => match env::var("SHELL").ok().filter(|s| !s.is_empty()) {
             Some(shell) => Ok(shell),
             None => {
-                anyhow::bail!("No Q_SHELL or SHELL found");
+                anyhow::bail!("No NERV_SHELL or SHELL found");
             }
         },
     }
@@ -353,18 +351,18 @@ fn build_shell_command(command: Option<&[String]>) -> Result<CommandBuilder> {
             let parent_shell = get_parent_shell()?;
             let mut builder = CommandBuilder::new(parent_shell);
 
-            if env::var("Q_IS_LOGIN_SHELL").ok().as_deref() == Some("1") {
+            if env::var("NERV_IS_LOGIN_SHELL").ok().as_deref() == Some("1") {
                 builder.arg("--login");
             }
 
-            if let Some(execution_string) = env::var("Q_EXECUTION_STRING")
+            if let Some(execution_string) = env::var("NERV_EXECUTION_STRING")
                 .ok()
                 .filter(|s| !s.is_empty())
             {
                 builder.args(["-c", &execution_string]);
             }
 
-            if let Some(extra_args) = env::var("Q_SHELL_EXTRA_ARGS")
+            if let Some(extra_args) = env::var("NERV_SHELL_EXTRA_ARGS")
                 .ok()
                 .filter(|s| !s.is_empty())
             {
@@ -379,17 +377,17 @@ fn build_shell_command(command: Option<&[String]>) -> Result<CommandBuilder> {
         }
     };
 
-    builder.env(Q_TERM, env!("CARGO_PKG_VERSION"));
+    builder.env(NERV_TERM, env!("CARGO_PKG_VERSION"));
     if env::var_os("TMUX").is_some() {
-        builder.env("Q_TERM_TMUX", env!("CARGO_PKG_VERSION"));
+        builder.env("NERV_TERM_TMUX", env!("CARGO_PKG_VERSION"));
     }
 
     // Clean up environment and launch shell.
-    builder.env_remove(Q_SHELL);
-    builder.env_remove("Q_IS_LOGIN_SHELL");
-    builder.env_remove("Q_START_TEXT");
-    builder.env_remove("Q_SHELL_EXTRA_ARGS");
-    builder.env_remove("Q_EXECUTION_STRING");
+    builder.env_remove(NERV_SHELL);
+    builder.env_remove("NERV_IS_LOGIN_SHELL");
+    builder.env_remove("NERV_START_TEXT");
+    builder.env_remove("NERV_SHELL_EXTRA_ARGS");
+    builder.env_remove("NERV_EXECUTION_STRING");
 
     if let Ok(dir) = std::env::current_dir() {
         builder.cwd(dir);
@@ -431,16 +429,16 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
 
     let context = Context::new();
 
-    let session_id = match std::env::var("MOCK_QTERM_SESSION_ID") {
+    let session_id = match std::env::var("MOCK_NERV_PTY_SESSION_ID") {
         Ok(id) => id,
         Err(_) => uuid::Uuid::new_v4().simple().to_string(),
     };
 
     unsafe {
-        std::env::set_var(QTERM_SESSION_ID, &session_id);
+        std::env::set_var(NERV_PTY_SESSION_ID, &session_id);
     }
 
-    let parent_id = nerv_os::Env::new().q_parent().ok();
+    let parent_id = nerv_os::Env::new().nerv_parent().ok();
 
     let mut terminal = SystemTerminal::new_from_stdio()?;
     let screen_size = terminal.get_screen_size()?;
@@ -556,8 +554,6 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
             newline_mode: false,
         };
 
-        let ai_enabled = nerv_settings::settings::get_bool_or("ai.terminal-hash-sub", true);
-
         if let Ok(shell) = get_parent_shell() {
             let path = std::path::Path::new(&shell);
             let name = path.file_name().and_then(|name| name.to_str()).unwrap_or(shell.as_str());
@@ -572,7 +568,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
         let result: Result<()> = 'select_loop: loop {
             if first_time && term.shell_state().has_seen_prompt {
                 trace!("Has seen prompt and first time");
-                let initial_command = env::var("Q_START_TEXT").ok().filter(|s| !s.is_empty());
+                let initial_command = env::var("NERV_START_TEXT").ok().filter(|s| !s.is_empty());
                 if let Some(mut initial_command) = initial_command {
                     debug!("Sending initial text: {initial_command}");
                     initial_command.push('\n');
@@ -679,31 +675,6 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                         let preexec = term.shell_state().preexec;
 
                                         debug!(?event, ?raw, %preexec,  "Got key event");
-
-                                        if !preexec && ai_enabled && event.key == KeyCode::Enter && event.modifiers == input::Modifiers::NONE {
-                                            if let Some(TextBuffer { buffer, cursor_idx }) = term.get_current_buffer() {
-                                                let buffer = buffer.trim();
-                                                if buffer.len() > 1 && buffer.starts_with('#') && term.columns() > buffer.len() {
-                                                    write_buffer.extend(
-                                                        &std::iter::repeat_n(b'\x08', buffer.len()
-                                                            .max(cursor_idx.unwrap_or(0)))
-                                                            .collect::<Vec<_>>()
-                                                    );
-                                                    write_buffer.extend(
-                                                        format!(
-                                                            "{} translate '{}'\r",
-                                                            CLI_BINARY_NAME,
-                                                            buffer
-                                                                .trim_start_matches('#')
-                                                                .trim()
-                                                                .replace('\'', "'\"'\"'")
-                                                            ).as_bytes()
-                                                    );
-                                                    master.write_all(&write_buffer).await?;
-                                                    continue 'select_loop;
-                                                }
-                                            }
-                                        }
 
                                         // if we are in CSI u mode we try to encode first, otherwise we try to send the raw bytes first
                                         let raw = if csi_u_set {
@@ -930,9 +901,9 @@ fn main() {
     let cli = Cli::parse();
     let command = cli.command.as_deref();
 
-    logger::stdio_debug_log(format!("{Q_LOG_LEVEL}={}", nerv_log::get_log_level()));
+    logger::stdio_debug_log(format!("{NERV_LOG_LEVEL}={}", nerv_log::get_log_level()));
 
-    if !state::get_bool_or("qterm.enabled", true) {
+    if !state::get_bool_or("pty.enabled", true) {
         println!("[NOTE] qterm is disabled. Autocomplete will not work.");
         logger::stdio_debug_log("qterm is disabled. `qterm.enabled` == false");
         return;
@@ -965,15 +936,15 @@ mod tests {
     fn autocomplete_enabled_test() {
         assert!(autocomplete_enabled(&Env::new_fake()));
         assert!(autocomplete_enabled(&Env::from_slice(&[(
-            Q_DISABLE_AUTOCOMPLETE,
+            NERV_DISABLE_AUTOCOMPLETE,
             ""
         )])));
         assert!(!autocomplete_enabled(&Env::from_slice(&[(
-            Q_DISABLE_AUTOCOMPLETE,
+            NERV_DISABLE_AUTOCOMPLETE,
             "1"
         )])));
         assert!(!autocomplete_enabled(&Env::from_slice(&[(
-            Q_DISABLE_AUTOCOMPLETE,
+            NERV_DISABLE_AUTOCOMPLETE,
             "1"
         )])));
     }

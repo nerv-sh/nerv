@@ -831,7 +831,7 @@ impl<T> Term<T> {
         trace!("New command cursor: {:?}", self.shell_state.cmd_cursor);
 
         // Add work around for emojis
-        if let Ok(cursor_offset) = nerv_os::Env::new().q_prompt_offset_workaround() {
+        if let Ok(cursor_offset) = nerv_os::Env::new().nerv_prompt_offset_workaround() {
             if let Ok(offset) = cursor_offset.parse::<i32>() {
                 self.shell_state.cmd_cursor = self.shell_state.cmd_cursor.map(|cursor| Point {
                     column: Column((cursor.column.0 as i32 - offset).max(0) as usize),
