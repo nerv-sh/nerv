@@ -202,7 +202,7 @@ pub fn get_log_level() -> String {
         .clone()
         .unwrap_or_else(|| {
             nerv_os::Env::new()
-                .q_log_level()
+                .nerv_log_level()
                 .unwrap_or_else(|_| DEFAULT_FILTER.to_string())
         })
 }
@@ -255,7 +255,7 @@ fn create_filter_layer() -> EnvFilter {
         .lock()
         .unwrap()
         .clone()
-        .or_else(|| nerv_os::Env::new().q_log_level().ok());
+        .or_else(|| nerv_os::Env::new().nerv_log_level().ok());
 
     match log_level {
         Some(level) => EnvFilter::builder()

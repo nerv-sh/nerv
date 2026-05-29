@@ -154,11 +154,11 @@ impl Env {
     }
 
     pub fn in_codespaces(&self) -> bool {
-        self.get_os("CODESPACES").is_some() || self.get_os("Q_CODESPACES").is_some()
+        self.get_os("CODESPACES").is_some()
     }
 
     pub fn in_ci(&self) -> bool {
-        self.get_os("CI").is_some() || self.get_os("Q_CI").is_some()
+        self.get_os("CI").is_some()
     }
 
     /// Whether or not the current executable is run from an AppImage.
@@ -168,83 +168,29 @@ impl Env {
         self.get_os("APPIMAGE").is_some()
     }
 
-    // Q-specific environment variable methods
-    pub fn q_fake_is_remote(&self) -> bool {
-        self.get_os("Q_FAKE_IS_REMOTE").is_some()
+    // Nerv-specific env vars. Kept narrow — every method here has a
+    // live caller. Defunct Q_*/AMAZON_Q_* accessors (telemetry,
+    // inline shell completion, desktop release url, sigv4, custom
+    // certs, etc.) were stripped along with the Q-only env vars they
+    // wrapped — Nerv does not implement those features.
+    pub fn nerv_fake_is_remote(&self) -> bool {
+        self.get_os("NERV_FAKE_IS_REMOTE").is_some()
     }
 
-    pub fn q_log_level(&self) -> Result<String, VarError> {
+    pub fn nerv_log_level(&self) -> Result<String, VarError> {
         self.get("NERV_LOG_LEVEL")
     }
 
-    pub fn q_log_stdout(&self) -> bool {
-        self.get_os("Q_LOG_STDOUT").is_some()
-    }
-
-    pub fn amazon_q_sigv4(&self) -> bool {
-        self.get("AMAZON_Q_SIGV4").is_ok_and(|v| !v.is_empty())
-    }
-
-    pub fn amazon_q_chat_shell(&self) -> String {
-        self.get("AMAZON_Q_CHAT_SHELL")
-            .unwrap_or_else(|_| "bash".to_string())
-    }
-
-    pub fn q_cli_client_application(&self) -> Result<String, VarError> {
-        self.get("Q_CLI_CLIENT_APPLICATION")
-    }
-
-    pub fn q_parent(&self) -> Result<String, VarError> {
+    pub fn nerv_parent(&self) -> Result<String, VarError> {
         self.get("NERV_PARENT")
     }
 
-    pub fn q_term(&self) -> Result<String, VarError> {
-        self.get("NERV_TERM")
+    pub fn nerv_prompt_offset_workaround(&self) -> Result<String, VarError> {
+        self.get("NERV_PROMPT_OFFSET_WORKAROUND")
     }
 
-    pub fn q_using_zsh_autosuggestions(&self) -> bool {
-        self.get_os("NERV_USING_ZSH_AUTOSUGGESTIONS").is_some()
-    }
-
-    pub fn q_init_snapshot_test(&self) -> bool {
-        self.get_os("Q_INIT_SNAPSHOT_TEST").is_some()
-    }
-
-    pub fn q_desktop_release_url(&self) -> Result<String, VarError> {
-        self.get("Q_DESKTOP_RELEASE_URL")
-    }
-
-    pub fn q_inline_shell_completion_cache_enabled(&self) -> bool {
-        self.get_os("Q_INLINE_SHELL_COMPLETION_CACHE_DISABLE")
-            .is_none()
-    }
-
-    pub fn q_inline_shell_completion_history_count(&self) -> Result<String, VarError> {
-        self.get("Q_INLINE_SHELL_COMPLETION_HISTORY_COUNT")
-    }
-
-    pub fn q_inline_shell_completion_debounce_ms(&self) -> Result<String, VarError> {
-        self.get("Q_INLINE_SHELL_COMPLETION_DEBOUNCE_MS")
-    }
-
-    pub fn q_backend(&self) -> Result<String, VarError> {
-        self.get("Q_BACKEND")
-    }
-
-    pub fn q_prompt_offset_workaround(&self) -> Result<String, VarError> {
-        self.get("Q_PROMPT_OFFSET_WORKAROUND")
-    }
-
-    pub fn q_use_sendmessage(&self) -> bool {
-        self.get("Q_USE_SENDMESSAGE").is_ok_and(|v| !v.is_empty())
-    }
-
-    pub fn q_custom_cert(&self) -> Result<String, VarError> {
-        self.get("Q_CUSTOM_CERT")
-    }
-
-    pub fn has_q_parent(&self) -> bool {
-        self.q_parent().is_ok()
+    pub fn has_nerv_parent(&self) -> bool {
+        self.nerv_parent().is_ok()
     }
 }
 
