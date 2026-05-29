@@ -48,7 +48,13 @@ impl MatchingConfig {
     }
 
     /// Read from `~/.config/nerv/nerv.toml` (the documented location).
+    /// `NERV_CONFIG_FILE` overrides the path entirely — useful for
+    /// e2e tests that need to load a non-default config without
+    /// touching the user's real `~/.config`.
     pub fn load_default() -> Self {
+        if let Some(override_path) = std::env::var_os("NERV_CONFIG_FILE") {
+            return Self::load_from_path(Path::new(&override_path));
+        }
         match crate::paths::config_dir() {
             Some(dir) => Self::load_from_path(&dir.join("nerv.toml")),
             None => Self::default(),
