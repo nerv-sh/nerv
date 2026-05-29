@@ -13,6 +13,12 @@ readme.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+# `quickjs` opt-in: links nerv-quickjs and enables the Tier C
+# closure executor (Generator::Custom with embedded `source`).
+# Default-off so the v0.1 binary stays rquickjs-free.
+quickjs = ["dep:nerv-quickjs"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -24,6 +30,8 @@ flate2 = "1.1"
 notify = { workspace = true }
 toml = { workspace = true }
 unicode-width = { workspace = true }
+# Optional Tier C executor — only compiled when --features quickjs.
+nerv-quickjs = { path = "../nerv-quickjs", optional = true }
 
 [[bin]]
 name = "build-specs"
