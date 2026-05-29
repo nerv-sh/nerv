@@ -76,6 +76,15 @@
 - ✅ **smart description fallback**: cd/z 같은 folder-only emit 의 footer 가 모두 "dir" 이던 문제. `dir_summary` 가 read_dir 1회로 `n items` / `empty` / `1 item` 출력. dotfile 제외, 200 entries cap (latency bound). 50µs/dir 추정.
 - ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. 서브커맨드/옵션/제너레이터 출력 전부 동일하게 게이트. 매칭 알고리즘: `nerv-engine::complete::matches_filter` + `matches_name`.
 - ✅ **Homebrew tap 인프라**: `packaging/homebrew/nerv.rb` Formula 템플릿 (ARM-only `aarch64-apple-darwin`, `brew services` 통합). `.github/workflows/homebrew-bump.yml` 가 GitHub release 발행 시 자동으로 `nerv-sh/homebrew-tap` 의 Formula 를 버전+sha256 갱신. 사용자 액션: tap repo 생성 + `HOMEBREW_TAP_TOKEN` PAT secret 추가.
+- ✅ **icon glyph width contract**: `sanitize_icon` 이 `unicode-width` 로 non-ASCII glyph display width == 2 강제 (이전 ≤4 byte gate 만으로는 ambiguous-width `⚠` / Latin-extended `à` 통과 → 1-cell 밀림). ASCII = width 1, non-ASCII = width 2 외 거부. 위젯 측은 "non-ASCII = 2 cells" 가정 그대로 유지 — contract 가 엔진에서 보장.
+- ✅ **흡수 crate 브랜드 strip (active surface)**:
+  - **env_var module 리네이밍**: `nerv_util::consts::env_var` 의 13 const + ad-hoc figterm-contract 6 string (Q_IS_LOGIN_SHELL / Q_EXECUTION_STRING / Q_SHELL_EXTRA_ARGS / Q_START_TEXT / Q_TERM_TMUX / Q_DISABLE_AUTOCOMPLETE) + private static (nerv-log) Q_* → NERV_*. QTERM_SESSION_ID → NERV_PTY_SESSION_ID, PROCESS_LAUNCHED_BY_Q → PROCESS_LAUNCHED_BY_NERV.
+  - **nerv-os::Env 정리**: dead Q_*/AMAZON_Q_* 접근자 14개 삭제 (telemetry / inline shell completion / desktop release URL / sigv4 / custom certs / sendmessage workaround / Q_CODESPACES·Q_CI 오버라이드). 생존 6개 메서드 (q_log_level → nerv_log_level 등) 리네이밍 + 5 callsite (nerv-log / nerv-pty / nerv-term / nerv-util) 동기 갱신. env.rs -54 LOC.
+  - **CLI / PRODUCT 리네이밍**: CLI_BINARY_NAME `q` → `nerv`, PTY_BINARY_NAME `qterm` → `nerv-pty`, CLI_CRATE_NAME `q_cli` → `nerv-cli`, URL_SCHEMA `q` → `nerv`, PRODUCT_NAME `Amazon Q` → `Nerv`, GITHUB_REPO_NAME `aws/amazon-q-developer-cli` → `nerv-sh/nerv`. `# {PRODUCT_NAME} pre block` 마커가 자동으로 `# Nerv pre block` 으로 흐름 → CLAUDE.md §4 invariant (no `# Q pre block` 잔존) 충족.
+  - **dead 산출물 삭제**: CHAT_BINARY_NAME 와 nerv-log 의 qchat mcp.log dead branch (35 LOC + LogGuard._mcp_file_guard 필드), CLI_BINARY_NAME_MINIMAL, OLD_PRODUCT_NAME / OLD_CLI_BINARY_NAMES / OLD_PTY_BINARY_NAMES (CodeWhisperer legacy), consts::url 모듈 (docs.aws.amazon.com 6 URL, 0 consumer).
+  - **bundle 식별자 예약**: APP_BUNDLE_ID `com.amazon.codewhisperer` → `sh.nerv.nerv`, APP_BUNDLE_NAME `Amazon Q.app` → `Nerv.app`. launchd_plist 테스트 + insta snapshot 동기 갱신. Apple Developer 서명 단계 (M0-8) 가 단순 codesign 으로 떨어짐.
+  - **settings key 리네이밍 + AI 제거**: `qterm.csi-u.enabled` → `pty.csi-u.enabled`, `qterm.enabled` → `pty.enabled`. CLAUDE.md §4 invariant (no AI) 에 따라 AI translate intercept (`#foo<Enter>` → `q translate 'foo'`) ~23 LOC + `ai.terminal-hash-sub` 설정 + `ai_enabled` 플래그 제거. on-disk migration 없음 — nerv-pty 는 M1 opt-in 으로 live user 없음.
+- ✅ **CI workflow_dispatch gate (2026-06-01 reset 까지)**: 1차 무료 Actions budget 90% (1,806 / 2,000 min) 도달. `ci.yml` 만 `on: workflow_dispatch:` 로 축소 (push/PR 트리거 정지). 다른 workflow 는 그대로 (release/homebrew-bump=tag/release event, upstream-monitor=cron 1·15일). restore 는 inline comment 한 줄 reflow.
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
@@ -84,9 +93,9 @@
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
 - bash / fish 지원 (큼)
 - Linux / Windows 지원 (큼)
-- figterm PTY shim opt-in (`NERV_PTY=1`)
+- figterm PTY shim opt-in (`NERV_PTY=1`) — main.rs 980줄 + figterm-ipc + remote-ipc 정합 필요
 - E5 manifest, spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
-- icon 글리프 width 보정 (emoji 2 col 시 alignment 1 cell 밀림 — 현재는 MVP tradeoff)
+- 브랜드 strip 잔여 (defer): AMAZON_Q_BUILD_* compile-time env vars, RUNTIME_DIR_NAME (`cwrun`) / DATA_DIR_NAME (`amazon-q`) on-disk migration, TAURI_PRODUCT_NAME / APP_PROCESS_NAME (Linux 파생, 본선 macOS-only 에선 dead), Linux package name / desktop entry
 - aws 624 closure-form generators (`rquickjs` opt-in 필요)
 
 ## 4. 절대 깨면 안 되는 불변식
@@ -110,7 +119,8 @@
 | PTY shim | `figterm` (`nerv-pty`) 는 **M1 opt-in only**. M0 ZLE widget 과 상호 배타. `NERV_PTY=1` 환경변수로 분기 | PLAN §5.8 / §6.2 |
 | Rust | toolchain 1.85, **edition 2024** (upstream 정합). v0.5.1 의 edition 2021 폐기. 변경 시 PLAN §7 + `rust-toolchain.toml` + 본 §4 동시 갱신 | `rust-toolchain.toml` |
 | vendor 편집 | `vendor/withfig-autocomplete/` 와 `vendor/aws-autocomplete/` **양쪽 모두 직접 편집 금지**. 변경은 `vendor-patches/{upstream,self}/` 또는 upstream PR | spec-conversion-policy §5.2 |
-| icon sanitize | `Suggestion.icon` 은 절대 `fig://*` URL 통과 금지 — `sanitize_icon` 으로 strip. ≤4 byte (대략 emoji 1개 + ASCII 1글자) 만 허용. 위젯이 raw bytes 를 그대로 prefix 로 출력함 | `nerv-engine/src/complete.rs::sanitize_icon` |
+| icon sanitize | `Suggestion.icon` 은 절대 `fig://*` URL 통과 금지 — `sanitize_icon` 으로 strip. ≤4 byte + **non-ASCII 는 `unicode-width` width==2 강제** (Latin-extended `à` / ambiguous-width `⚠` 거부 — 1-cell 밀림 방지). ASCII 는 단일 1글자만. 위젯이 non-ASCII = 2 cells 가정하고 row 정렬하므로 엔진이 contract 를 보장해야 함 | `nerv-engine/src/complete.rs::sanitize_icon` |
+| 흡수 crate 브랜드 | 흡수 crate 의 Q_*/Amazon Q/qterm/qchat 식별자는 모두 NERV_*/Nerv/nerv-pty 로 재배선 후 활성화. `# Q pre block` / `# Fig pre block` 마커 잔존 금지 — `PRODUCT_NAME = "Nerv"` 흐름으로 자동 reflow. dead Q_* 접근자 / AI/translate hook / qchat mcp.log branch / desktop-only 산출물 (TAURI_PRODUCT_NAME 등 Linux-only path 는 별 PR) 은 흡수 시 직접 strip. `vendor/aws-autocomplete/` 미수정 mirror 는 그대로 — strip 은 `crates/nerv-*` 사본 측에서만 | `crates/nerv-util/src/consts.rs` / `crates/nerv-os/src/env.rs` |
 | filterStrategy 우선 | per-arg `filterStrategy: "substring"` 은 user `MatchMode` (Prefix/Fuzzy) 무관 우선. spec author 가 명시한 의도를 user mode 가 덮어쓰지 않음. `"fuzzy"` 값 자체는 user mode 와 동일 결과 (Prefix→prefix / Fuzzy→subsequence) | `nerv-engine/src/complete.rs::matches_filter` 첫 분기 |
 | 4-field wire format | `nerv _complete` 출력은 `insertion\tdisplay\tdescription\ticon` 4-tab. icon 비면 빈 문자열. **field 추가 시 widget parser 동시 갱신 필수** | `crates/nerv-cli/src/main.rs::print_suggestion` + `_nerv.zsh` |
 | parserDirectives 적용 | `flagsArePosixNoncompliant` 는 root spec 의 directive 만 체크 (subcommand chain 상속 X). Go/docker/kubectl 처럼 root 부터 일관된 스타일이 권장 | `nerv-engine/src/spec_parser.rs::ShortOption` arm |
