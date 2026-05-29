@@ -12,16 +12,14 @@ pub const APP_PROCESS_NAME: &str = "q_desktop.exe";
 /// The name configured under `"package.productName"` in the tauri.conf.json file.
 pub const TAURI_PRODUCT_NAME: &str = "q_desktop";
 
-pub const CLI_BINARY_NAME: &str = "q";
-pub const CLI_BINARY_NAME_MINIMAL: &str = "q-minimal";
-pub const CHAT_BINARY_NAME: &str = "qchat";
-pub const PTY_BINARY_NAME: &str = "qterm";
+pub const CLI_BINARY_NAME: &str = "nerv";
+pub const PTY_BINARY_NAME: &str = "nerv-pty";
 
-pub const CLI_CRATE_NAME: &str = "q_cli";
+pub const CLI_CRATE_NAME: &str = "nerv-cli";
 
-pub const URL_SCHEMA: &str = "q";
+pub const URL_SCHEMA: &str = "nerv";
 
-pub const PRODUCT_NAME: &str = "Amazon Q";
+pub const PRODUCT_NAME: &str = "Nerv";
 
 pub const RUNTIME_DIR_NAME: &str = "cwrun";
 
@@ -34,12 +32,7 @@ pub const DATA_DIR_NAME: &str = "AmazonQ";
 /// Backup directory name
 pub const BACKUP_DIR_NAME: &str = ".amazon-q.dotfiles.bak";
 
-// These are the old "CodeWhisperer" branding, used anywhere we will not update to Amazon Q
-pub const OLD_PRODUCT_NAME: &str = "CodeWhisperer";
-pub const OLD_CLI_BINARY_NAMES: &[&str] = &["cw"];
-pub const OLD_PTY_BINARY_NAMES: &[&str] = &["cwterm"];
-
-pub const GITHUB_REPO_NAME: &str = "aws/amazon-q-developer-cli";
+pub const GITHUB_REPO_NAME: &str = "nerv-sh/nerv";
 
 pub mod url {
     pub const USER_MANUAL: &str =
