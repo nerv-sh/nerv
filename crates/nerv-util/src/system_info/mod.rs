@@ -259,13 +259,13 @@ pub fn in_wsl() -> bool {
 /// Is the calling binary running on a remote instance
 pub fn is_remote() -> bool {
     // TODO(chay): Add detection for inside docker container
-    in_ssh() || in_cloudshell() || in_wsl() || nerv_os::Env::new().q_fake_is_remote()
+    in_ssh() || in_cloudshell() || in_wsl() || nerv_os::Env::new().nerv_fake_is_remote()
 }
 
 /// Determines if we have an IPC path to a Desktop app from a remote environment
 pub fn has_parent() -> bool {
     static HAS_PARENT: OnceLock<bool> = OnceLock::new();
-    *HAS_PARENT.get_or_init(|| nerv_os::Env::new().has_q_parent())
+    *HAS_PARENT.get_or_init(|| nerv_os::Env::new().has_nerv_parent())
 }
 
 /// This true if the env var `AWS_EXECUTION_ENV=CloudShell`

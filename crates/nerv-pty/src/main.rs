@@ -440,7 +440,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
         std::env::set_var(NERV_PTY_SESSION_ID, &session_id);
     }
 
-    let parent_id = nerv_os::Env::new().q_parent().ok();
+    let parent_id = nerv_os::Env::new().nerv_parent().ok();
 
     let mut terminal = SystemTerminal::new_from_stdio()?;
     let screen_size = terminal.get_screen_size()?;
