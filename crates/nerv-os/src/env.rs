@@ -174,7 +174,7 @@ impl Env {
     }
 
     pub fn q_log_level(&self) -> Result<String, VarError> {
-        self.get("Q_LOG_LEVEL")
+        self.get("NERV_LOG_LEVEL")
     }
 
     pub fn q_log_stdout(&self) -> bool {
@@ -195,15 +195,15 @@ impl Env {
     }
 
     pub fn q_parent(&self) -> Result<String, VarError> {
-        self.get("Q_PARENT")
+        self.get("NERV_PARENT")
     }
 
     pub fn q_term(&self) -> Result<String, VarError> {
-        self.get("Q_TERM")
+        self.get("NERV_TERM")
     }
 
     pub fn q_using_zsh_autosuggestions(&self) -> bool {
-        self.get_os("Q_USING_ZSH_AUTOSUGGESTIONS").is_some()
+        self.get_os("NERV_USING_ZSH_AUTOSUGGESTIONS").is_some()
     }
 
     pub fn q_init_snapshot_test(&self) -> bool {

@@ -14,7 +14,7 @@ use tracing_subscriber::{EnvFilter, Registry, fmt};
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
 const DEFAULT_FILTER: LevelFilter = LevelFilter::ERROR;
 
-static Q_LOG_LEVEL_GLOBAL: Mutex<Option<String>> = Mutex::new(None);
+static NERV_LOG_LEVEL_GLOBAL: Mutex<Option<String>> = Mutex::new(None);
 static MAX_LEVEL: Mutex<Option<LevelFilter>> = Mutex::new(None);
 static ENV_FILTER_RELOADABLE_HANDLE: Mutex<
     Option<tracing_subscriber::reload::Handle<EnvFilter, Registry>>,
@@ -196,7 +196,7 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
 ///
 /// Returns a string identifying the current log level.
 pub fn get_log_level() -> String {
-    Q_LOG_LEVEL_GLOBAL
+    NERV_LOG_LEVEL_GLOBAL
         .lock()
         .unwrap()
         .clone()
@@ -216,7 +216,7 @@ pub fn set_log_level(level: String) -> Result<String, Error> {
     info!("Setting log level to {level:?}");
 
     let old_level = get_log_level();
-    *Q_LOG_LEVEL_GLOBAL.lock().unwrap() = Some(level);
+    *NERV_LOG_LEVEL_GLOBAL.lock().unwrap() = Some(level);
 
     let filter_layer = create_filter_layer();
     *MAX_LEVEL.lock().unwrap() = filter_layer.max_level_hint();
@@ -251,7 +251,7 @@ pub fn get_log_level_max() -> LevelFilter {
 fn create_filter_layer() -> EnvFilter {
     let directive = Directive::from(DEFAULT_FILTER);
 
-    let log_level = Q_LOG_LEVEL_GLOBAL
+    let log_level = NERV_LOG_LEVEL_GLOBAL
         .lock()
         .unwrap()
         .clone()
