@@ -18,6 +18,13 @@ typeset -gi __NERV_E1_SHOWN=0
 typeset -gi __NERV_SELECTED=1
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
+
+# Tighten KEYTIMEOUT so single-press Esc dismisses the popup
+# without zsh's default 0.4s wait for longer escape sequences.
+# 1 = 10ms — fast enough for human perception, still safe for
+# multi-byte arrow keys on local terminals. User can override
+# after the init block.
+KEYTIMEOUT=1
 typeset -gi __NERV_WIDTH=46
 typeset -gi __NERV_PASTING=0
 typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
@@ -73,8 +80,12 @@ __nerv_show_popup() {
   fi
   local end=$(( start + visible - 1 ))
 
+  # Wire format from `nerv _complete`:
+  #   insertion \t display \t description \t icon
+  # All 4 fields tab-separated; icon may be empty.
   local sel_line="${items[$__NERV_SELECTED]}"
   local sel_desc="${sel_line#*	}"; sel_desc="${sel_desc#*	}"
+  sel_desc="${sel_desc%%	*}"  # drop trailing icon field
 
   # Auto-size: measure max display + max desc across ALL items
   # (not just the window), so window-sliding doesn't reshape the
@@ -85,6 +96,7 @@ __nerv_show_popup() {
     local rest="${line#*	}"
     local d="${rest%%	*}"
     local desc_full="${rest#*	}"
+    desc_full="${desc_full%%	*}"  # drop icon field
     (( ${#d} > max_disp )) && max_disp=${#d}
     (( ${#desc_full} > max_desc )) && max_desc=${#desc_full}
   done
@@ -101,8 +113,24 @@ __nerv_show_popup() {
   local foot_hint=$max_desc
   (( foot_hint > 60 )) && foot_hint=60
 
-  # Layout: " $ "(4) + display + " "(1)
-  local body=$(( 4 + max_disp + 1 ))
+  # Pre-scan items: if any row carries an emoji icon (4th field
+  # contains a non-ASCII byte), the glyph occupies 2 cells. Reserve
+  # an extra column in body so the right border doesn't clip.
+  local has_wide_icon=0
+  for (( i=1; i<=total; i++ )); do
+    local _l="${items[$i]}"
+    local _t="${_l#*	}"; _t="${_t#*	}"
+    local _ic="${_t#*	}"; [[ "$_ic" == "$_t" ]] && _ic=""
+    [[ "$_ic" == *[^[:ascii:]]* ]] && { has_wide_icon=1; break; }
+  done
+  # Layout: " G " + display + " " — slot is 3 cols (ASCII glyph) or
+  # 4 cols (emoji) depending on whether ANY row uses an emoji.
+  local body
+  if (( has_wide_icon )); then
+    body=$(( 5 + max_disp + 1 ))
+  else
+    body=$(( 4 + max_disp + 1 ))
+  fi
   # Footer needs " " + desc + " " (= foot_hint + 2). Pick whichever
   # is wider so neither row wraps.
   local W=$body
@@ -149,20 +177,34 @@ __nerv_show_popup() {
     local rest="${line#*	}"
     local display="${rest%%	*}"
     (( ${#display} > max_disp )) && display="${display:0:$max_disp}"
+    # Pull icon (4th field). Empty → blank space (slot reserved
+    # for alignment). `$` placeholder previously cluttered cd / ls
+    # lists where every row would say `$ foo/` with no signal.
+    local trail="${rest#*	}"           # description + tab + icon
+    local row_icon="${trail#*	}"        # everything after description tab
+    [[ "$row_icon" == "$trail" ]] && row_icon=""  # no tab → no icon
+    local glyph=" "
+    [[ -n "$row_icon" ]] && glyph="$row_icon"
 
-    # Layout inside one row: " $ display<padding>"
-    # ($ icon takes 2 cols including space after.) Right-pad with
-    # spaces to fill row_body so the right vertical bar lines up.
-    local visible_chars=$(( 3 + ${#display} ))  # " $ " + display
+    # Glyph slot width (display cells, not bytes). Emoji = 2 cells,
+    # ASCII/space = 1. When the popup has ANY emoji row, ascii rows
+    # need an extra trailing space so display columns align.
+    local glyph_w=1
+    [[ "$glyph" == *[^[:ascii:]]* ]] && glyph_w=2
+    if (( has_wide_icon && glyph_w == 1 )); then
+      glyph="$glyph "
+      glyph_w=2
+    fi
+    local visible_chars=$(( 2 + glyph_w + ${#display} ))  # " G " + display
     local pad_n=$(( row_body - visible_chars ))
     (( pad_n < 0 )) && pad_n=0
     local row_pad=""
     repeat $pad_n; do row_pad+=" "; done
 
     if (( i == __NERV_SELECTED )); then
-      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}\$${SELFG} ${display}${row_pad}${BDR}│${R}")
+      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}${glyph}${SELFG} ${display}${row_pad}${BDR}│${R}")
     else
-      colored+=("  ${BG}${BDR}│${BG} ${ICON}\$${ITEM} ${display}${row_pad}${BDR}│${R}")
+      colored+=("  ${BG}${BDR}│${BG} ${ICON}${glyph}${ITEM} ${display}${row_pad}${BDR}│${R}")
     fi
   done
 
@@ -282,9 +324,18 @@ __nerv_insert_selected() {
 # ---------------------------------------------------------------------------
 __nerv_complete() {
   if [[ -n "${NERV_DEBUG:-}" ]]; then
-    print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS}" >> /tmp/nerv-debug.log
+    print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS} CURSOR=$CURSOR" >> /tmp/nerv-debug.log
   fi
   (( __NERV_PASTING )) && return
+  # Popup only when cursor is at the end of the buffer (LBUFFER ==
+  # full BUFFER, i.e. RBUFFER empty). Fig behavior: typing →
+  # popup; left-arrow into the middle → popup hides; right-arrow
+  # back to the end → popup reappears.
+  if [[ -n "$RBUFFER" ]]; then
+    __nerv_hide_popup
+    __NERV_PREV_LBUFFER=""
+    return
+  fi
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=1
@@ -441,7 +492,9 @@ bindkey $'\eOA' __nerv_select_up
 # Right-Arrow: accept ghost text (POSTDISPLAY) when at end of line.
 # Falls back to plain forward-char in the middle of the buffer or
 # when there's no ghost — matches user expectation for cursor
-# movement inside an existing edit.
+# movement inside an existing edit. After forward-char, re-trigger
+# __nerv_complete so the popup reappears when the cursor lands back
+# at the end of the buffer.
 __nerv_accept_ghost() {
   if (( ${+POSTDISPLAY} )) && [[ -n "$POSTDISPLAY" ]] && [[ -z "$RBUFFER" ]]; then
     LBUFFER+="$POSTDISPLAY"
@@ -450,15 +503,58 @@ __nerv_accept_ghost() {
     __nerv_hide_popup
   else
     zle forward-char
+    __nerv_complete
   fi
 }
 zle -N __nerv_accept_ghost
 bindkey $'\e[C' __nerv_accept_ghost
 bindkey $'\eOC' __nerv_accept_ghost
 
+# Cursor-position state tracking. The pre-redraw hook below fires
+# on every ZLE redraw and uses this to detect transitions between
+# "at end of buffer" and "in the middle" without having to bind
+# every individual movement key (left, ctrl-a, home, etc.).
+typeset -gi __NERV_LAST_AT_END=1
+
+__nerv_pre_redraw() {
+  local at_end=0
+  [[ -z "$RBUFFER" ]] && at_end=1
+  # Only act on state TRANSITIONS to avoid running the heavy
+  # __nerv_complete path on every redraw.
+  if (( at_end != __NERV_LAST_AT_END )); then
+    __NERV_LAST_AT_END=$at_end
+    if (( ! at_end )); then
+      __nerv_hide_popup
+      __NERV_PREV_LBUFFER=""
+    else
+      # Cursor returned to end → re-trigger completion query.
+      __NERV_PREV_LBUFFER=""
+      __nerv_complete
+    fi
+  fi
+}
+zle -N zle-line-pre-redraw __nerv_pre_redraw
+
 __nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
 zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
+
+# Esc closes an active popup. When no popup is up, falls through to
+# zsh's usual Esc handling (send-break — same as the unbound default).
+# KEYTIMEOUT is set to 1 (10ms) at the top of this file so the
+# bare-Esc binding fires instantly without waiting for a longer
+# escape sequence like `\e[A`.
+__nerv_escape() {
+  if (( __NERV_ACTIVE )); then
+    __nerv_hide_popup
+    __NERV_PREV_LBUFFER=""
+    POSTDISPLAY=''
+  else
+    zle .send-break 2>/dev/null || true
+  fi
+}
+zle -N __nerv_escape
+bindkey '\e' __nerv_escape
 
 # Bracketed paste: suppress completions during paste
 __nerv_bracketed_paste() {
