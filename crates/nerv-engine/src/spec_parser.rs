@@ -69,6 +69,16 @@ pub struct Subcommand {
     /// when equal / absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+    /// Fig parity icon glyph (emoji or single visible char). Stripped
+    /// by the TS converter for `fig://*` URLs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Fig parity `parserDirectives.flagsArePosixNoncompliant`: when
+    /// true, single-dash multi-char tokens (`-foo`) are treated as
+    /// long options, not chained short flags. Common with Go-style
+    /// CLIs (`docker`, `kubectl`).
+    #[serde(default, rename = "flagsArePosixNoncompliant")]
+    pub flags_are_posix_noncompliant: bool,
 }
 
 /// A long / short option flag, possibly with one or more attached
@@ -103,6 +113,16 @@ pub struct Opt {
     /// 50 (Fig convention). Falls back to alpha when equal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+    /// Fig parity: when true, the option's argument MUST follow with
+    /// `=` (or a custom string in Fig — we support bool only). Example:
+    /// `--color=auto` valid, `--color auto` is two separate tokens.
+    /// Completion appends `=` to the option insertion so the user
+    /// continues into the arg in one motion.
+    #[serde(default, rename = "requiresSeparator", alias = "requires_separator")]
+    pub requires_separator: bool,
+    /// Fig parity icon glyph. Same rules as Subcommand.icon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A positional or option-bound argument.
@@ -128,6 +148,30 @@ pub struct Arg {
     /// Dynamic-generator markers. M0-5 surfaces these as
     /// metadata only; M1 + `rquickjs` opt-in executes them.
     pub generators: Vec<Generator>,
+    /// Fig parity: characters that split the typed token into
+    /// "context prefix + query". e.g. `cargo search "tokio,serde"` →
+    /// after comma, only the trailing `serde` is the query; the
+    /// completion preserves `tokio,` in the insertion. Stored as
+    /// a string of single-byte delimiter chars (`","`, `"@"`, etc.).
+    /// Function-form `getQueryTerm` is Tier C and deferred to M1
+    /// (PLAN §5.7 — `rquickjs` opt-in). The TS converter drops
+    /// function-form values and only emits string/array forms.
+    #[serde(
+        default,
+        rename = "getQueryTerm",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub get_query_term: Option<String>,
+    /// Fig parity: how typed prefix matches against candidates.
+    /// Values: `"prefix"` (default) | `"substring"` | `"fuzzy"`.
+    /// **Fuzzy is M1 opt-in only** (PLAN §5.1) — v1.0 silently
+    /// downgrades `"fuzzy"` to prefix matching.
+    #[serde(
+        default,
+        rename = "filterStrategy",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub filter_strategy: Option<String>,
 }
 
 /// Rich suggestion entry. Mirrors the relevant fields of
@@ -687,24 +731,50 @@ fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
                         arg_state = None;
                     }
                 }
+            } else if opt.requires_separator {
+                // `--color` without `=val` cannot bind the next
+                // whitespace-separated token as its arg.
+                arg_state = None;
             }
             state.option_args = arg_state;
             TokenKind::OptionName
         }
         TokenShape::ShortOption { chars } => {
             // Single short → normal option; chain (≥2) → ChainedOption.
-            if chars.len() == 1 {
-                let lookup = format!("-{}", chars[0]);
-                let Some(opt) =
-                    find_option_inherited(root, &state.subcommand_path, &lookup)
-                else {
+            // Exception: `parserDirectives.flagsArePosixNoncompliant`
+            // at the root spec treats `-foo` as a long option named
+            // `-foo`, not as chained shorts. Common with Go-style
+            // CLIs (`-format`, `-output`).
+            if chars.len() > 1 && root.flags_are_posix_noncompliant {
+                let lookup: String = std::iter::once('-').chain(chars.iter().copied()).collect();
+                let Some(opt) = find_option_inherited(root, &state.subcommand_path, &lookup) else {
                     return TokenKind::Unknown;
                 };
                 if !can_consume_option(opt, &state.consumed_options) {
                     return TokenKind::Unknown;
                 }
                 state.consumed_options.push(opt.clone());
-                state.option_args = ArgState::new(&opt.args);
+                state.option_args = if opt.requires_separator {
+                    None
+                } else {
+                    ArgState::new(&opt.args)
+                };
+                return TokenKind::OptionName;
+            }
+            if chars.len() == 1 {
+                let lookup = format!("-{}", chars[0]);
+                let Some(opt) = find_option_inherited(root, &state.subcommand_path, &lookup) else {
+                    return TokenKind::Unknown;
+                };
+                if !can_consume_option(opt, &state.consumed_options) {
+                    return TokenKind::Unknown;
+                }
+                state.consumed_options.push(opt.clone());
+                state.option_args = if opt.requires_separator {
+                    None
+                } else {
+                    ArgState::new(&opt.args)
+                };
                 return TokenKind::OptionName;
             }
             // Chained: each char must resolve to a flag-only (no args)
@@ -712,9 +782,7 @@ fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
             // mark Unknown — TS reference treats those as opaque.
             for c in &chars {
                 let lookup = format!("-{c}");
-                let Some(opt) =
-                    find_option_inherited(root, &state.subcommand_path, &lookup)
-                else {
+                let Some(opt) = find_option_inherited(root, &state.subcommand_path, &lookup) else {
                     return TokenKind::Unknown;
                 };
                 if !opt.args.is_empty() {
@@ -1530,6 +1598,102 @@ mod tests {
         s.options[0].is_persistent = false;
         let opt = find_option_inherited(&s, &["git".into(), "commit".into()], "--help");
         assert!(opt.is_none(), "non-persistent --help must not inherit");
+    }
+
+    fn root_with_requires_separator() -> Spec {
+        Subcommand {
+            name: "ls".into(),
+            options: vec![Opt {
+                names: vec!["--color".into()],
+                requires_separator: true,
+                args: vec![Arg {
+                    name: Some("when".into()),
+                    suggestions: vec![
+                        RawSuggestion {
+                            name: "auto".into(),
+                            ..Default::default()
+                        },
+                        RawSuggestion {
+                            name: "never".into(),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn posix_noncompliant_treats_multichar_short_as_long() {
+        // Go-style CLI: `-format json` is one option named `-format`,
+        // not chained `-f -o -r -m -a -t`.
+        let s = Subcommand {
+            name: "go".into(),
+            flags_are_posix_noncompliant: true,
+            options: vec![Opt {
+                names: vec!["-format".into()],
+                args: vec![Arg::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("go -format json");
+        let r = parse_arguments(&s, &toks, 999);
+        // `-format` should be matched as the option (not Unknown).
+        let kinds: Vec<_> = r.annotations.iter().map(|a| a.kind).collect();
+        assert!(
+            kinds.contains(&TokenKind::OptionName),
+            "expected -format to bind as long-style option, got {:?}",
+            kinds
+        );
+    }
+
+    #[test]
+    fn posix_compliant_default_chains_shorts() {
+        // Without the directive, `-foo` is chained `-f -o -o` and
+        // is Unknown unless all single-char flags exist.
+        let s = Subcommand {
+            name: "git".into(),
+            options: vec![Opt {
+                names: vec!["-format".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let toks = tokenize("git -format");
+        let r = parse_arguments(&s, &toks, 999);
+        // `-format` does NOT bind as long option in posix mode →
+        // each char lookup fails → Unknown.
+        let last = r.annotations.last().unwrap();
+        assert_eq!(last.kind, TokenKind::Unknown);
+    }
+
+    #[test]
+    fn requires_separator_eq_form_consumes_arg() {
+        // `ls --color=auto` — opt + arg both bound in one token.
+        let s = root_with_requires_separator();
+        let toks = tokenize("ls --color=auto");
+        let r = parse_arguments(&s, &toks, 999);
+        // After `=value` form, option_args advances and clears →
+        // no pending active_option_arg.
+        assert_eq!(r.active_option_arg, None);
+    }
+
+    #[test]
+    fn requires_separator_space_form_does_not_consume_next() {
+        // `ls --color auto` — without `=`, the next token is NOT
+        // the option arg. active_option_arg stays None and the next
+        // token classifies as a Word (subcommand arg, not option arg).
+        let s = root_with_requires_separator();
+        let toks = tokenize("ls --color ");
+        let r = parse_arguments(&s, &toks, 11);
+        assert_eq!(
+            r.active_option_arg, None,
+            "requires_separator opt without `=` must not pend arg"
+        );
     }
 
     #[test]

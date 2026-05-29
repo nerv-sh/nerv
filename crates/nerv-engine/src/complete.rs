@@ -360,7 +360,9 @@ pub fn complete_in(
         if arg_has_dynamic_source(current) {
             subs.extend(emit_arg_candidates(current, &prefix, cwd));
         }
-        subs.sort_by(|a, b| a.display.cmp(&b.display));
+        // Sort by priority first (script results get priority 75
+        // and float above default-50 subcommands), then alpha.
+        subs.sort_by(sort_by_priority_then_alpha);
         subs.dedup_by(|a, b| a.display == b.display);
         subs
     } else {
@@ -438,6 +440,58 @@ fn sort_by_priority_then_alpha(a: &Suggestion, b: &Suggestion) -> std::cmp::Orde
     pb.cmp(&pa).then_with(|| a.display.cmp(&b.display))
 }
 
+/// Fig parity filterStrategy matcher. Default is prefix matching;
+/// `"substring"` checks `contains`. **`"fuzzy"` is M1 opt-in only**
+/// (PLAN §5.1) — silently downgraded to prefix in v1.0 so specs
+/// declaring `filterStrategy: "fuzzy"` still work, just stricter.
+fn matches_filter(name: &str, query: &str, strategy: Option<&str>) -> bool {
+    match strategy {
+        Some("substring") => name.contains(query),
+        // "prefix" / "default" / None / "fuzzy" (M1 opt-in) → prefix
+        _ => name.starts_with(query),
+    }
+}
+
+/// Fig parity getQueryTerm splitter. Given the raw typed token and
+/// a string of delimiter chars (`","`, `"@"`, …), return
+/// `(query, insert_prefix)` where `query` is the substring AFTER
+/// the last delimiter (or whole token when no delim found), and
+/// `insert_prefix` is the part to preserve in the insertion so
+/// pressing Tab doesn't clobber the already-typed leading text.
+fn split_by_query_term<'a>(prefix: &'a str, delims: Option<&str>) -> (&'a str, &'a str) {
+    let Some(delims) = delims else {
+        return (prefix, "");
+    };
+    if delims.is_empty() {
+        return (prefix, "");
+    }
+    // Find last byte position where any delimiter char occurs.
+    let mut last: Option<usize> = None;
+    for (i, ch) in prefix.char_indices() {
+        if delims.chars().any(|d| d == ch) {
+            last = Some(i + ch.len_utf8());
+        }
+    }
+    match last {
+        Some(idx) => (&prefix[idx..], &prefix[..idx]),
+        None => (prefix, ""),
+    }
+}
+
+/// Fig parity icon sanitizer. Many specs reference Fig's icon
+/// registry via `fig://icon?type=...` URLs which mean nothing in a
+/// terminal. Strip those and accept only short visible glyphs
+/// (typically a single emoji or one ASCII char). Anything longer
+/// than 4 bytes is also rejected as defense against accidental
+/// long-string injection that would distort popup row widths.
+fn sanitize_icon(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() || s.starts_with("fig://") || s.len() > 4 {
+        return None;
+    }
+    Some(s.to_string())
+}
+
 fn walk_to_current<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand> {
     let mut node = root;
     for name in path.iter().skip(1) {
@@ -477,6 +531,7 @@ fn emit_subcommands(node: &Subcommand, prefix: &str) -> Vec<Suggestion> {
             description: sc.description.clone(),
             kind: SuggestionKind::Subcommand,
             priority: sc.priority,
+            icon: sanitize_icon(sc.icon.as_deref()),
         })
         .collect();
     out.sort_by(sort_by_priority_then_alpha);
@@ -493,15 +548,20 @@ fn emit_options_with_ancestors(
     prefix: &str,
 ) -> Vec<Suggestion> {
     let emit = |opt: &crate::spec_parser::Opt| -> Vec<Suggestion> {
+        // Fig parity: when `requiresSeparator` is set and the option
+        // takes args, append `=` to the insertion so the cursor
+        // continues into the arg in one keystroke (`--color=`).
+        let needs_eq = opt.requires_separator && !opt.args.is_empty();
         opt.names
             .iter()
             .filter(|n| n.starts_with(prefix))
             .map(|n| Suggestion {
-                insertion: n.clone(),
+                insertion: if needs_eq { format!("{n}=") } else { n.clone() },
                 display: n.clone(),
                 description: opt.description.clone(),
                 kind: SuggestionKind::Flag,
                 priority: opt.priority,
+                icon: sanitize_icon(opt.icon.as_deref()),
             })
             .collect()
     };
@@ -517,11 +577,11 @@ fn emit_options_with_ancestors(
                 continue;
             }
             // Don't double-emit if leaf already declared the same flag.
-            if opt.names.iter().any(|n| {
-                node.options
-                    .iter()
-                    .any(|local| local.names.contains(n))
-            }) {
+            if opt
+                .names
+                .iter()
+                .any(|n| node.options.iter().any(|local| local.names.contains(n)))
+            {
                 continue;
             }
             out.extend(emit(opt));
@@ -576,6 +636,13 @@ fn emit_candidates_for_arg(
     enclosing_opt: Option<&crate::spec_parser::Opt>,
 ) -> Vec<Suggestion> {
     let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
+    // Fig parity getQueryTerm: when the arg declares delimiter chars
+    // (e.g. ',' for `cargo search "tokio,serde"`), split the typed
+    // token into context-prefix + query-prefix. Matches operate on
+    // the query part; the insertion preserves the context prefix so
+    // the existing typed text isn't clobbered on Tab.
+    let (query, insert_prefix) = split_by_query_term(prefix, arg.get_query_term.as_deref());
+    let strategy = arg.filter_strategy.as_deref();
     // Description-extracted enum suggestions (Tier A-ish). Many Fig
     // specs put `{a|b|c}` directly in the description text instead
     // of populating `suggestions[]` — recover those as candidates
@@ -586,13 +653,14 @@ fn emit_candidates_for_arg(
         .and_then(extract_enum_from_description)
         .into_iter()
         .flatten()
-        .filter(|s| s.starts_with(prefix))
+        .filter(|s| matches_filter(s, query, strategy))
         .map(|s| Suggestion {
-            insertion: s.clone(),
+            insertion: format!("{insert_prefix}{s}"),
             display: s,
             description: desc_for_extract.map(|d| d.to_string()),
             kind: SuggestionKind::Argument,
             priority: None,
+            icon: None,
         })
         .collect();
 
@@ -604,13 +672,17 @@ fn emit_candidates_for_arg(
     out.extend(
         arg.suggestions
             .iter()
-            .filter(|s| s.name.starts_with(prefix))
-            .map(|s| Suggestion {
-                insertion: s.insert_value.clone().unwrap_or_else(|| s.name.clone()),
-                display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
-                description: s.description.clone(),
-                kind: SuggestionKind::Argument,
-                priority: s.priority,
+            .filter(|s| matches_filter(&s.name, query, strategy))
+            .map(|s| {
+                let base = s.insert_value.clone().unwrap_or_else(|| s.name.clone());
+                Suggestion {
+                    insertion: format!("{insert_prefix}{base}"),
+                    display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
+                    description: s.description.clone(),
+                    kind: SuggestionKind::Argument,
+                    priority: s.priority,
+                    icon: sanitize_icon(s.icon.as_deref()),
+                }
             }),
     );
 
@@ -626,13 +698,18 @@ fn emit_candidates_for_arg(
         _ => None,
     } {
         if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
-            out.extend(paths.into_iter().map(|(insertion, display, description)| Suggestion {
-                insertion,
-                display,
-                description,
-                kind: SuggestionKind::Argument,
-                priority: None,
-            }));
+            out.extend(
+                paths
+                    .into_iter()
+                    .map(|(insertion, display, description, icon)| Suggestion {
+                        insertion,
+                        display,
+                        description,
+                        kind: SuggestionKind::Argument,
+                        priority: None,
+                        icon,
+                    }),
+            );
         }
     }
     if matches!(
@@ -650,6 +727,7 @@ fn emit_candidates_for_arg(
                         description: Some("history".into()),
                         kind: SuggestionKind::Argument,
                         priority: None,
+                        icon: None,
                     }),
             );
         }
@@ -674,6 +752,7 @@ fn emit_candidates_for_arg(
                                     description: None,
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -684,25 +763,44 @@ fn emit_candidates_for_arg(
                             scripts
                                 .into_iter()
                                 .filter(|(name, _)| name.starts_with(prefix))
-                                .map(|(name, cmd)| Suggestion {
-                                    insertion: name.clone(),
-                                    display: name,
-                                    description: Some(cmd),
-                                    kind: SuggestionKind::Argument,
-                                    priority: None,
+                                .map(|(name, cmd)| {
+                                    // `!`-prefixed scripts are widely
+                                    // used as visual headers/dividers
+                                    // (e.g. `"!cli": "─── CLI scripts
+                                    // ──"`). They're not meant to run.
+                                    // Push them below subcommands so
+                                    // real scripts surface first; keep
+                                    // them visible at the bottom.
+                                    let is_header = name.starts_with('!');
+                                    Suggestion {
+                                        insertion: name.clone(),
+                                        display: name,
+                                        description: Some(cmd),
+                                        kind: SuggestionKind::Argument,
+                                        priority: Some(if is_header { 25 } else { 75 }),
+                                        // Q-style glyph: `$` colored
+                                        // purple by the widget's ICON
+                                        // escape. Visually distinct
+                                        // from folder (📁) and bare
+                                        // subcommand rows (blank).
+                                        icon: Some("$".into()),
+                                    }
                                 }),
                         );
                     }
                 }
                 crate::spec_parser::Generator::Filepaths { folders_only } => {
                     if let Some(paths) = filepaths_at(cwd, prefix, *folders_only) {
-                        out.extend(paths.into_iter().map(|(insertion, display, description)| Suggestion {
-                            insertion,
-                            display,
-                            description,
-                            kind: SuggestionKind::Argument,
-                            priority: None,
-                        }));
+                        out.extend(paths.into_iter().map(
+                            |(insertion, display, description, icon)| Suggestion {
+                                insertion,
+                                display,
+                                description,
+                                kind: SuggestionKind::Argument,
+                                priority: None,
+                                icon,
+                            },
+                        ));
                     }
                 }
                 crate::spec_parser::Generator::SshHosts => {
@@ -717,6 +815,7 @@ fn emit_candidates_for_arg(
                                     description: Some("SSH host".into()),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -730,6 +829,7 @@ fn emit_candidates_for_arg(
                                 description: Some("make target".into()),
                                 kind: SuggestionKind::Argument,
                                 priority: None,
+                                icon: None,
                             },
                         ));
                     }
@@ -746,6 +846,7 @@ fn emit_candidates_for_arg(
                                     description: Some("man page".into()),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -761,6 +862,7 @@ fn emit_candidates_for_arg(
                                     description: Some(kind.into()),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -780,6 +882,7 @@ fn emit_candidates_for_arg(
                                 description: Some("k8s resource".into()),
                                 kind: SuggestionKind::Argument,
                                 priority: None,
+                                icon: None,
                             },
                         ));
                     }
@@ -800,6 +903,7 @@ fn emit_candidates_for_arg(
                                     }),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -825,6 +929,7 @@ fn emit_candidates_for_arg(
                                     description: Some(format!("{path} (score {score:.1})")),
                                     kind: SuggestionKind::Argument,
                                     priority: None,
+                                    icon: None,
                                 }),
                         );
                     }
@@ -851,12 +956,13 @@ fn emit_candidates_for_arg(
                 out.extend(
                     paths
                         .into_iter()
-                        .map(|(insertion, display, description)| Suggestion {
+                        .map(|(insertion, display, description, icon)| Suggestion {
                             insertion,
                             display,
                             description,
                             kind: SuggestionKind::Argument,
                             priority: None,
+                            icon,
                         }),
                 );
             }
@@ -878,8 +984,8 @@ fn emit_candidates_for_arg(
 fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
     let n = name?.trim().to_ascii_lowercase();
     match n.as_str() {
-        "path" | "file" | "files" | "filepath" | "filename" | "src" | "dest"
-        | "source" | "destination" | "input" | "output" => Some(false),
+        "path" | "file" | "files" | "filepath" | "filename" | "src" | "dest" | "source"
+        | "destination" | "input" | "output" => Some(false),
         "dir" | "directory" | "folder" | "dirname" | "dirpath" => Some(true),
         _ => None,
     }
@@ -891,18 +997,16 @@ fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
 /// `-f / --file`, `-o / --output`, `-d / --directory`. Long names
 /// take precedence — short flags (`-d` could be delete OR
 /// directory) only count when no long form is present.
-fn infer_filepaths_kind_from_opt_names(
-    opt: Option<&crate::spec_parser::Opt>,
-) -> Option<bool> {
+fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) -> Option<bool> {
     let opt = opt?;
     let names: Vec<String> = opt.names.iter().map(|n| n.to_ascii_lowercase()).collect();
     for n in &names {
         if let Some(long) = n.strip_prefix("--") {
             match long {
-                "file" | "files" | "filename" | "filepath" | "input" | "output"
-                | "log" | "log-file" | "input-file" | "output-file" => return Some(false),
-                "dir" | "directory" | "folder" | "input-dir" | "output-dir"
-                | "workdir" | "working-dir" | "chdir" => return Some(true),
+                "file" | "files" | "filename" | "filepath" | "input" | "output" | "log"
+                | "log-file" | "input-file" | "output-file" => return Some(false),
+                "dir" | "directory" | "folder" | "input-dir" | "output-dir" | "workdir"
+                | "working-dir" | "chdir" => return Some(true),
                 _ => {}
             }
         }
@@ -1796,14 +1900,16 @@ fn man_path_roots() -> Vec<std::path::PathBuf> {
 
 /// List directory entries matching the trailing-basename portion of
 /// `prefix`. Honours `folders_only` (e.g. `cd` uses showFolders=only).
-/// Returns `(insertion, display)` pairs — insertion preserves the
-/// user's typed directory prefix so the widget's word-level replace
-/// doesn't lose context (`cd ./fo<Tab>` → `cd ./encl/`, not `cd encl/`).
+/// `(insertion, display, description, icon)` row tuple emitted by
+/// the filesystem walker. Insertion preserves the user's typed
+/// directory prefix so `cd ./fo<Tab>` → `cd ./encl/`, not `encl/`.
+type FilepathRow = (String, String, Option<String>, Option<String>);
+
 fn filepaths_at(
     cwd: Option<&std::path::Path>,
     prefix: &str,
     folders_only: bool,
-) -> Option<Vec<(String, String, Option<String>)>> {
+) -> Option<Vec<FilepathRow>> {
     // Split prefix into (dir_part_preserve_trailing_slash, basename_filter).
     let (dir_part, filter) = match prefix.rfind('/') {
         Some(i) => (&prefix[..=i], &prefix[i + 1..]),
@@ -1811,7 +1917,7 @@ fn filepaths_at(
     };
     let resolved = resolve_filepaths_root(cwd, dir_part)?;
     let entries = std::fs::read_dir(&resolved).ok()?;
-    let mut out: Vec<(String, String, Option<String>)> = Vec::new();
+    let mut out: Vec<FilepathRow> = Vec::new();
     for e in entries.flatten() {
         let name_os = e.file_name();
         let Some(name) = name_os.to_str() else {
@@ -1832,24 +1938,26 @@ fn filepaths_at(
         let trailing = if is_dir { "/" } else { "" };
         let insertion = format!("{dir_part}{name}{trailing}");
         let display = format!("{name}{trailing}");
-        // Description fallback: file size for regular files, "dir"
-        // for folders, "→ target" for symlinks. One metadata() per
-        // entry — cheap (~10µs each, ~500µs for a 50-entry dir).
-        // Keeps the footer line in the popup informative; was
-        // empty before for cd / ls / cat / vim / ...
         let is_symlink = ft.map(|t| t.is_symlink()).unwrap_or(false);
         let desc = filepaths_desc(&e, is_dir, is_symlink);
-        out.push((insertion, display, desc));
+        // Per-row icon: 🔗 for symlinks (checked first; a symlink
+        // pointing at a dir still gets the link glyph), 📁 for
+        // dirs, 📄 for regular files. All 4-byte UTF-8, pass
+        // sanitize_icon's ≤4 byte gate.
+        let icon = if is_symlink {
+            Some("🔗".to_string())
+        } else if is_dir {
+            Some("📁".to_string())
+        } else {
+            Some("📄".to_string())
+        };
+        out.push((insertion, display, desc, icon));
     }
     out.sort_by(|a, b| a.1.cmp(&b.1));
     Some(out)
 }
 
-fn filepaths_desc(
-    entry: &std::fs::DirEntry,
-    is_dir: bool,
-    is_symlink: bool,
-) -> Option<String> {
+fn filepaths_desc(entry: &std::fs::DirEntry, is_dir: bool, is_symlink: bool) -> Option<String> {
     if is_symlink {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             return Some(format!("→ {}", target.display()));
@@ -1857,10 +1965,46 @@ fn filepaths_desc(
         return Some("symlink".into());
     }
     if is_dir {
-        return Some("dir".into());
+        // Smart fallback for cd / z: every row would otherwise just
+        // say "dir" — uninformative. Show item count when cheap
+        // (~50µs per read_dir on typical sizes). Skip on read error
+        // (perm denied / unreadable) and fall back to "dir".
+        return Some(dir_summary(&entry.path()));
     }
     let meta = entry.metadata().ok()?;
     Some(human_size(meta.len()))
+}
+
+/// One-line summary for a directory entry. Reads the dir to count
+/// visible children (excluding dotfiles). Cap the iteration at 200
+/// entries to keep latency bounded for huge dirs (node_modules).
+fn dir_summary(path: &std::path::Path) -> String {
+    let Ok(rd) = std::fs::read_dir(path) else {
+        return "dir".into();
+    };
+    let mut count: u32 = 0;
+    let mut truncated = false;
+    for (i, e) in rd.flatten().enumerate() {
+        if i >= 200 {
+            truncated = true;
+            break;
+        }
+        let name = e.file_name();
+        let s = name.to_string_lossy();
+        if s.starts_with('.') {
+            continue;
+        }
+        count += 1;
+    }
+    if count == 0 {
+        "empty".into()
+    } else if truncated {
+        format!("{count}+ items")
+    } else if count == 1 {
+        "1 item".into()
+    } else {
+        format!("{count} items")
+    }
 }
 
 fn human_size(bytes: u64) -> String {
@@ -2408,19 +2552,13 @@ mod tests {
     #[test]
     fn extract_enum_ignores_single_value_braces() {
         // `{foo}` is not an enum — likely a placeholder.
-        assert_eq!(
-            extract_enum_from_description("Path: {file}"),
-            None
-        );
+        assert_eq!(extract_enum_from_description("Path: {file}"), None);
     }
 
     #[test]
     fn extract_enum_ignores_braces_with_disallowed_chars() {
         // `{a b|c d}` has spaces inside entries — not an enum list.
-        assert_eq!(
-            extract_enum_from_description("usage: {a b|c d}"),
-            None
-        );
+        assert_eq!(extract_enum_from_description("usage: {a b|c d}"), None);
     }
 
     #[test]
@@ -2508,16 +2646,13 @@ mod tests {
             description: None,
             kind: SuggestionKind::Argument,
             priority: prio,
+            icon: None,
         }
     }
 
     #[test]
     fn priority_sort_higher_first() {
-        let mut v = vec![
-            sug("a", Some(50)),
-            sug("b", Some(75)),
-            sug("c", Some(25)),
-        ];
+        let mut v = vec![sug("a", Some(50)), sug("b", Some(75)), sug("c", Some(25))];
         v.sort_by(sort_by_priority_then_alpha);
         assert_eq!(v[0].display, "b");
         assert_eq!(v[1].display, "a");
@@ -2526,7 +2661,7 @@ mod tests {
 
     #[test]
     fn priority_sort_default_50_ties_break_alpha() {
-        let mut v = vec![sug("zeta", None), sug("alpha", None)];
+        let mut v = [sug("zeta", None), sug("alpha", None)];
         v.sort_by(sort_by_priority_then_alpha);
         assert_eq!(v[0].display, "alpha");
         assert_eq!(v[1].display, "zeta");
@@ -2534,7 +2669,7 @@ mod tests {
 
     #[test]
     fn priority_sort_explicit_50_equals_none() {
-        let mut v = vec![sug("a", None), sug("b", Some(50))];
+        let mut v = [sug("a", None), sug("b", Some(50))];
         v.sort_by(sort_by_priority_then_alpha);
         // Same priority → alpha sort wins
         assert_eq!(v[0].display, "a");
@@ -2548,5 +2683,347 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(infer_filepaths_kind_from_opt_names(Some(&opt)), Some(false));
+    }
+
+    #[test]
+    fn emit_appends_eq_for_requires_separator_with_args() {
+        let node = Subcommand {
+            name: "ls".into(),
+            options: vec![Opt {
+                names: vec!["--color".into()],
+                requires_separator: true,
+                args: vec![Arg::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--c");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].insertion, "--color=");
+        assert_eq!(out[0].display, "--color", "display stays clean");
+    }
+
+    #[test]
+    fn emit_does_not_append_eq_when_no_args() {
+        // requires_separator on a flag-only option is meaningless;
+        // make sure we don't tack on `=` when there's nothing after.
+        let node = Subcommand {
+            name: "ls".into(),
+            options: vec![Opt {
+                names: vec!["--flag".into()],
+                requires_separator: true,
+                args: vec![],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--f");
+        assert_eq!(out[0].insertion, "--flag");
+    }
+
+    #[test]
+    fn emit_no_eq_when_separator_not_required() {
+        let node = Subcommand {
+            name: "ls".into(),
+            options: vec![Opt {
+                names: vec!["--color".into()],
+                requires_separator: false,
+                args: vec![Arg::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--c");
+        assert_eq!(out[0].insertion, "--color");
+    }
+
+    #[test]
+    fn sanitize_icon_strips_fig_urls() {
+        assert_eq!(sanitize_icon(Some("fig://icon?type=string")), None);
+        assert_eq!(sanitize_icon(Some("fig://template?color=red")), None);
+    }
+
+    #[test]
+    fn sanitize_icon_keeps_emoji_and_short_glyph() {
+        assert_eq!(sanitize_icon(Some("📦")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some(">")), Some(">".into()));
+    }
+
+    #[test]
+    fn sanitize_icon_drops_empty_and_long() {
+        assert_eq!(sanitize_icon(None), None);
+        assert_eq!(sanitize_icon(Some("")), None);
+        assert_eq!(sanitize_icon(Some("   ")), None);
+        assert_eq!(sanitize_icon(Some("toolong")), None);
+    }
+
+    #[test]
+    fn subcommand_icon_propagates_to_suggestion() {
+        let node = Subcommand {
+            name: "git".into(),
+            subcommands: vec![Subcommand {
+                name: "commit".into(),
+                icon: Some("📝".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_subcommands(&node, "com");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].icon.as_deref(), Some("📝"));
+    }
+
+    #[test]
+    fn split_by_query_term_no_delim_returns_whole_prefix() {
+        let (q, ip) = split_by_query_term("tokio,serde", None);
+        assert_eq!(q, "tokio,serde");
+        assert_eq!(ip, "");
+    }
+
+    #[test]
+    fn split_by_query_term_after_last_delim() {
+        let (q, ip) = split_by_query_term("tokio,serde,async", Some(","));
+        assert_eq!(q, "async");
+        assert_eq!(ip, "tokio,serde,");
+    }
+
+    #[test]
+    fn split_by_query_term_multi_delim_set() {
+        // delim set "@,": last `@` wins for `pkg@1.0,foo@`
+        let (q, ip) = split_by_query_term("pkg@1.0,foo@", Some("@,"));
+        assert_eq!(q, "");
+        assert_eq!(ip, "pkg@1.0,foo@");
+    }
+
+    #[test]
+    fn split_by_query_term_no_match_returns_whole() {
+        let (q, ip) = split_by_query_term("tokio", Some(","));
+        assert_eq!(q, "tokio");
+        assert_eq!(ip, "");
+    }
+
+    #[test]
+    fn arg_with_get_query_term_preserves_prefix_in_insertion() {
+        use crate::spec_parser::{Arg, RawSuggestion};
+        let arg = Arg {
+            get_query_term: Some(",".into()),
+            suggestions: vec![
+                RawSuggestion {
+                    name: "serde".into(),
+                    ..Default::default()
+                },
+                RawSuggestion {
+                    name: "async-trait".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None);
+        // Only "serde" matches "se" prefix.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].display, "serde");
+        // Insertion preserves the pre-comma context.
+        assert_eq!(out[0].insertion, "tokio,serde");
+    }
+
+    #[test]
+    fn dir_summary_empty_returns_empty_label() {
+        let tmp = std::env::temp_dir().join(format!("nerv-test-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert_eq!(dir_summary(&tmp), "empty");
+        let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn dir_summary_skips_dotfiles_and_pluralizes() {
+        let tmp = std::env::temp_dir().join(format!("nerv-test-count-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("a.txt"), "x").unwrap();
+        std::fs::write(tmp.join("b.txt"), "x").unwrap();
+        std::fs::write(tmp.join(".hidden"), "x").unwrap();
+        assert_eq!(dir_summary(&tmp), "2 items");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn dir_summary_singular_for_one_item() {
+        let tmp = std::env::temp_dir().join(format!("nerv-test-one-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("only.txt"), "x").unwrap();
+        assert_eq!(dir_summary(&tmp), "1 item");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn matches_filter_prefix_is_default() {
+        assert!(matches_filter("foobar", "foo", None));
+        assert!(!matches_filter("foobar", "bar", None));
+    }
+
+    #[test]
+    fn matches_filter_substring_matches_anywhere() {
+        assert!(matches_filter("foobar", "oob", Some("substring")));
+        assert!(matches_filter("foobar", "bar", Some("substring")));
+        assert!(matches_filter("foobar", "foo", Some("substring")));
+        assert!(!matches_filter("foobar", "xyz", Some("substring")));
+    }
+
+    #[test]
+    fn matches_filter_fuzzy_downgrades_to_prefix() {
+        // M1 constraint: fuzzy code path forbidden in v1.0. Silently
+        // treated as prefix matching so specs still work.
+        assert!(matches_filter("foobar", "foo", Some("fuzzy")));
+        assert!(!matches_filter("foobar", "bar", Some("fuzzy")));
+        assert!(!matches_filter("foobar", "fbr", Some("fuzzy")));
+    }
+
+    #[test]
+    fn substring_filter_works_on_arg_suggestions() {
+        use crate::spec_parser::{Arg, RawSuggestion};
+        let arg = Arg {
+            filter_strategy: Some("substring".into()),
+            suggestions: vec![
+                RawSuggestion {
+                    name: "foobar".into(),
+                    ..Default::default()
+                },
+                RawSuggestion {
+                    name: "barfoo".into(),
+                    ..Default::default()
+                },
+                RawSuggestion {
+                    name: "xyz".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let out = emit_candidates_for_arg(&arg, "foo", None, None);
+        // Both "foobar" and "barfoo" contain "foo".
+        let names: Vec<_> = out.iter().map(|s| s.display.as_str()).collect();
+        assert!(names.contains(&"foobar"));
+        assert!(names.contains(&"barfoo"));
+        assert!(!names.contains(&"xyz"));
+    }
+
+    #[test]
+    fn opt_icon_strips_fig_url() {
+        let node = Subcommand {
+            name: "git".into(),
+            options: vec![Opt {
+                names: vec!["--all".into()],
+                icon: Some("fig://icon?type=command".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let out = emit_options_with_ancestors(&node, &[], "--a");
+        assert_eq!(out[0].icon, None, "fig:// URL must not leak");
+    }
+
+    // --- Edge case coverage (tech-debt sweep) ---
+
+    #[test]
+    fn sanitize_icon_at_exact_4_byte_boundary() {
+        // Common 4-byte emoji should pass.
+        assert_eq!(sanitize_icon(Some("📦")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some("📁")), Some("📁".into()));
+        // 5+ bytes (emoji + ASCII) must not.
+        assert_eq!(sanitize_icon(Some("📦x")), None);
+        // 3-byte CJK char passes (≤4).
+        assert_eq!(sanitize_icon(Some("文")), Some("文".into()));
+    }
+
+    #[test]
+    fn sanitize_icon_trims_whitespace() {
+        assert_eq!(sanitize_icon(Some("  📦  ")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some("\t$\n")), Some("$".into()));
+    }
+
+    #[test]
+    fn split_by_query_term_handles_multibyte_delim() {
+        // CJK delim char (3 bytes). Make sure byte-position split
+        // doesn't fall inside a char boundary.
+        let (q, ip) = split_by_query_term("foo,bar", Some(","));
+        assert_eq!(q, "bar");
+        assert_eq!(ip, "foo,");
+        // Empty prefix.
+        let (q, ip) = split_by_query_term("", Some(","));
+        assert_eq!(q, "");
+        assert_eq!(ip, "");
+        // Trailing delim → empty query, full insert prefix.
+        let (q, ip) = split_by_query_term("foo,", Some(","));
+        assert_eq!(q, "");
+        assert_eq!(ip, "foo,");
+    }
+
+    #[test]
+    fn split_by_query_term_utf8_safe_with_emoji() {
+        // Emoji before delim — split must land at char boundary.
+        let (q, ip) = split_by_query_term("📦,bar", Some(","));
+        assert_eq!(q, "bar");
+        assert_eq!(ip, "📦,");
+    }
+
+    #[test]
+    fn split_by_query_term_empty_delim_string_returns_whole() {
+        let (q, ip) = split_by_query_term("foo,bar", Some(""));
+        assert_eq!(q, "foo,bar");
+        assert_eq!(ip, "");
+    }
+
+    #[test]
+    fn matches_filter_empty_query_matches_anything() {
+        assert!(matches_filter("foobar", "", None));
+        assert!(matches_filter("foobar", "", Some("substring")));
+        assert!(matches_filter("", "", None));
+    }
+
+    #[test]
+    fn matches_filter_substring_empty_string_in_empty_name() {
+        assert!(matches_filter("", "", Some("substring")));
+        assert!(!matches_filter("", "foo", Some("substring")));
+    }
+
+    #[test]
+    fn dir_summary_handles_unreadable_dir() {
+        // Nonexistent path → fallback "dir".
+        let p = std::path::PathBuf::from("/this/does/not/exist/anywhere");
+        assert_eq!(dir_summary(&p), "dir");
+    }
+
+    #[test]
+    fn dir_summary_truncates_at_cap() {
+        // Create a dir with > 200 entries; should report `n+ items`.
+        let tmp = std::env::temp_dir().join(format!("nerv-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        for i in 0..210u32 {
+            std::fs::write(tmp.join(format!("f{i}")), "x").unwrap();
+        }
+        let s = dir_summary(&tmp);
+        assert!(s.ends_with("+ items"), "expected truncated label: {s}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn filepath_icons_assigned_per_kind() {
+        // Symlinks > dirs > files in the icon precedence chain.
+        let tmp = std::env::temp_dir().join(format!("nerv-fp-icons-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join("subdir")).unwrap();
+        std::fs::write(tmp.join("file.txt"), "x").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(tmp.join("file.txt"), tmp.join("link")).unwrap();
+        let rows = filepaths_at(Some(&tmp), "", false).unwrap();
+        let by_name: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|(_, display, _, icon)| (display, icon))
+            .collect();
+        assert_eq!(by_name.get("subdir/"), Some(&Some("📁".into())));
+        assert_eq!(by_name.get("file.txt"), Some(&Some("📄".into())));
+        #[cfg(unix)]
+        assert_eq!(by_name.get("link"), Some(&Some("🔗".into())));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -66,6 +66,8 @@ type FigArg = {
   suggestions?: Array<string | { name?: string }>;
   template?: string | string[];
   generators?: any | any[];
+  getQueryTerm?: string | string[] | ((token: string) => string);
+  filterStrategy?: "prefix" | "fuzzy" | "default";
 };
 
 type FigOpt = {
@@ -79,6 +81,8 @@ type FigOpt = {
   hidden?: boolean;
   isPersistent?: boolean;
   priority?: number;
+  requiresSeparator?: boolean | string;
+  icon?: string;
 };
 
 type FigSpec = {
@@ -92,6 +96,8 @@ type FigSpec = {
   parserDirectives?: { flagsArePosixNoncompliant?: boolean };
   loadSpec?: any;
   generators?: any;
+  icon?: string;
+  priority?: number;
 };
 
 type NervSuggestion =
@@ -113,6 +119,8 @@ type NervArg = {
   suggestions: NervSuggestion[];
   template: string | null;
   generators: NervGenerator[];
+  getQueryTerm?: string;
+  filterStrategy?: string;
 };
 
 type NervOpt = {
@@ -126,6 +134,8 @@ type NervOpt = {
   hidden: boolean;
   isPersistent?: boolean;
   priority?: number;
+  requiresSeparator?: boolean;
+  icon?: string;
 };
 
 type NervSpec = {
@@ -138,6 +148,8 @@ type NervSpec = {
   requires_double_dash: boolean;
   hidden: boolean;
   priority?: number;
+  icon?: string;
+  flagsArePosixNoncompliant?: boolean;
 };
 
 type NervGenerator =
@@ -588,7 +600,7 @@ const convertArg = async (a: FigArg): Promise<NervArg> => {
         ...(s.description != null ? { description: s.description } : {}),
         ...(s.displayName != null ? { displayName: s.displayName } : {}),
         ...(s.insertValue != null ? { insertValue: s.insertValue } : {}),
-        ...(s.icon != null ? { icon: s.icon } : {}),
+        ...iconField(s.icon),
         ...(s.priority != null ? { priority: s.priority } : {}),
       };
     }
@@ -608,6 +620,18 @@ const convertArg = async (a: FigArg): Promise<NervArg> => {
     suggestions,
     template: convertTemplate(a.template),
     generators: await convertGenerators(a.generators),
+    // Fig getQueryTerm: string → as-is; string[] → join (each entry is
+    // a delim char); function → defer to M1 (Tier C closure exec).
+    ...(typeof a.getQueryTerm === "string"
+      ? { getQueryTerm: a.getQueryTerm }
+      : Array.isArray(a.getQueryTerm)
+        ? { getQueryTerm: a.getQueryTerm.join("") }
+        : {}),
+    // Fig filterStrategy: pass through known values. Fuzzy is M1
+    // opt-in only — engine silently downgrades to prefix in v1.0.
+    ...(typeof a.filterStrategy === "string"
+      ? { filterStrategy: a.filterStrategy }
+      : {}),
   };
 };
 
@@ -624,7 +648,29 @@ const convertOpt = async (o: FigOpt): Promise<NervOpt> => {
     hidden: o.hidden ?? false,
     ...(o.isPersistent === true ? { isPersistent: true } : {}),
     ...(typeof o.priority === "number" ? { priority: o.priority } : {}),
+    // Fig allows a string separator (e.g. `:`) — we collapse to bool.
+    // Any truthy value (including non-empty string) means `=` required.
+    ...(o.requiresSeparator ? { requiresSeparator: true } : {}),
+    ...iconField(o.icon),
   };
+};
+
+// Strip Fig's icon-registry URL refs (`fig://icon?type=...`) — they
+// mean nothing in a terminal. Trim short visible glyphs only (≤4
+// bytes). Returns undefined when the input is missing or unusable.
+const sanitizeIcon = (raw: unknown): string | undefined => {
+  if (typeof raw !== "string") return undefined;
+  const s = raw.trim();
+  if (!s || s.startsWith("fig://") || s.length > 4) return undefined;
+  return s;
+};
+
+// Spread-friendly wrapper: call sanitizeIcon once per emit site
+// instead of twice (one in guard, one in value). Returns `{}` to
+// drop the field cleanly via object spread.
+const iconField = (raw: unknown): { icon?: string } => {
+  const ic = sanitizeIcon(raw);
+  return ic !== undefined ? { icon: ic } : {};
 };
 
 type Ctx = {
@@ -738,6 +784,10 @@ const convertSpec = async (
     hidden: s.hidden ?? false,
     ...(typeof (s as any).priority === "number"
       ? { priority: (s as any).priority }
+      : {}),
+    ...iconField((s as any).icon),
+    ...(s.parserDirectives?.flagsArePosixNoncompliant === true
+      ? { flagsArePosixNoncompliant: true }
       : {}),
   };
 };
