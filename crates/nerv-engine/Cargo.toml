@@ -21,6 +21,7 @@ once_cell = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 flate2 = "1.1"
+toml = { workspace = true }
 
 [[bin]]
 name = "build-specs"

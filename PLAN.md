@@ -117,7 +117,7 @@ M1 = 1,484 전체 자동 Tier 분류.
 - **Argument parser**: `autocomplete-parser/parseArguments.ts` (32 KB, 800+ LOC 상태머신) → Rust 포팅 (`nerv-engine/src/spec_parser.rs`).
 - **Matching**:
   - 기본 = prefix (`git co` → `commit` / `config`, 단 `checkout` 은 `git ch` 에서만)
-  - 옵션 = fuzzy (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`, M1)
+  - 옵션 = fuzzy (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`) — 활성 시 case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드, config 편집은 재시작 필요. spec per-arg `filterStrategy: "substring"` 은 user mode 무관 우선.
 - **Tier C 동적 generator UX** (M0 — rquickjs 도입 전):
   ```
   ⤷ 동적 완성은 v1.1에서 지원 예정 — 직접 입력하세요
@@ -364,7 +364,7 @@ v0.5.1 의 M1 (16주) 단축. Fig 엔진 흡수로 0–6주차 작업 80% 제거
 - v1.1: SQLite frecency 학습
 - v1.1: `nerv spec list --changes`
 - v1.2: **bash 지원** (figterm 경유, M1 인프라 재활용)
-- v1.2: fuzzy matching 정식 기능
+- v1.2: fuzzy matching 정식 기능 (M1 opt-in 완료, v1.2 = 기본값 검토 / ranker tuning)
 - v1.3: Linux (figterm Linux PTY 지원 — `fig_remote_ipc` strip 분 일부 회복 검토)
 - v2.0: fish
 - v2.x: spec 레지스트리, `nerv config`

@@ -69,9 +69,10 @@
   - `requiresSeparator` (67 spec) — `--color=` 강제, 위젯 insertion 에 `=` 첨가, parser 가 space-form 의 arg 바인딩 거부
   - `icon` (59 spec) — sanitize_icon 으로 `fig://*` URL strip + ≤4 byte 만 통과, 4-field wire format 로 위젯에 전달
   - `flagsArePosixNoncompliant` (41 spec) — go/docker/kubectl 스타일 `-foo` 를 long option 으로 라우팅
-  - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 v1.0 prefix 로 downgrade (M1 opt-in 까지)
+  - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 mode=Prefix 시 prefix downgrade / mode=Fuzzy 시 서브시퀀스
   - `getQueryTerm` (0 spec but infra ready) — `cargo search "tokio,serde"` 같은 delim split. 현재 Fig spec 은 closure form 만 쓰지만 M1 회복 시 사용 예정
 - ✅ **smart description fallback**: cd/z 같은 folder-only emit 의 footer 가 모두 "dir" 이던 문제. `dir_summary` 가 read_dir 1회로 `n items` / `empty` / `1 item` 출력. dotfile 제외, 200 entries cap (latency bound). 50µs/dir 추정.
+- ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. 서브커맨드/옵션/제너레이터 출력 전부 동일하게 게이트. 매칭 알고리즘: `nerv-engine::complete::matches_filter` + `matches_name`.
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
@@ -83,7 +84,6 @@
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`)
 - E5 manifest, inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
-- fuzzy matching (M1 opt-in, `[matching] mode = "fuzzy"` 토글) — 현재는 spec 의 `filterStrategy: "fuzzy"` 도 prefix 로 downgrade
 - icon 글리프 width 보정 (emoji 2 col 시 alignment 1 cell 밀림 — 현재는 MVP tradeoff)
 - aws 624 closure-form generators (`rquickjs` opt-in 필요)
 
@@ -93,7 +93,7 @@
 
 | 영역 | 불변식 | 근거 |
 |------|--------|------|
-| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 M1 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). v1.0 코드 자체는 prefix only, fuzzy 코드 경로는 M1 도입 시 비활성 분기로 추가 | PLAN §5.1 / `nerv-engine/src/ranker.rs` 회귀 테스트 |
+| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). fuzzy 활성 시 case-insensitive 서브시퀀스. 데몬 부팅 시 1회 로드 — config 변경엔 재시작 필요 | PLAN §5.1 / `nerv-engine/src/config.rs` / `nerv-engine/src/complete.rs::matches_filter` |
 | 매칭 알고리즘 | 빈 prefix 는 모두 매치 (`git ⎵` 케이스) | first-5-min §1단계 |
 | 마커 블록 | `# >>> nerv >>>` ~ `# <<< nerv <<<` 는 **고정 문자열**. `fig_integrations` 흡수 시 marker 교체 필수 (Q 의 `# Fig pre block` 잔존 금지) | uninstall-spec §3 / `nerv-shell::MARKER_*` |
 | 경로 | `~/Library/Caches/nerv/`, `~/Library/Logs/nerv/`, `~/.config/nerv/` — `directories` 크레이트 사용 X (docs 가 contract). `fig_util` / `fig_log` / `fig_settings` 흡수 시 Q 기본 경로 (`~/.config/q/`, `~/Library/Caches/amzn/`) 전부 nerv 경로로 재배선 | uninstall-spec §2 / `nerv-engine/src/paths.rs` |
@@ -109,7 +109,7 @@
 | Rust | toolchain 1.85, **edition 2024** (upstream 정합). v0.5.1 의 edition 2021 폐기. 변경 시 PLAN §7 + `rust-toolchain.toml` + 본 §4 동시 갱신 | `rust-toolchain.toml` |
 | vendor 편집 | `vendor/withfig-autocomplete/` 와 `vendor/aws-autocomplete/` **양쪽 모두 직접 편집 금지**. 변경은 `vendor-patches/{upstream,self}/` 또는 upstream PR | spec-conversion-policy §5.2 |
 | icon sanitize | `Suggestion.icon` 은 절대 `fig://*` URL 통과 금지 — `sanitize_icon` 으로 strip. ≤4 byte (대략 emoji 1개 + ASCII 1글자) 만 허용. 위젯이 raw bytes 를 그대로 prefix 로 출력함 | `nerv-engine/src/complete.rs::sanitize_icon` |
-| filterStrategy fuzzy | `"fuzzy"` 값을 받으면 v1.0 에서는 prefix 로 silent downgrade. **fuzzy 코드 경로 자체 추가 금지** — M1 `[matching] mode = "fuzzy"` opt-in 까지 | PLAN §5.1 / `nerv-engine/src/complete.rs::matches_filter` |
+| filterStrategy 우선 | per-arg `filterStrategy: "substring"` 은 user `MatchMode` (Prefix/Fuzzy) 무관 우선. spec author 가 명시한 의도를 user mode 가 덮어쓰지 않음. `"fuzzy"` 값 자체는 user mode 와 동일 결과 (Prefix→prefix / Fuzzy→subsequence) | `nerv-engine/src/complete.rs::matches_filter` 첫 분기 |
 | 4-field wire format | `nerv _complete` 출력은 `insertion\tdisplay\tdescription\ticon` 4-tab. icon 비면 빈 문자열. **field 추가 시 widget parser 동시 갱신 필수** | `crates/nerv-cli/src/main.rs::print_suggestion` + `_nerv.zsh` |
 | parserDirectives 적용 | `flagsArePosixNoncompliant` 는 root spec 의 directive 만 체크 (subcommand chain 상속 X). Go/docker/kubectl 처럼 root 부터 일관된 스타일이 권장 | `nerv-engine/src/spec_parser.rs::ShortOption` arm |
 | getQueryTerm 범위 | string form 만 (single-byte delim chars). function form 은 Tier C → M1. delim chars 마지막 위치에서 split, insertion 에 context prefix 보존 | `nerv-engine/src/complete.rs::split_by_query_term` |
@@ -262,7 +262,7 @@ PLAN §10 에 명시된 차단 요건을 *직접* 점검하기 전엔 다음 단
 - ❌ 흡수 crate 의 Q 경로 (`~/.config/q/`, `~/Library/Caches/amzn/`) 잔존 — `nerv-util` / `nerv-log` / `nerv-settings` 포팅 시 grep 으로 전수 검증.
 - ❌ `fig_desktop` / `fig_api_client` / `fig_auth` / `fig_telemetry*` / `amzn-*` 의 transitive dep 가 `Cargo.lock` 에 들어옴 — strip 후 `cargo tree | grep -E 'amzn|aws-sdk|tao|wry'` 0 줄 검증.
 - ❌ `parseArguments.ts` Rust 포팅 시 TS 회귀 테스트 누락 — Fig 의 fixture 디렉터리 (`packages/autocomplete-parser/tests/`) 를 `crates/nerv-engine/tests/spec_parser/` 로 그대로 흡수.
-- ❌ fuzzy matching 코드를 M0 에 작성 — M1 opt-in 까지 코드 자체 금지 (§4 불변식).
+- ❌ fuzzy matching 을 기본 활성 — `MatchMode::Prefix` 가 default. 활성 코드 경로는 `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` opt-in 뿐.
 - ❌ deno_core / boa / Node embed — `rquickjs` 만 (§4 불변식).
 
 ## 9. 추천 협업 패턴 (Claude Code)
