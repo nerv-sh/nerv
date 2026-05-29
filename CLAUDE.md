@@ -73,12 +73,12 @@
   - `getQueryTerm` (0 spec but infra ready) — `cargo search "tokio,serde"` 같은 delim split. 현재 Fig spec 은 closure form 만 쓰지만 M1 회복 시 사용 예정
 - ✅ **smart description fallback**: cd/z 같은 folder-only emit 의 footer 가 모두 "dir" 이던 문제. `dir_summary` 가 read_dir 1회로 `n items` / `empty` / `1 item` 출력. dotfile 제외, 200 entries cap (latency bound). 50µs/dir 추정.
 - ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. 서브커맨드/옵션/제너레이터 출력 전부 동일하게 게이트. 매칭 알고리즘: `nerv-engine::complete::matches_filter` + `matches_name`.
+- ✅ **Homebrew tap 인프라**: `packaging/homebrew/nerv.rb` Formula 템플릿 (ARM-only `aarch64-apple-darwin`, `brew services` 통합). `.github/workflows/homebrew-bump.yml` 가 GitHub release 발행 시 자동으로 `nerv-sh/homebrew-tap` 의 Formula 를 버전+sha256 갱신. 사용자 액션: tap repo 생성 + `HOMEBREW_TAP_TOKEN` PAT secret 추가.
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
-- Homebrew tap (`nerv-sh/homebrew-tap` repo + Formula)
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
 - bash / fish 지원 (큼)
 - Linux / Windows 지원 (큼)
@@ -209,12 +209,14 @@ crates/
 
 shell-integrations/zsh/_nerv.zsh     # ZLE widget (M0 유지, M1 figterm 도입 시 deprecate)
 tools/ts-to-json/                    # bun-based TS→JSON 변환 (M1 entry; 715 spec 자동 변환)
+packaging/homebrew/nerv.rb           # Homebrew Formula 템플릿 (auto-bumped on release)
 vendor/withfig-autocomplete/         # subtree, ISC, pin = aef52acf… (TS specs 1,484)
 vendor/aws-autocomplete/             # M0-1 subtree, Apache+MIT, 미수정 mirror (drift 감지)
 vendor-patches/{upstream,self}/      # cherry-pick 보관소 (M1)
 docs/                                # 위 §2 6종 + reference/ (TS 포팅 참조본)
 docs/archive/PLAN.v0.5.1.md          # 이전 PRD 보존
-.github/workflows/{ci,upstream-monitor,upstream-prs}.yml  # upstream-monitor 에 aws-autocomplete 추가
+.github/workflows/{ci,release,upstream-monitor,upstream-prs,homebrew-bump}.yml
+                                     # homebrew-bump = release 시 tap Formula 자동 갱신
 ```
 
 **폐기된 v0.5 디렉터리**: `build/spec-transpile/` (loadSpec.ts 포팅이 대체), `specs-prebuilt/` (`~/Library/Caches/nerv/specs/` 로 이동).

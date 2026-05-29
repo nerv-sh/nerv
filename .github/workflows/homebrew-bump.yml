@@ -1,0 +1,86 @@
+name: homebrew-bump
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to bump in the tap (e.g. v0.1.0) — release must already exist"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: bump nerv-sh/homebrew-tap Formula
+    runs-on: macos-14
+    steps:
+      - name: resolve tag + version
+        id: meta
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${{ github.event.release.tag_name }}"
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: fetch release tarball + sha256
+        id: dl
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          TARBALL="nerv-${VERSION}-aarch64-apple-darwin.tar.gz"
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${TARBALL}"
+          curl --fail --location --remote-name "$URL"
+          curl --fail --location --remote-name "${URL}.sha256"
+          # The .sha256 sidecar comes from `shasum -a 256` — first
+          # field is the digest.
+          SHA256="$(awk '{print $1}' "${TARBALL}.sha256")"
+          echo "sha256=${SHA256}" >> "$GITHUB_OUTPUT"
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: nerv-sh/homebrew-tap
+          path: tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: update Formula
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.meta.outputs.version }}"
+          SHA256="${{ steps.dl.outputs.sha256 }}"
+          FORMULA="tap/Formula/nerv.rb"
+          mkdir -p "$(dirname "$FORMULA")"
+          # Start from the in-repo template so style stays consistent.
+          cp packaging/homebrew/nerv.rb "$FORMULA"
+          # Pin version + sha256 in-place. The template carries
+          # `version "0.0.0"` and a 64-zero sha256 placeholder.
+          /usr/bin/sed -i '' \
+            -e "s|version \"0.0.0\"|version \"${VERSION}\"|" \
+            -e "s|sha256 \"0000000000000000000000000000000000000000000000000000000000000000\"|sha256 \"${SHA256}\"|" \
+            "$FORMULA"
+          echo "--- updated Formula ---"
+          cat "$FORMULA"
+
+      - name: commit + push to tap
+        run: |
+          set -euo pipefail
+          cd tap
+          git config user.name "nerv-bot"
+          git config user.email "noreply@nerv.sh"
+          git add Formula/nerv.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date — nothing to commit."
+            exit 0
+          fi
+          git commit -m "nerv ${{ steps.meta.outputs.tag }}"
+          git push origin HEAD
