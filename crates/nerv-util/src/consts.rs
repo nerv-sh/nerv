@@ -108,42 +108,46 @@ pub mod env_var {
         }
     }
 
+    // CLAUDE.md §4 invariant: absorbed crates must reroute Q_* env vars
+    // to NERV_* on activation. The figterm PTY shim (nerv-pty) is the
+    // active consumer here; downstream users who set the old Q_* names
+    // will see no effect.
     define_env_vars! {
-        /// The UUID of the current parent qterm instance
-        QTERM_SESSION_ID = "QTERM_SESSION_ID",
+        /// The UUID of the current parent nerv-pty instance.
+        NERV_PTY_SESSION_ID = "NERV_PTY_SESSION_ID",
 
-        /// The current parent socket to connect to
-        Q_PARENT = "Q_PARENT",
+        /// The current parent socket to connect to.
+        NERV_PARENT = "NERV_PARENT",
 
-        /// Set the [`Q_PARENT`] parent socket to connect to
-        Q_SET_PARENT = "Q_SET_PARENT",
+        /// Set the [`NERV_PARENT`] parent socket to connect to.
+        NERV_SET_PARENT = "NERV_SET_PARENT",
 
-        /// Guard for the [`Q_SET_PARENT`] check
-        Q_SET_PARENT_CHECK = "Q_SET_PARENT_CHECK",
+        /// Guard for the [`NERV_SET_PARENT`] check.
+        NERV_SET_PARENT_CHECK = "NERV_SET_PARENT_CHECK",
 
-        /// Set if qterm is running, contains the version
-        Q_TERM = "Q_TERM",
+        /// Set if nerv-pty is running, contains the version.
+        NERV_TERM = "NERV_TERM",
 
-        /// Sets the current log level
-        Q_LOG_LEVEL = "Q_LOG_LEVEL",
+        /// Sets the current log level.
+        NERV_LOG_LEVEL = "NERV_LOG_LEVEL",
 
-        /// Overrides the ZDOTDIR environment variable
-        Q_ZDOTDIR = "Q_ZDOTDIR",
+        /// Overrides the ZDOTDIR environment variable.
+        NERV_ZDOTDIR = "NERV_ZDOTDIR",
 
-        /// Indicates a process was launched by Amazon Q
-        PROCESS_LAUNCHED_BY_Q = "PROCESS_LAUNCHED_BY_Q",
+        /// Indicates a process was launched by Nerv.
+        PROCESS_LAUNCHED_BY_NERV = "PROCESS_LAUNCHED_BY_NERV",
 
-        /// The shell to use in qterm
-        Q_SHELL = "Q_SHELL",
+        /// The shell to use in nerv-pty.
+        NERV_SHELL = "NERV_SHELL",
 
-        /// Indicates the user is debugging the shell
-        Q_DEBUG_SHELL = "Q_DEBUG_SHELL",
+        /// Indicates the user is debugging the shell.
+        NERV_DEBUG_SHELL = "NERV_DEBUG_SHELL",
 
-        /// Indicates the user is using zsh autosuggestions which disables Inline
-        Q_USING_ZSH_AUTOSUGGESTIONS = "Q_USING_ZSH_AUTOSUGGESTIONS",
+        /// Indicates the user is using zsh autosuggestions which disables Inline.
+        NERV_USING_ZSH_AUTOSUGGESTIONS = "NERV_USING_ZSH_AUTOSUGGESTIONS",
 
         /// Overrides the path to the bundle metadata released with certain desktop builds.
-        Q_BUNDLE_METADATA_PATH = "Q_BUNDLE_METADATA_PATH"
+        NERV_BUNDLE_METADATA_PATH = "NERV_BUNDLE_METADATA_PATH"
     }
 }
 
