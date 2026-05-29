@@ -69,7 +69,7 @@
   - `isPersistent` (104 spec) — option 상속, find_option_inherited 가 ancestor chain 까지 탐색
   - `priority` (77 spec) — `sort_by_priority_then_alpha` 가 emit 전체에서 균일 적용 (default 50)
   - `requiresSeparator` (67 spec) — `--color=` 강제, 위젯 insertion 에 `=` 첨가, parser 가 space-form 의 arg 바인딩 거부
-  - `icon` (59 spec) — sanitize_icon 으로 `fig://*` URL strip + ≤4 byte 만 통과, 4-field wire format 로 위젯에 전달
+  - `icon` (59 spec) — sanitize_icon 으로 `fig://*` URL strip + ≤4 byte + **non-ASCII 는 unicode-width width==2 강제** (Latin-extended `à` / ambiguous-width `⚠` 거부 — 1-cell 밀림 방지). 4-field wire format 로 위젯에 전달
   - `flagsArePosixNoncompliant` (41 spec) — go/docker/kubectl 스타일 `-foo` 를 long option 으로 라우팅
   - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 mode=Prefix 시 prefix downgrade / mode=Fuzzy 시 서브시퀀스
   - `getQueryTerm` (0 spec but infra ready) — `cargo search "tokio,serde"` 같은 delim split. 현재 Fig spec 은 closure form 만 쓰지만 M1 회복 시 사용 예정
@@ -86,7 +86,6 @@
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`)
 - E5 manifest, spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
-- icon 글리프 width 보정 (emoji 2 col 시 alignment 1 cell 밀림 — 현재는 MVP tradeoff)
 - aws 624 closure-form generators (`rquickjs` opt-in 필요)
 
 ## 4. 절대 깨면 안 되는 불변식
@@ -110,7 +109,7 @@
 | PTY shim | `figterm` (`nerv-pty`) 는 **M1 opt-in only**. M0 ZLE widget 과 상호 배타. `NERV_PTY=1` 환경변수로 분기 | PLAN §5.8 / §6.2 |
 | Rust | toolchain 1.85, **edition 2024** (upstream 정합). v0.5.1 의 edition 2021 폐기. 변경 시 PLAN §7 + `rust-toolchain.toml` + 본 §4 동시 갱신 | `rust-toolchain.toml` |
 | vendor 편집 | `vendor/withfig-autocomplete/` 와 `vendor/aws-autocomplete/` **양쪽 모두 직접 편집 금지**. 변경은 `vendor-patches/{upstream,self}/` 또는 upstream PR | spec-conversion-policy §5.2 |
-| icon sanitize | `Suggestion.icon` 은 절대 `fig://*` URL 통과 금지 — `sanitize_icon` 으로 strip. ≤4 byte (대략 emoji 1개 + ASCII 1글자) 만 허용. 위젯이 raw bytes 를 그대로 prefix 로 출력함 | `nerv-engine/src/complete.rs::sanitize_icon` |
+| icon sanitize | `Suggestion.icon` 은 절대 `fig://*` URL 통과 금지 — `sanitize_icon` 으로 strip. ≤4 byte + **non-ASCII 는 width==2** (unicode-width) 만 허용. ASCII 는 단일 1글자만. 위젯이 non-ASCII = 2 cells 가정하고 row 정렬하므로 1-cell glyph (`⚠` / `à`) 통과 시 alignment 1 cell 밀림 | `nerv-engine/src/complete.rs::sanitize_icon` |
 | filterStrategy 우선 | per-arg `filterStrategy: "substring"` 은 user `MatchMode` (Prefix/Fuzzy) 무관 우선. spec author 가 명시한 의도를 user mode 가 덮어쓰지 않음. `"fuzzy"` 값 자체는 user mode 와 동일 결과 (Prefix→prefix / Fuzzy→subsequence) | `nerv-engine/src/complete.rs::matches_filter` 첫 분기 |
 | 4-field wire format | `nerv _complete` 출력은 `insertion\tdisplay\tdescription\ticon` 4-tab. icon 비면 빈 문자열. **field 추가 시 widget parser 동시 갱신 필수** | `crates/nerv-cli/src/main.rs::print_suggestion` + `_nerv.zsh` |
 | parserDirectives 적용 | `flagsArePosixNoncompliant` 는 root spec 의 directive 만 체크 (subcommand chain 상속 X). Go/docker/kubectl 처럼 root 부터 일관된 스타일이 권장 | `nerv-engine/src/spec_parser.rs::ShortOption` arm |

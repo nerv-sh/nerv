@@ -631,12 +631,27 @@ fn split_by_query_term<'a>(prefix: &'a str, delims: Option<&str>) -> (&'a str, &
 /// (typically a single emoji or one ASCII char). Anything longer
 /// than 4 bytes is also rejected as defense against accidental
 /// long-string injection that would distort popup row widths.
+///
+/// Width contract: the widget reserves exactly **2 cells** for any
+/// non-ASCII glyph (so all rows align). To uphold that, non-ASCII
+/// glyphs whose terminal-display width is not 2 (Latin-extended like
+/// `à`, ambiguous-width like `⚠` without VS-16, zero-width marks,
+/// etc.) are rejected too — they would render in 1 cell and shift
+/// the row by 1. ASCII single chars use the 1-cell slot.
 fn sanitize_icon(raw: Option<&str>) -> Option<String> {
+    use unicode_width::UnicodeWidthStr;
     let s = raw?.trim();
     if s.is_empty() || s.starts_with("fig://") || s.len() > 4 {
         return None;
     }
-    Some(s.to_string())
+    let w = UnicodeWidthStr::width(s);
+    if s.is_ascii() {
+        if w == 1 { Some(s.to_string()) } else { None }
+    } else if w == 2 {
+        Some(s.to_string())
+    } else {
+        None
+    }
 }
 
 fn walk_to_current<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand> {
@@ -3024,6 +3039,34 @@ mod tests {
         assert_eq!(sanitize_icon(Some("")), None);
         assert_eq!(sanitize_icon(Some("   ")), None);
         assert_eq!(sanitize_icon(Some("toolong")), None);
+    }
+
+    #[test]
+    fn sanitize_icon_rejects_one_cell_nonascii() {
+        // Widget reserves 2 cells for any non-ASCII glyph; chars that
+        // render in 1 cell on a default terminal (Latin-extended,
+        // ambiguous-width per UAX #11) would shift the row by 1.
+        // ⚠ (U+26A0, no VS-16) and à (U+00E0) are width 1.
+        assert_eq!(sanitize_icon(Some("\u{26A0}")), None);
+        assert_eq!(sanitize_icon(Some("\u{00E0}")), None);
+    }
+
+    #[test]
+    fn sanitize_icon_keeps_two_cell_glyphs() {
+        // CJK ideograph (3-byte) and supplementary emoji (4-byte) are
+        // both width 2 — the canonical "wide" slot.
+        assert_eq!(sanitize_icon(Some("\u{4E2D}")), Some("\u{4E2D}".into())); // 中
+        assert_eq!(sanitize_icon(Some("📦")), Some("📦".into()));
+        assert_eq!(sanitize_icon(Some("📝")), Some("📝".into()));
+    }
+
+    #[test]
+    fn sanitize_icon_rejects_multichar_ascii() {
+        // Width 2 ASCII string like "ok" would have been allowed by the
+        // old byte-length check (2 ≤ 4) and the widget would still draw
+        // one slot, mangling alignment. Force single ASCII char.
+        assert_eq!(sanitize_icon(Some("ok")), None);
+        assert_eq!(sanitize_icon(Some(">>")), None);
     }
 
     #[test]
