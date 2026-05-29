@@ -85,6 +85,7 @@
   - **bundle 식별자 예약**: APP_BUNDLE_ID `com.amazon.codewhisperer` → `sh.nerv.nerv`, APP_BUNDLE_NAME `Amazon Q.app` → `Nerv.app`. launchd_plist 테스트 + insta snapshot 동기 갱신. Apple Developer 서명 단계 (M0-8) 가 단순 codesign 으로 떨어짐.
   - **settings key 리네이밍 + AI 제거**: `qterm.csi-u.enabled` → `pty.csi-u.enabled`, `qterm.enabled` → `pty.enabled`. CLAUDE.md §4 invariant (no AI) 에 따라 AI translate intercept (`#foo<Enter>` → `q translate 'foo'`) ~23 LOC + `ai.terminal-hash-sub` 설정 + `ai_enabled` 플래그 제거. on-disk migration 없음 — nerv-pty 는 M1 opt-in 으로 live user 없음.
 - ✅ **CI workflow_dispatch gate (2026-06-01 reset 까지)**: 1차 무료 Actions budget 90% (1,806 / 2,000 min) 도달. `ci.yml` 만 `on: workflow_dispatch:` 로 축소 (push/PR 트리거 정지). 다른 workflow 는 그대로 (release/homebrew-bump=tag/release event, upstream-monitor=cron 1·15일). restore 는 inline comment 한 줄 reflow.
+- ✅ **Tier C executor 배선** (`feature = "quickjs"` opt-in): `nerv-quickjs` 스캐폴드 (rquickjs ~1MB sandbox, `eval_isolated` + `eval_with_budget` 200ms 기본) → `nerv-engine::tier_c::execute_custom_source` 헬퍼 → `complete.rs` 의 `Generator::Custom { source: Some(_), .. }` arm wire-up. ts-to-json 의 `captureClosureSource` 가 closure `toString()` 을 IIFE 형태로 감싸 (`(<fn>)(globalThis.__nerv_tokens, () => Promise.resolve(""))`) 32KB cap 적용해 emit. 715 spec 변환 → **473 closure source 캡처** (74 파일 분산, 100% capture rate). 기본 빌드는 `nerv-quickjs` dep 0 (`cargo tree -p nerv-cli` / `nerv-daemon` 검증) — opt-in 만 binary 변동. Custom arm 은 well-known 회복 (aws_list 89 / kubectl_resources 86 / package_json_scripts 28 / ssh_hosts 9 / 외) 통과 후 마지막 fallback 으로만 동작. Soft-fail: tier_c None → next generator → smart filepaths fallback. 5 dispatch test + 1 default-build 호환 test.
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
@@ -96,7 +97,7 @@
 - figterm PTY shim opt-in (`NERV_PTY=1`) — main.rs 980줄 + figterm-ipc + remote-ipc 정합 필요
 - E5 manifest, spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
 - 브랜드 strip 잔여 (defer): RUNTIME_DIR_NAME / DATA_DIR_NAME / Linux package name / desktop entry 일부는 후속 PR 에서 정리
-- aws 624 closure-form generators (`rquickjs` opt-in 필요)
+- aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. 다음 단계: production binary 가 `quickjs` 켜고 출시할지 결정 (PLAN §0.2 opt-in 정책 검토 필요).
 
 ## 4. 절대 깨면 안 되는 불변식
 
