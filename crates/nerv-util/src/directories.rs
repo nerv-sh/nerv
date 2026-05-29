@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 
 #[cfg(unix)]
 use crate::RUNTIME_DIR_NAME;
-use crate::env_var::{Q_BUNDLE_METADATA_PATH, Q_PARENT};
+use crate::env_var::{NERV_BUNDLE_METADATA_PATH, NERV_PARENT};
 use crate::linux::PACKAGE_NAME;
 use crate::system_info::{in_cloudshell, is_remote};
 use crate::{BACKUP_DIR_NAME, DATA_DIR_NAME, TAURI_PRODUCT_NAME};
@@ -49,7 +49,7 @@ pub enum DirectoryError {
     FromVecWithNul(#[from] std::ffi::FromVecWithNulError),
     #[error(transparent)]
     IntoString(#[from] std::ffi::IntoStringError),
-    #[error("{Q_PARENT} env variable not set")]
+    #[error("{NERV_PARENT} env variable not set")]
     QParentNotSet,
     #[error("must be ran from an appimage executable")]
     NotAppImage,
@@ -345,7 +345,7 @@ pub fn desktop_socket_path() -> Result<PathBuf> {
 }
 
 /// The path to remote socket
-// - Linux/MacOS on ssh: At the value of `Q_PARENT`
+// - Linux/MacOS on ssh: At the value of `NERV_PARENT`
 // - Linux/MacOS not on ssh:
 /// - MacOS: `$TMPDIR/cwrun/remote.sock`
 /// - Linux: `$XDG_RUNTIME_DIR/cwrun/remote.sock`
@@ -354,7 +354,7 @@ pub fn remote_socket_path() -> Result<PathBuf> {
     // Normal implementation for non-test code
     // TODO(grant): This is only enabled on Linux for now to prevent public dist
     if is_remote() && !in_cloudshell() && cfg!(target_os = "linux") {
-        if let Some(parent_socket) = nerv_os::Env::new().get_os(Q_PARENT) {
+        if let Some(parent_socket) = nerv_os::Env::new().get_os(NERV_PARENT) {
             Ok(PathBuf::from(parent_socket))
         } else {
             Err(DirectoryError::QParentNotSet)
@@ -442,7 +442,7 @@ pub fn manifest_path() -> Result<PathBuf> {
 /// resources directory from the AppImage mount, known only by the AppImage itself (ie, the desktop
 /// binary).
 pub fn bundle_metadata_path<Ctx: EnvProvider + PlatformProvider>(ctx: &Ctx) -> Result<PathBuf> {
-    if let Some(path) = ctx.env().get_os(Q_BUNDLE_METADATA_PATH) {
+    if let Some(path) = ctx.env().get_os(NERV_BUNDLE_METADATA_PATH) {
         return Ok(path.into());
     }
     Ok(resources_path_ctx(ctx)?
