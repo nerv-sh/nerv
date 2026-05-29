@@ -113,6 +113,9 @@ jobs:
           test -s /tmp/hostname.json
           # Sanity: output is valid JSON with a name field
           bun -e 'const j = JSON.parse(await Bun.file("/tmp/hostname.json").text()); if (!j.name) process.exit(1);'
+      - name: ts-to-json unit tests (regex recognizers)
+        working-directory: tools/ts-to-json
+        run: bun test
 
   # Future: e2e job (M1 6주차 onward) — runs zsh + tmux scenarios via expectrl.
   # Future: spec regression job (M1) — checks Tier distribution.

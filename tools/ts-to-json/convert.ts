@@ -68,7 +68,7 @@ const detectFilepathsGenerator = (
  * optional in upstream; some calls omit it and emit the array element
  * itself).
  */
-const detectAwsJsonPath = (
+export const detectAwsJsonPath = (
   postProcess: any,
 ): { parent_key: string; id_field: string | null } | null => {
   if (typeof postProcess !== "function") return null;
@@ -97,15 +97,16 @@ const detectAwsJsonPath = (
  *  - array literal `["--name", "--other"]` → captured as-is.
  *  - single string `"--name"` → wrapped into a single-element list.
  */
-const detectAwsListCustom = (
+export const detectAwsListCustom = (
   custom: any,
+  serviceHint: string | null = AWS_SERVICE_HINT,
 ): {
   verb: string;
   lookup_flags: string[];
   parent_key: string;
   id_field: string | null;
 } | null => {
-  if (typeof custom !== "function" || !AWS_SERVICE_HINT) return null;
+  if (typeof custom !== "function" || !serviceHint) return null;
   let src: string;
   try {
     src = custom.toString();
@@ -1037,4 +1038,9 @@ const main = async () => {
   if (failed > 0) process.exit(1);
 };
 
-main();
+// Skip the CLI when this module is imported elsewhere (e.g.
+// `convert.test.ts` pulling in `detectAwsJsonPath`). `import.meta.main`
+// is true only when bun runs this file directly.
+if (import.meta.main) {
+  main();
+}
