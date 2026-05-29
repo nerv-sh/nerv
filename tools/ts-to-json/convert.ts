@@ -87,6 +87,58 @@ const detectAwsJsonPath = (
   return { parent_key: m[1], id_field: m[2] ?? null };
 };
 
+/**
+ * Detect aws-style `listCustomGenerator(tokens, exec, "verb", flags,
+ * "ParentKey", "IdField")` inside a `custom` closure. Each aws spec
+ * file defines its own local helper; what stays stable is the call
+ * shape and the surrounding service hint (set by `loadOneAt`).
+ *
+ * Two `flags` forms are supported:
+ *  - array literal `["--name", "--other"]` → captured as-is.
+ *  - single string `"--name"` → wrapped into a single-element list.
+ */
+const detectAwsListCustom = (
+  custom: any,
+): {
+  verb: string;
+  lookup_flags: string[];
+  parent_key: string;
+  id_field: string | null;
+} | null => {
+  if (typeof custom !== "function" || !AWS_SERVICE_HINT) return null;
+  let src: string;
+  try {
+    src = custom.toString();
+  } catch {
+    return null;
+  }
+  // Match either form. Capture: verb, flags blob (array or single
+  // string), parent_key, optional id_field. Multi-line tolerant.
+  const m = src.match(
+    /listCustomGenerator\s*\(\s*\w+\s*,\s*\w+\s*,\s*["']([^"']+)["']\s*,\s*(\[[\s\S]*?\]|["'][^"']+["'])\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']+)["'])?\s*\)/,
+  );
+  if (!m) return null;
+  const [, verb, flagsBlob, parentKey, idField] = m;
+  const flagsTrim = flagsBlob.trim();
+  let lookup_flags: string[];
+  if (flagsTrim.startsWith("[")) {
+    // Array literal — collect every quoted string inside.
+    lookup_flags = Array.from(
+      flagsTrim.matchAll(/["']([^"']+)["']/g),
+      (mm) => mm[1],
+    );
+  } else {
+    // Single-string form (iam.ts variant).
+    lookup_flags = [flagsTrim.slice(1, -1)];
+  }
+  return {
+    verb,
+    lookup_flags,
+    parent_key: parentKey,
+    id_field: idField ?? null,
+  };
+};
+
 type FigArg = {
   name?: string | string[];
   description?: string;
@@ -197,6 +249,14 @@ type NervGenerator =
   | {
       type: "script_with_json_path";
       script: string[];
+      parent_key: string;
+      id_field: string | null;
+    }
+  | {
+      type: "aws_list";
+      service: string;
+      verb: string;
+      lookup_flags: string[];
       parent_key: string;
       id_field: string | null;
     };
@@ -484,6 +544,21 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
   }
 
   if (typeof g === "function") {
+    // Well-known: aws `listCustomGenerator(tokens, exec, "verb",
+    // flags, "Parent", "Child")` — token-aware service enumeration.
+    // Detected here because the function-form variant is used by
+    // some aws files directly (no `custom:` wrapper).
+    const aws = detectAwsListCustom(g);
+    if (aws) {
+      return {
+        type: "aws_list",
+        service: AWS_SERVICE_HINT!,
+        verb: aws.verb,
+        lookup_flags: aws.lookup_flags,
+        parent_key: aws.parent_key,
+        id_field: aws.id_field,
+      };
+    }
     // Custom generator function — Tier C, deferred to M1 rquickjs.
     return { type: "custom", description_hint: null };
   }
@@ -491,6 +566,18 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
 
   // `custom: async (...)=>{...}` form
   if (typeof g.custom === "function") {
+    // Same well-known aws closure recovery, in object form.
+    const aws = detectAwsListCustom(g.custom);
+    if (aws) {
+      return {
+        type: "aws_list",
+        service: AWS_SERVICE_HINT!,
+        verb: aws.verb,
+        lookup_flags: aws.lookup_flags,
+        parent_key: aws.parent_key,
+        id_field: aws.id_field,
+      };
+    }
     return { type: "custom", description_hint: null };
   }
 
@@ -858,8 +945,20 @@ const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
     return null;
   }
   const stem = basename(file, extname(file));
-  return convertSpec(exported as FigSpec, ctx, stem);
+  // Detect aws service file (vendor/withfig-autocomplete/src/aws/<service>.ts).
+  // Used by `convertOneGenerator` to recover `listCustomGenerator(...)`
+  // calls into `Generator::AwsList { service, ... }` without threading
+  // an extra arg through the whole conversion chain.
+  const prev = AWS_SERVICE_HINT;
+  AWS_SERVICE_HINT = file.includes("/aws/") ? stem : null;
+  try {
+    return await convertSpec(exported as FigSpec, ctx, stem);
+  } finally {
+    AWS_SERVICE_HINT = prev;
+  }
 };
+
+let AWS_SERVICE_HINT: string | null = null;
 
 const collectInputs = async (input: string): Promise<string[]> => {
   const st = await stat(input);
