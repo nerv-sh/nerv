@@ -43,7 +43,7 @@
   - Tier A 440 / B 6 / C 246 자동 분류
   - **loadSpec depth=1 활성**: `aws ec2 <verb>`, `aws s3 <verb>`, `gcloud compute instances <verb>` 등 nested 자동완성 동작
   - cycle-safe (visited Set + MAX_DEPTH gate)
-- ✅ **SpecRegistry lazy load + mtime 기반 hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. negative cache + mtime check (~1µs/lookup overhead) — spec 재설치 시 daemon 재시작 불필요.
+- ✅ **SpecRegistry lazy load + 이벤트/mtime hybrid hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. macOS FSEvents (`notify` crate) 가 spec dir 변경 push → pending invalidations 세트에 stem 등록 → lookup() 가 drain + cache evict. mtime check 는 belt-and-suspenders (watcher 실패 / 이벤트 누락 시 fallback). spec 재설치 시 daemon 재시작 불필요 + 이벤트 latency 거의 0.
 - ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
 - ✅ **Tier B generator 실행**: 정적 shell command (예: `git branch --list`) → Rust 가 직접 spawn (200ms timeout) + TTL 5s LRU 64 cache (keystroke 마다 spawn 방지) + ANSI/git-marker line sanitization. Tier C (closure) 는 deno_core 비목표 정책 + closure JSON 직렬화 불가로 영구 defer.
 - ✅ **well-known Tier C → B 회복** (signature-based recognizer 5종):
@@ -85,7 +85,7 @@
 - bash / fish 지원 (큼)
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`)
-- E5 manifest, inotify push 기반 hot-reload (현재는 stat poll), spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
+- E5 manifest, spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
 - icon 글리프 width 보정 (emoji 2 col 시 alignment 1 cell 밀림 — 현재는 MVP tradeoff)
 - aws 624 closure-form generators (`rquickjs` opt-in 필요)
 

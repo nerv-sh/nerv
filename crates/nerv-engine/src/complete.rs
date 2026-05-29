@@ -34,10 +34,27 @@ use std::sync::{Arc, RwLock};
 /// reinstalled / regenerated the spec), the cache entry is dropped
 /// and the spec is re-read. Adds ~1µs per lookup on top of the
 /// HashMap hit (cheap compared to even the fastest UDS roundtrip).
-#[derive(Debug)]
 pub struct SpecRegistry {
     dir: Option<PathBuf>,
     cache: RwLock<HashMap<String, CacheEntry>>,
+    /// Spec stems (binary names) marked dirty by the FS watcher. Drained
+    /// at lookup-time so any cached entry gets re-read from disk on the
+    /// very next call. `None` when no watcher is active (e.g. empty
+    /// registry, dir doesn't exist, or notify failed to start).
+    pending_invalidations: Option<Arc<std::sync::Mutex<std::collections::HashSet<String>>>>,
+    /// Held to keep the watcher thread alive for the registry's lifetime.
+    /// Dropping the watcher stops the FS event stream.
+    _watcher: Option<Box<dyn notify::Watcher + Send + Sync>>,
+}
+
+impl std::fmt::Debug for SpecRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpecRegistry")
+            .field("dir", &self.dir)
+            .field("cache", &self.cache)
+            .field("watcher_active", &self._watcher.is_some())
+            .finish()
+    }
 }
 
 impl Default for SpecRegistry {
@@ -45,6 +62,8 @@ impl Default for SpecRegistry {
         Self {
             dir: None,
             cache: RwLock::new(HashMap::new()),
+            pending_invalidations: None,
+            _watcher: None,
         }
     }
 }
@@ -66,10 +85,20 @@ impl SpecRegistry {
     }
 
     /// Build a registry rooted at `dir`. Disk reads are lazy.
+    ///
+    /// Also starts a filesystem watcher (FSEvents on macOS) that
+    /// invalidates the cache when spec files change on disk —
+    /// `build-specs` reinstall is picked up on the next lookup without
+    /// restarting the daemon. The mtime check in `lookup` stays as a
+    /// belt-and-suspenders fallback if the watcher fails or drops events.
     pub fn at_dir(dir: &Path) -> Self {
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let watcher = start_spec_watcher(dir, pending.clone());
         Self {
             dir: Some(dir.to_path_buf()),
             cache: RwLock::new(HashMap::new()),
+            pending_invalidations: Some(pending),
+            _watcher: watcher,
         }
     }
 
@@ -77,7 +106,8 @@ impl SpecRegistry {
     /// errors. Useful at daemon startup so problems show up in logs
     /// without waiting for a user keystroke. Returns the registry +
     /// every error encountered during the scan; positive results are
-    /// kept in the cache so subsequent lookups are O(1).
+    /// kept in the cache so subsequent lookups are O(1). FS watcher
+    /// is spawned the same way as `at_dir`.
     pub fn load_dir(dir: &Path) -> (Self, Vec<SpecLoadError>) {
         let registry = Self::at_dir(dir);
         let mut errors = Vec::new();
@@ -126,6 +156,10 @@ impl SpecRegistry {
     /// or when the file's mtime has advanced past the cached value.
     /// Returns `None` if the spec doesn't exist or failed to parse.
     pub fn lookup(&self, name: &str) -> Option<Arc<Spec>> {
+        // Drain any FS-watcher invalidations queued since the last
+        // lookup. Each drained stem evicts its cache entry so the
+        // next read goes back to disk.
+        self.drain_invalidations();
         // Fast path: cache hit + mtime unchanged.
         let cached = self.cache.read().ok().and_then(|c| c.get(name).cloned());
         if let Some(entry) = cached {
@@ -182,6 +216,29 @@ impl SpecRegistry {
             return (mtime, spec);
         }
         (None, None)
+    }
+
+    /// Move every queued FS-watcher invalidation into the cache:
+    /// each stem maps to a cache entry that gets dropped, so the
+    /// next `lookup(stem)` re-reads the spec file. No-op when no
+    /// watcher is active.
+    fn drain_invalidations(&self) {
+        let Some(pending) = self.pending_invalidations.as_ref() else {
+            return;
+        };
+        let Ok(mut pending) = pending.lock() else {
+            return;
+        };
+        if pending.is_empty() {
+            return;
+        }
+        let names: Vec<String> = pending.drain().collect();
+        drop(pending);
+        if let Ok(mut cache) = self.cache.write() {
+            for name in &names {
+                cache.remove(name);
+            }
+        }
     }
 
     /// Insert a spec into the cache directly. Used by tests that
@@ -255,6 +312,58 @@ impl SpecRegistry {
         }
         seen.into_iter().collect()
     }
+}
+
+/// Spawn a filesystem watcher over `dir` and forward changed-file
+/// events into `pending` as spec stems. Returns `None` when the
+/// watcher fails to start (the registry stays correct via mtime
+/// polling so this is a soft failure).
+fn start_spec_watcher(
+    dir: &Path,
+    pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+) -> Option<Box<dyn notify::Watcher + Send + Sync>> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(event) = res else {
+            return;
+        };
+        // Only Create / Modify / Remove signal an actual cache
+        // invalidation. Access / Metadata events would needlessly
+        // drop entries (e.g. when `nerv doctor` stat's the file).
+        if !matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+        ) {
+            return;
+        }
+        let Ok(mut q) = pending.lock() else {
+            return;
+        };
+        for path in &event.paths {
+            if let Some(stem) = spec_stem_from_path(path) {
+                q.insert(stem);
+            }
+        }
+    })
+    .ok()?;
+    // NonRecursive: the specs directory is flat (Caches/nerv/specs).
+    watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
+    Some(Box::new(watcher))
+}
+
+/// Pull the spec stem out of a watched path, accepting both `<name>.json`
+/// and `<name>.json.gz`. Returns `None` for paths that don't look like
+/// spec files (rejects e.g. swap files, tmp files).
+fn spec_stem_from_path(path: &Path) -> Option<String> {
+    let name = path.file_name().and_then(|n| n.to_str())?;
+    if let Some(stem) = name.strip_suffix(".json.gz") {
+        return Some(stem.to_string());
+    }
+    if let Some(stem) = name.strip_suffix(".json") {
+        return Some(stem.to_string());
+    }
+    None
 }
 
 /// Pipeline result: completion candidates at the cursor.
@@ -3339,6 +3448,51 @@ mod tests {
         let raw = r#"{"Items":[{"Id":"a"},{"NoId":"x"},{"Id":"b"}]}"#;
         let out = extract_aws_json_names(raw, "Items", Some("Id")).unwrap();
         assert_eq!(out, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn spec_stem_from_path_strips_extensions() {
+        assert_eq!(
+            spec_stem_from_path(Path::new("/tmp/specs/git.json")),
+            Some("git".to_string())
+        );
+        assert_eq!(
+            spec_stem_from_path(Path::new("/tmp/specs/docker.json.gz")),
+            Some("docker".to_string())
+        );
+        assert!(spec_stem_from_path(Path::new("/tmp/specs/.swap")).is_none());
+        assert!(spec_stem_from_path(Path::new("/tmp/specs/git.json.bak")).is_none());
+    }
+
+    #[test]
+    fn fs_watcher_invalidates_cache_on_spec_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec_path = tmp.path().join("foo.json");
+        std::fs::write(
+            &spec_path,
+            r#"{"name":"foo","subcommands":[{"name":"alpha"}]}"#,
+        )
+        .unwrap();
+        let reg = SpecRegistry::at_dir(tmp.path());
+        let first = reg.lookup("foo").expect("initial load failed");
+        assert_eq!(first.subcommands.len(), 1);
+        assert_eq!(first.subcommands[0].name, "alpha");
+
+        // Rewrite the spec. The FS watcher should mark `foo` dirty so
+        // the next lookup re-reads from disk with the new subcommand
+        // list. macOS FSEvents coalesces at 500ms — wait long enough.
+        std::fs::write(
+            &spec_path,
+            r#"{"name":"foo","subcommands":[{"name":"alpha"},{"name":"beta"}]}"#,
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut second = reg.lookup("foo").unwrap();
+        while second.subcommands.len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            second = reg.lookup("foo").unwrap();
+        }
+        assert_eq!(second.subcommands.len(), 2);
     }
 
     #[test]
