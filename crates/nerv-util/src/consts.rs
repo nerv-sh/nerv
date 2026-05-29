@@ -1,16 +1,20 @@
 pub const APP_BUNDLE_ID: &str = "com.amazon.codewhisperer";
 pub const APP_BUNDLE_NAME: &str = "Amazon Q.app";
 
+// Nerv has no desktop app today. These names are kept so the absorbed
+// Linux/Windows integration code still compiles — they only feed
+// `.desktop` icon paths (Linux) and tauri AppImage lib dir (Linux).
+// macOS arm is dead on the v1 ship.
 #[cfg(target_os = "macos")]
-pub const APP_PROCESS_NAME: &str = "q_desktop";
+pub const APP_PROCESS_NAME: &str = "nerv-desktop";
 #[cfg(target_os = "linux")]
-pub const APP_PROCESS_NAME: &str = "q-desktop";
+pub const APP_PROCESS_NAME: &str = "nerv-desktop";
 
 #[cfg(windows)]
-pub const APP_PROCESS_NAME: &str = "q_desktop.exe";
+pub const APP_PROCESS_NAME: &str = "nerv-desktop.exe";
 
 /// The name configured under `"package.productName"` in the tauri.conf.json file.
-pub const TAURI_PRODUCT_NAME: &str = "q_desktop";
+pub const TAURI_PRODUCT_NAME: &str = "nerv-desktop";
 
 pub const CLI_BINARY_NAME: &str = "q";
 pub const CLI_BINARY_NAME_MINIMAL: &str = "q-minimal";
@@ -23,16 +27,21 @@ pub const URL_SCHEMA: &str = "q";
 
 pub const PRODUCT_NAME: &str = "Amazon Q";
 
-pub const RUNTIME_DIR_NAME: &str = "cwrun";
+// Runtime + data + backup dir names. Renamed from cwrun / amazon-q /
+// AmazonQ / .amazon-q.dotfiles.bak. No on-disk migration is needed —
+// the only crates that read these (nerv-pty PTY runtime, settings
+// state store, fig_data_dir) are M1 opt-in and have no live users
+// pointing at the old paths.
+pub const RUNTIME_DIR_NAME: &str = "nervrun";
 
 /// Data directory name used in paths like ~/.local/share/{DATA_DIR_NAME}
 #[cfg(unix)]
-pub const DATA_DIR_NAME: &str = "amazon-q";
+pub const DATA_DIR_NAME: &str = "nerv";
 #[cfg(windows)]
-pub const DATA_DIR_NAME: &str = "AmazonQ";
+pub const DATA_DIR_NAME: &str = "Nerv";
 
 /// Backup directory name
-pub const BACKUP_DIR_NAME: &str = ".amazon-q.dotfiles.bak";
+pub const BACKUP_DIR_NAME: &str = ".nerv.dotfiles.bak";
 
 // These are the old "CodeWhisperer" branding, used anywhere we will not update to Amazon Q
 pub const OLD_PRODUCT_NAME: &str = "CodeWhisperer";
@@ -87,13 +96,13 @@ pub mod macos {
 }
 
 pub mod linux {
-    pub const DESKTOP_ENTRY_NAME: &str = "amazon-q.desktop";
+    pub const DESKTOP_ENTRY_NAME: &str = "nerv.desktop";
 
     /// Name of the deb package.
-    pub const PACKAGE_NAME: &str = "amazon-q";
+    pub const PACKAGE_NAME: &str = "nerv";
 
     /// The wm_class used for the application windows.
-    pub const DESKTOP_APP_WM_CLASS: &str = "Amazon-q";
+    pub const DESKTOP_APP_WM_CLASS: &str = "Nerv";
 }
 
 pub mod env_var {
