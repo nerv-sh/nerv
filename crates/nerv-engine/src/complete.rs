@@ -1339,51 +1339,65 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
 /// cache means every keystroke after the first hits cache anyway.
 const GENERATOR_TIMEOUT_MS: u64 = 800;
 
-fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+/// Drain a spawned child process's stdout into a single Vec under
+/// [`GENERATOR_TIMEOUT_MS`]. On timeout, kill the child and return
+/// `None`. Otherwise return the captured bytes (which may be empty
+/// when the child wrote nothing).
+///
+/// A dedicated thread does the read so the pipe buffer (~64 KB on
+/// macOS) never fills and blocks the child. An earlier `try_wait()` +
+/// 10ms tick loop without reading the pipe deadlocked on commands
+/// that wrote more than ~64 KB before exiting (e.g. `ps axo
+/// pid,comm` on a busy machine: 1600+ lines / ~50 KB) — even when
+/// the command itself finished in <100 ms.
+///
+/// `buf_cap` sets the initial Vec capacity; pick the rough expected
+/// payload size to avoid reallocs (8 KB for line-shaped Fig
+/// generators, 64 KB for blob payloads like `cargo metadata`).
+fn spawn_with_timeout(mut child: std::process::Child, buf_cap: usize) -> Option<Vec<u8>> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = Vec::with_capacity(buf_cap);
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
+        Ok(buf) => {
+            let _ = child.wait();
+            Some(buf)
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+    use std::process::{Command, Stdio};
     if script.is_empty() {
         return None;
     }
     let bin = script.first()?;
     let args = &script[1..];
-    let mut child = Command::new(bin)
+    let child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    // Drain stdout in a dedicated thread so the pipe buffer (~64 KB
-    // on macOS) never fills and blocks the child. A previous version
-    // try_wait()'d in 10ms ticks but never read the pipe — anything
-    // that wrote more than ~64 KB before exiting (e.g. `ps axo
-    // pid,comm` on a busy machine: 1600+ lines / ~50 KB) deadlocked
-    // and tripped the 200 ms cap even when the command itself
-    // finished in <100 ms.
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = Vec::with_capacity(8192);
-        let _ = stdout.read_to_end(&mut buf);
-        let _ = tx.send(buf);
-    });
-    let buf = match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
+    let buf = spawn_with_timeout(child, 8192)?;
     // Don't gate on exit status alone — many Fig generators run
     // `find $i ...` over `$PATH`-derived dirs that may not all exist,
     // so the script exits non-zero on the missing-path case even
     // though stdout was usefully populated. If we got stdout bytes,
     // use them; only return None when there's truly nothing to parse.
-    let _ = child.wait();
     if buf.is_empty() {
         return None;
     }
@@ -1751,6 +1765,7 @@ static CARGO_METADATA_CACHE: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
+    use std::process::{Command, Stdio};
     let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     if let Ok(cache) = CARGO_METADATA_CACHE.lock() {
         if let Some((stamp, blob)) = cache.get(&canon) {
@@ -1759,11 +1774,7 @@ fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
             }
         }
     }
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    use std::sync::mpsc;
-    use std::time::Duration;
-    let mut child = Command::new("cargo")
+    let child = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(&canon)
         .stdin(Stdio::null())
@@ -1771,22 +1782,7 @@ fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = Vec::with_capacity(65_536);
-        let _ = stdout.read_to_end(&mut buf);
-        let _ = tx.send(buf);
-    });
-    let buf = match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
-    let _ = child.wait();
+    let buf = spawn_with_timeout(child, 65_536)?;
     if buf.is_empty() {
         return None;
     }
