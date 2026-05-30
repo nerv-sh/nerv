@@ -247,4 +247,108 @@ mod tests {
         let restored = parse_spec_str(&json, Path::new("<test>")).unwrap();
         assert_eq!(spec, restored);
     }
+
+    /// `*.gz` extension with non-gzip bytes underneath surfaces as
+    /// `Io` (the gzip decoder bails on the magic-number mismatch),
+    /// not as `Parse`. Locks the failure routing so a corrupted
+    /// install's doctor output points the user at "reinstall" not
+    /// "spec invalid".
+    #[test]
+    fn gz_extension_with_plain_bytes_is_io_error() {
+        let tmp = std::env::temp_dir().join(format!(
+            "nerv-spec-loader-fake-{}.json.gz",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&tmp);
+        // Plain JSON text — but the extension claims gzip.
+        fs::write(&tmp, b"{\"name\":\"x\"}").unwrap();
+        let err = load_spec_file(&tmp).unwrap_err();
+        assert!(
+            matches!(err, SpecLoadError::Io { .. }),
+            "expected Io, got {err:?}"
+        );
+        fs::remove_file(&tmp).ok();
+    }
+
+    /// Truncated JSON — valid prefix, EOF mid-object — surfaces as
+    /// `Parse`. Distinct from `NotFound` so callers can show the
+    /// right hint ("spec corrupted" vs "spec missing").
+    #[test]
+    fn truncated_json_is_parse_error() {
+        let err =
+            parse_spec_str("{ \"name\": \"git\", \"subcomma", Path::new("<test>")).unwrap_err();
+        assert!(matches!(err, SpecLoadError::Parse { .. }));
+        // The error message must include the origin path so the
+        // doctor table can show which file failed.
+        assert!(err.to_string().contains("<test>"));
+    }
+
+    /// `write_spec_file` creates parent directories on demand — the
+    /// build-specs binary depends on this to populate the spec cache
+    /// dir on first run.
+    #[test]
+    fn write_creates_parent_dirs() {
+        let base = std::env::temp_dir().join(format!("nerv-spec-mkdir-{}", std::process::id()));
+        // Two missing levels.
+        let nested = base.join("inner/leaf/git.json");
+        let _ = fs::remove_dir_all(&base);
+        write_spec_file(&git_minimal(), &nested).unwrap();
+        assert!(nested.exists());
+        let restored = load_spec_file(&nested).unwrap();
+        assert_eq!(restored, git_minimal());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Multiple Generator variants survive serialize → parse with
+    /// every field preserved. Catches a regression where a new
+    /// variant lands in spec_parser without an explicit serde tag.
+    #[test]
+    fn generator_variants_round_trip_full_matrix() {
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("multi".into()),
+                generators: vec![
+                    Generator::Template {
+                        script: vec!["echo".into(), "alpha".into()],
+                    },
+                    Generator::PackageJsonScripts,
+                    Generator::Filepaths { folders_only: true },
+                    Generator::ZoxideQuery,
+                    Generator::SshHosts,
+                    Generator::MakefileTargets,
+                    Generator::Custom {
+                        description_hint: Some("hint".into()),
+                        source: Some("(()=>[\"a\"])()".into()),
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let json = write_spec_str(&spec).unwrap();
+        let restored = parse_spec_str(&json, Path::new("<test>")).unwrap();
+        assert_eq!(spec, restored);
+    }
+
+    /// `SpecLoadError::Parse` Display surfaces both the origin path
+    /// and the inner serde_json error message. Locks the format
+    /// `nerv doctor`'s `spec health` row depends on.
+    #[test]
+    fn parse_error_display_includes_path_and_source() {
+        let err = parse_spec_str("not json", Path::new("/tmp/bad-spec.json")).unwrap_err();
+        let s = err.to_string();
+        assert!(s.contains("/tmp/bad-spec.json"), "missing path: {s}");
+        assert!(s.contains("json error"), "missing prefix: {s}");
+    }
+
+    /// `NotFound` Display surfaces the path so doctor's error row
+    /// is actionable.
+    #[test]
+    fn not_found_display_includes_path() {
+        let err = load_spec_file(Path::new("/this/does/not/exist/spec.json")).unwrap_err();
+        let s = err.to_string();
+        assert!(s.starts_with("spec file not found:"));
+        assert!(s.contains("/this/does/not/exist/spec.json"));
+    }
 }
