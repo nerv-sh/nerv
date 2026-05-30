@@ -357,7 +357,77 @@ fn build_doctor_report() -> DoctorReport {
     check_shell_hook(&mut r);
     check_daemon(&mut r);
     check_specs(&mut r);
+    check_pty_mode(&mut r);
     r
+}
+
+/// PLAN §5.8 PTY shim is M1 opt-in via `NERV_PTY=1`. Doctor
+/// reports the active state so users can confirm their env flag
+/// took effect AND that the `nerv-pty` binary the shim execs is
+/// actually present. Silent when NERV_PTY isn't set — the default
+/// ZLE-widget path doesn't need this row.
+fn check_pty_mode(r: &mut DoctorReport) {
+    if std::env::var_os("NERV_PTY").is_none() {
+        return;
+    }
+    // Inside the PTY shim already? Re-entry detector — the wrapper
+    // exports NERV_PTY_SESSION_ID before re-execing zsh under
+    // itself, so non-empty means doctor is running INSIDE the
+    // shim's child shell (expected).
+    let inside_shim = std::env::var_os("NERV_PTY_SESSION_ID").is_some();
+
+    // Resolve nerv-pty: prefer NERV_PTY_BIN (set by the init hook),
+    // else look for a sibling of the running nerv binary, else
+    // fall back to PATH.
+    let from_env = std::env::var_os("NERV_PTY_BIN").map(std::path::PathBuf::from);
+    let from_sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent().map(|d| {
+                d.join(if cfg!(windows) {
+                    "nerv-pty.exe"
+                } else {
+                    "nerv-pty"
+                })
+            })
+        })
+        .filter(|p| p.exists());
+    let from_path = which("nerv-pty").ok();
+
+    match from_env
+        .filter(|p| p.exists())
+        .or(from_sibling)
+        .or(from_path)
+    {
+        Some(p) => {
+            let detail = if inside_shim {
+                format!("active, binary at {} (running inside shim)", p.display())
+            } else {
+                format!("opt-in set, binary at {}", p.display())
+            };
+            r.push(DoctorLevel::Ok, "pty shim", detail, None);
+        }
+        None => {
+            r.push(
+                DoctorLevel::Err,
+                "pty shim",
+                "NERV_PTY=1 but nerv-pty binary not found".into(),
+                Some("unset NERV_PTY or install nerv-pty (brew reinstall nerv)".into()),
+            );
+        }
+    }
+}
+
+/// Minimal PATH lookup. Returns the first matching executable.
+fn which(name: &str) -> Result<std::path::PathBuf, ()> {
+    let path = std::env::var_os("PATH").ok_or(())?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(())
 }
 
 /// E3: zsh version ≥ 5.8.
@@ -1318,6 +1388,39 @@ mod tests {
             !leftover.exists(),
             "atomic temp file should be renamed away"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `which("...")` mirrors PATH lookup for the doctor's PTY check.
+    /// Empty PATH returns Err; missing binary returns Err; existing
+    /// file returns the resolved path.
+    #[test]
+    fn which_finds_existing_path_entry() {
+        let tmp = std::env::temp_dir().join(format!("nerv-which-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let exe = tmp.join("nerv-pty");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        // Preserve current PATH and prepend our tempdir; restore on
+        // exit so other tests don't see the override.
+        let original = std::env::var_os("PATH");
+        let new_path = match &original {
+            Some(p) => {
+                let mut v = std::ffi::OsString::from(&tmp);
+                v.push(":");
+                v.push(p);
+                v
+            }
+            None => std::ffi::OsString::from(&tmp),
+        };
+        unsafe { std::env::set_var("PATH", &new_path) };
+        let got = which("nerv-pty");
+        let missing = which("nerv-no-such-binary-xyz-9876");
+        match original {
+            Some(p) => unsafe { std::env::set_var("PATH", p) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(got.unwrap(), exe);
+        assert!(missing.is_err());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
