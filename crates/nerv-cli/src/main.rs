@@ -151,10 +151,20 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
 
                 let bin = std::env::current_exe()?.to_string_lossy().into_owned();
                 println!("export NERV_BIN={bin:?}");
-                print!(
-                    "{}",
-                    include_str!("../../../shell-integrations/zsh/_nerv.zsh")
-                );
+                // NERV_PTY=1 opts the user into the figterm-style PTY
+                // shim (PLAN §5.8). Emit the PTY bootstrap script
+                // INSTEAD OF the ZLE widget; the widget itself
+                // self-skips when NERV_PTY is set, but emitting both
+                // wastes bytes and confuses `nerv doctor`. The PTY
+                // path is mutually exclusive with the widget by
+                // CLAUDE.md §4 invariant.
+                let pty_mode = std::env::var_os("NERV_PTY").is_some();
+                if pty_mode {
+                    if let Some(pty_bin) = resolve_pty_bin_for_init(&bin) {
+                        println!("export NERV_PTY_BIN={pty_bin:?}");
+                    }
+                }
+                print!("{}", init_snippet_for_zsh(pty_mode));
                 Ok(())
             } else {
                 // Outer block: just emit the ~/.zshrc marker. The inner
@@ -170,6 +180,34 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 Ok(())
             }
         }
+    }
+}
+
+/// Returns the zsh integration snippet to emit for the inner hook.
+/// Two flavors: the default ZLE widget (`_nerv.zsh`) and the
+/// PTY-shim bootstrap (`_nerv-pty.zsh`). The PTY flavor activates
+/// only when `NERV_PTY=1` was set in the parent environment.
+fn init_snippet_for_zsh(pty_mode: bool) -> &'static str {
+    if pty_mode {
+        include_str!("../../../shell-integrations/zsh/_nerv-pty.zsh")
+    } else {
+        include_str!("../../../shell-integrations/zsh/_nerv.zsh")
+    }
+}
+
+/// Locate the `nerv-pty` binary that ships next to the `nerv` CLI.
+/// `bin` is the path to the running `nerv` executable. We look for a
+/// sibling named `nerv-pty` (Homebrew + cargo install both place
+/// them in the same dir). When the sibling exists we export the
+/// absolute path so the shim doesn't depend on PATH — important
+/// inside an interactive shell with a freshly-stripped PATH.
+fn resolve_pty_bin_for_init(bin: &str) -> Option<String> {
+    let parent = std::path::Path::new(bin).parent()?;
+    let candidate = parent.join("nerv-pty");
+    if candidate.exists() {
+        Some(candidate.to_string_lossy().into_owned())
+    } else {
+        None
     }
 }
 
@@ -1280,6 +1318,52 @@ mod tests {
             !leftover.exists(),
             "atomic temp file should be renamed away"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `init_snippet_for_zsh(false)` returns the ZLE widget body —
+    /// recognisable by its `__NERV_LOADED` re-entry guard. The PTY
+    /// flavor's bootstrap uses `NERV_PTY_SESSION_ID` instead.
+    #[test]
+    fn init_snippet_for_zsh_default_is_zle_widget() {
+        let body = init_snippet_for_zsh(false);
+        assert!(body.contains("__NERV_LOADED"));
+        assert!(!body.contains("NERV_PTY_BIN"));
+    }
+
+    /// `init_snippet_for_zsh(true)` returns the PTY bootstrap —
+    /// recognisable by its NERV_PTY_SESSION_ID re-entry guard and
+    /// the exec of NERV_PTY_BIN.
+    #[test]
+    fn init_snippet_for_zsh_pty_mode_is_pty_bootstrap() {
+        let body = init_snippet_for_zsh(true);
+        assert!(body.contains("NERV_PTY_SESSION_ID"));
+        assert!(body.contains("NERV_PTY_BIN"));
+        // Mutual exclusion: PTY snippet must NOT define the ZLE
+        // widget global.
+        assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// `resolve_pty_bin_for_init` returns Some(path) when a sibling
+    /// `nerv-pty` exists next to the given `nerv` binary; None
+    /// otherwise. Used by the inner init hook to export
+    /// NERV_PTY_BIN so the shim doesn't depend on PATH.
+    #[test]
+    fn resolve_pty_bin_for_init_finds_sibling() {
+        let tmp = std::env::temp_dir().join(format!("nerv-pty-init-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let nerv = tmp.join("nerv");
+        let pty = tmp.join("nerv-pty");
+        std::fs::write(&nerv, b"#!/bin/sh\n").unwrap();
+        // No sibling yet.
+        assert_eq!(
+            resolve_pty_bin_for_init(nerv.to_str().unwrap()),
+            None,
+            "should be None when sibling missing",
+        );
+        std::fs::write(&pty, b"#!/bin/sh\n").unwrap();
+        let got = resolve_pty_bin_for_init(nerv.to_str().unwrap()).unwrap();
+        assert_eq!(std::path::PathBuf::from(got), pty);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

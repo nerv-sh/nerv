@@ -11,6 +11,13 @@
 # terminal scrolls mid-render.
 
 if (( ${+__NERV_LOADED} )); then return 0; fi
+# NERV_PTY=1 opts the user into the figterm-style PTY shim
+# (PLAN.md §5.8 / CLAUDE.md §4 invariant: ZLE widget and PTY shim
+# are mutually exclusive). When set, skip ZLE setup entirely so
+# the PTY wrapper owns input. M1; default v1.0 path stays ZLE.
+if [[ -n "${NERV_PTY-}" ]]; then
+  return 0
+fi
 typeset -g __NERV_LOADED=1
 typeset -g __NERV_BIN="${NERV_BIN:-nerv}"
 typeset -g __NERV_PREV_LBUFFER=""

@@ -52,11 +52,11 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
-      - name: build nerv + nervd
+      - name: build nerv + nervd + nerv-pty
         run: |
           cargo build --release \
             --target ${{ matrix.target }} \
-            -p nerv-cli -p nerv-daemon
+            -p nerv-cli -p nerv-daemon -p nerv-pty
 
       - name: stage tarball
         id: stage
@@ -73,8 +73,9 @@ jobs:
           NAME="nerv-${VERSION}-${{ matrix.target }}"
           STAGE="staging/${NAME}"
           mkdir -p "$STAGE"
-          cp target/${{ matrix.target }}/release/nerv  "$STAGE/"
-          cp target/${{ matrix.target }}/release/nervd "$STAGE/"
+          cp target/${{ matrix.target }}/release/nerv     "$STAGE/"
+          cp target/${{ matrix.target }}/release/nervd    "$STAGE/"
+          cp target/${{ matrix.target }}/release/nerv-pty "$STAGE/"
           for f in LICENSE NOTICE README.md; do
             [ -f "$f" ] && cp "$f" "$STAGE/"
           done
