@@ -15,6 +15,9 @@ class Nerv < Formula
   def install
     bin.install "nerv"
     bin.install "nervd"
+    # nerv-pty is the M1 opt-in figterm-style PTY shim. Idle
+    # unless the user sets NERV_PTY=1 before launching the shell.
+    bin.install "nerv-pty" if File.exist?("nerv-pty")
   end
 
   def caveats
