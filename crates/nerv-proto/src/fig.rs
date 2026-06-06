@@ -48,4 +48,52 @@ mod internal {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// NotificationType serializes to a stable string key. The
+        /// daemon's notification stream is consumed by external
+        /// listeners (figterm shim, future UI plugins) that match on
+        /// these exact strings; locking the mapping catches any
+        /// accidental rename at refactor time.
+        #[test]
+        fn notification_type_serialize_keys() {
+            let cases = [
+                (NotificationType::All, "\"all\""),
+                (
+                    NotificationType::NotifyOnEditbuffferChange,
+                    "\"editbuffer_change\"",
+                ),
+                (
+                    NotificationType::NotifyOnSettingsChange,
+                    "\"settings_change\"",
+                ),
+                (NotificationType::NotifyOnPrompt, "\"prompt\""),
+                (NotificationType::NotifyOnFocusChanged, "\"focus_change\""),
+                (NotificationType::NotifyOnEvent, "\"event\""),
+            ];
+            for (input, want) in cases {
+                let got = serde_json::to_string(&input).expect("serialize");
+                assert_eq!(got, want, "wrong key for {input:?}");
+            }
+        }
+
+        /// `Result<(), E>` → `FigResult` is the standard daemon
+        /// command response shape. Lock both arms.
+        #[test]
+        fn fig_result_from_ok_arm() {
+            let r: FigResult = Ok::<(), &str>(()).into();
+            assert_eq!(r.result, FigResultEnum::Ok as i32);
+            assert!(r.error.is_none());
+        }
+
+        #[test]
+        fn fig_result_from_err_arm() {
+            let r: FigResult = Err::<(), &str>("boom").into();
+            assert_eq!(r.result, FigResultEnum::Error as i32);
+            assert_eq!(r.error.as_deref(), Some("boom"));
+        }
+    }
 }

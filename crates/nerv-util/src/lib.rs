@@ -175,4 +175,100 @@ mod tests {
     fn test_current_exe_origin() {
         current_exe_origin().unwrap();
     }
+
+    /// Static Error variants — lock the Display strings the doctor
+    /// table prints.
+    #[test]
+    fn error_static_variants_display() {
+        assert_eq!(
+            Error::UnsupportedPlatform.to_string(),
+            "unsupported platform"
+        );
+        assert_eq!(
+            Error::UnsupportedArch.to_string(),
+            "unsupported architecture"
+        );
+        assert_eq!(Error::NoParentProcess.to_string(), "process has no parent");
+        assert_eq!(
+            Error::HwidNotFound.to_string(),
+            "could not find the os hwid"
+        );
+    }
+
+    /// Parameterised Error variants embed the payload — locks the
+    /// exact format string callers consume (`{0}` interpolation).
+    #[test]
+    fn error_parameterised_variants_format_payload() {
+        assert_eq!(
+            Error::UnknownShell("fish".into()).to_string(),
+            "the shell, `fish`, isn't supported yet"
+        );
+        assert_eq!(
+            Error::MissingEnv("HOME").to_string(),
+            "missing environment variable `HOME`"
+        );
+        assert_eq!(
+            Error::UnknownDisplayServer("wayland2".into()).to_string(),
+            "unknown display server `wayland2`"
+        );
+        assert_eq!(
+            Error::ShellVersion(Shell::Zsh).to_string(),
+            "Failed to parse shell zsh version"
+        );
+    }
+
+    /// `io::Error` lifts into `Error::IoError` via #[from].
+    #[test]
+    fn error_io_lifts_via_from() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let wrapped: Error = io.into();
+        assert!(matches!(wrapped, Error::IoError(_)));
+        assert_eq!(wrapped.to_string(), "io operation error");
+    }
+
+    /// `UnknownDesktopErrContext` formats all three xdg-related env
+    /// vars into one comma-separated line. Used by the doctor table
+    /// to spell out which env probe failed.
+    #[test]
+    fn unknown_desktop_err_context_display() {
+        let ctx = UnknownDesktopErrContext {
+            xdg_current_desktop: "GNOME".into(),
+            xdg_session_desktop: "ubuntu".into(),
+            gdm_session: "ubuntu-wayland".into(),
+        };
+        let s = ctx.to_string();
+        assert!(s.contains("XDG_CURRENT_DESKTOP: `GNOME`"));
+        assert!(s.contains("XDG_SESSION_DESKTOP: `ubuntu`"));
+        assert!(s.contains("GDMSESSION: `ubuntu-wayland`"));
+    }
+
+    /// `partitioned_compare` returns Equal when both sides empty
+    /// after splitting. Edge case — splitter with no occurrences
+    /// in either side gives single-element comparison.
+    #[test]
+    fn partitioned_compare_empty_split() {
+        assert_eq!(partitioned_compare("", "", '.'), Ordering::Equal);
+        assert_eq!(partitioned_compare("a", "a", '.'), Ordering::Equal);
+        assert_eq!(partitioned_compare("aa", "a", '.'), Ordering::Greater);
+    }
+
+    /// `partitioned_compare` returns shorter < longer when the
+    /// shared prefix segments are equal. Catches a regression where
+    /// the length tie-breaker was reversed.
+    #[test]
+    fn partitioned_compare_length_tiebreak() {
+        assert_eq!(partitioned_compare("1.2", "1.2.3", '.'), Ordering::Less);
+        assert_eq!(partitioned_compare("1.2.3", "1.2", '.'), Ordering::Greater);
+    }
+
+    /// `gen_hex_string` returns valid lowercase hex characters only —
+    /// catches a regression where uppercase / non-hex bytes leak in.
+    #[test]
+    fn gen_hex_string_only_lowercase_hex() {
+        let hex = gen_hex_string();
+        assert!(
+            hex.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')),
+            "non-hex char in {hex}"
+        );
+    }
 }

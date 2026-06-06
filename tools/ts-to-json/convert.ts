@@ -237,7 +237,7 @@ type NervSpec = {
 type NervGenerator =
   | { type: "template"; script: string[] }
   | { type: "script"; script: string[]; has_post_process: boolean }
-  | { type: "custom"; description_hint: string | null }
+  | { type: "custom"; description_hint: string | null; source?: string }
   | { type: "package_json_scripts" }
   | { type: "filepaths"; folders_only: boolean }
   | { type: "zoxide_query" }
@@ -366,6 +366,34 @@ const probeCargoKind = async (g: any): Promise<string | null | "any"> => {
   } catch {
     return null;
   }
+};
+
+/**
+ * Capture a Fig closure as a Tier C source string the Rust engine can
+ * feed to `nerv-engine::tier_c::execute_custom_source` under the
+ * `quickjs` feature. Wraps the closure in IIFE form so the eval
+ * resolves to the closure's return value with `tokens` bound from the
+ * sandbox global. `exec` is stubbed because the sandbox refuses host
+ * bindings — closures that call it will throw at runtime and the
+ * engine drops to "no candidates" silently.
+ *
+ * Returns null when:
+ *  - the value isn't a function (defensive — caller already checks)
+ *  - the closure can't be stringified (rare native / bound functions)
+ *  - the source is suspiciously large (> 32 KB — guard against the
+ *    rare spec that inlines a giant table; we'd rather fall through
+ *    to the Tier B / well-known recovery paths than ship huge JSON).
+ */
+const captureClosureSource = (fn: any): string | undefined => {
+  if (typeof fn !== "function") return undefined;
+  let body: string;
+  try {
+    body = fn.toString();
+  } catch {
+    return undefined;
+  }
+  if (body.length > 32 * 1024) return undefined;
+  return `(${body})(globalThis.__nerv_tokens, () => Promise.resolve(""))`;
 };
 
 const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
@@ -560,8 +588,11 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
         id_field: aws.id_field,
       };
     }
-    // Custom generator function — Tier C, deferred to M1 rquickjs.
-    return { type: "custom", description_hint: null };
+    // Custom generator function — Tier C. Capture source so the
+    // `quickjs` opt-in build can execute it in the sandbox. Builds
+    // without the feature parse and ignore the field.
+    const source = captureClosureSource(g);
+    return { type: "custom", description_hint: null, ...(source ? { source } : {}) };
   }
   if (typeof g !== "object" || g == null) return null;
 
@@ -579,7 +610,8 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
         id_field: aws.id_field,
       };
     }
-    return { type: "custom", description_hint: null };
+    const source = captureClosureSource(g.custom);
+    return { type: "custom", description_hint: null, ...(source ? { source } : {}) };
   }
 
   // `script:` form — can be string, string[], or function returning
@@ -818,15 +850,16 @@ type Ctx = {
 
 /// loadSpec inlining depth cap.
 /// depth=0: never inline; subdir specs ship as stub subcommands.
-/// depth=1 (current): top-level loadSpec strings resolved. e.g.
-///   `aws ec2 <verb>` works; `aws ec2 run-instances <flag>` still
-///   stops at the verb's options without going into nested loadSpec.
-///   Pairs with the spec_loader gzip path so the resulting 100MB+
-///   plain JSON shrinks to ~10MB on disk.
-/// depth=2+: very large output (aws hit 100 MB at depth 4 even
-///   with cycle detection). Defer until lazy-eviction lands so
-///   memory doesn't grow with the cache.
-const MAX_DEPTH = 1;
+/// depth=1: top-level loadSpec strings resolved. `aws ec2 <verb>`,
+///   `gcloud compute <verb>` work; nested loadSpec inside the verb's
+///   own subspec is not followed.
+/// depth=2 (current): pulls the next level for the rare specs that
+///   chain (dotnet, pnpx, gcloud subgroups). Measured cost on the
+///   715-spec corpus: ~5% disk growth vs depth=1, well under the
+///   gzip path's 10× compression. The previous "depth=4 → 100 MB"
+///   warning was for a different (unfiltered + uncompressed) build;
+///   today's pipeline absorbs depth=2 comfortably.
+const MAX_DEPTH = 2;
 
 // Specs whose top-level uses `generateSpec: async (...)` to pick
 // between alternate spec trees at runtime. We can't run the closure

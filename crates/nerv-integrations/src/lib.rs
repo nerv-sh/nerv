@@ -5,10 +5,9 @@ pub mod file;
 #[cfg(target_os = "linux")]
 pub mod gnome_extension;
 pub mod shell;
-// PLAN.md v0.6 §0.2 strips IDE/desktop integration paths:
-// input_method (objc/macos-utils), intellij (macos-utils),
-// vscode (macos-utils), ssh (fig_remote_ipc → stripped crate).
-// Source files preserved on disk for reference but not compiled.
+// PLAN.md v0.6 §0.2 strips IDE/desktop integration paths
+// (input_method / intellij / vscode / ssh). Sources removed —
+// see git history for the original Fig implementations.
 
 use async_trait::async_trait;
 pub use backup::backup_file;

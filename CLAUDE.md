@@ -41,7 +41,7 @@
 - ✅ fixture pack 9종 hand-rolled (git/echo/docker/kubectl/npm/cargo/gh/brew/make) + 43 integration test
 - ✅ TS→JSON 변환 파이프라인 `tools/ts-to-json/` (bun 기반, 715 spec 변환, 0 failure)
   - Tier A 440 / B 6 / C 246 자동 분류
-  - **loadSpec depth=1 활성**: `aws ec2 <verb>`, `aws s3 <verb>`, `gcloud compute instances <verb>` 등 nested 자동완성 동작
+  - **loadSpec depth=2 활성**: `aws ec2 <verb>`, `aws s3 <verb>`, `gcloud compute instances <verb>` 등 nested 자동완성 동작. depth=1 → 2 bump 측정: plain 180MB 무변동 (vendor source 거의 flat — aws/gcloud 서브디렉터리 0 loadSpec, 깊이 체인은 dotnet/pnpx 일부만), gzip cache 10MB → 11MB (+10%). 이전 "depth=4 → 100MB" 경고는 미회복 + 비압축 빌드 기준.
   - cycle-safe (visited Set + MAX_DEPTH gate)
 - ✅ **SpecRegistry lazy load + 이벤트/mtime hybrid hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. macOS FSEvents (`notify` crate) 가 spec dir 변경 push → pending invalidations 세트에 stem 등록 → lookup() 가 drain + cache evict. mtime check 는 belt-and-suspenders (watcher 실패 / 이벤트 누락 시 fallback). spec 재설치 시 daemon 재시작 불필요 + 이벤트 latency 거의 0.
 - ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
@@ -85,6 +85,11 @@
   - **bundle 식별자 예약**: APP_BUNDLE_ID `com.amazon.codewhisperer` → `sh.nerv.nerv`, APP_BUNDLE_NAME `Amazon Q.app` → `Nerv.app`. launchd_plist 테스트 + insta snapshot 동기 갱신. Apple Developer 서명 단계 (M0-8) 가 단순 codesign 으로 떨어짐.
   - **settings key 리네이밍 + AI 제거**: `qterm.csi-u.enabled` → `pty.csi-u.enabled`, `qterm.enabled` → `pty.enabled`. CLAUDE.md §4 invariant (no AI) 에 따라 AI translate intercept (`#foo<Enter>` → `q translate 'foo'`) ~23 LOC + `ai.terminal-hash-sub` 설정 + `ai_enabled` 플래그 제거. on-disk migration 없음 — nerv-pty 는 M1 opt-in 으로 live user 없음.
 - ✅ **CI workflow_dispatch gate (2026-06-01 reset 까지)**: 1차 무료 Actions budget 90% (1,806 / 2,000 min) 도달. `ci.yml` 만 `on: workflow_dispatch:` 로 축소 (push/PR 트리거 정지). 다른 workflow 는 그대로 (release/homebrew-bump=tag/release event, upstream-monitor=cron 1·15일). restore 는 inline comment 한 줄 reflow.
+- ✅ **Tier C executor 배선** (`feature = "quickjs"` opt-in): `nerv-quickjs` 스캐폴드 (rquickjs ~1MB sandbox, `eval_isolated` + `eval_with_budget` 200ms 기본) → `nerv-engine::tier_c::execute_custom_source` 헬퍼 → `complete.rs` 의 `Generator::Custom { source: Some(_), .. }` arm wire-up. ts-to-json 의 `captureClosureSource` 가 closure `toString()` 을 IIFE 형태로 감싸 (`(<fn>)(globalThis.__nerv_tokens, () => Promise.resolve(""))`) 32KB cap 적용해 emit. 715 spec 변환 → **473 closure source 캡처** (74 파일 분산, 100% capture rate). ⚠️ **capture ≠ execution**: 2026-06-06 e2e 검증 결과 473개 전부 sandbox 에서 0 candidate (None) — async 未await 76% + `__awaiter` 미정의 21% + shell stub. **실행률 0%**, quickjs 경로 현재 비작동. 상세 = `docs/findings/tier-c-quickjs-e2e.md`. 기본 빌드는 `nerv-quickjs` dep 0 (`cargo tree -p nerv-cli` / `nerv-daemon` 검증) — opt-in 만 binary 변동. Custom arm 은 well-known 회복 (aws_list 89 / kubectl_resources 86 / package_json_scripts 28 / ssh_hosts 9 / 외) 통과 후 마지막 fallback 으로만 동작. Soft-fail: tier_c None → next generator → smart filepaths fallback. 5 dispatch test + 1 default-build 호환 test.
+- ✅ **figterm PTY shim Phase 1+2 배선**: `NERV_PTY=1` 환경변수 opt-in. `cmd_init(--shell-script)` 가 env 감지 → ZLE 위젯 (`_nerv.zsh`) 대신 PTY 부트스트랩 (`_nerv-pty.zsh`) emit + `NERV_PTY_BIN={absolute path}` 자동 export (sibling lookup). `_nerv.zsh` 자체도 top-level self-skip (벨트+서스펜더). 부트스트랩 = re-entry guard (`NERV_PTY_SESSION_ID`) + TTY check (CI/pipe 무시) + PATH fallback → `exec nerv-pty -- "$SHELL"`. nerv-pty 바이너리 (6.6MB release) release tarball + Homebrew Formula 동봉 (idle until opt-in). Phase 3 (PTY spawn + keystroke intercept + 인라인 렌더) = M1 §6 0-10주차 미진행 — 현재 wrapper 는 zsh subprocess 만 실행, 자동완성 비활성. 3 dispatch tests (`init_snippet_for_zsh_default_is_zle_widget` / `init_snippet_for_zsh_pty_mode_is_pty_bootstrap` / `resolve_pty_bin_for_init_finds_sibling`).
+- ✅ **테스트 커버리지 sweep**: 583 → 637 (+54 across 11 crates). log 1→4 / diag 1→7 / cli 4→19 (parse_zsh_version edges + count_tree + upgrade_tier + uninstall path + init snippet pick) / ipc 10→16 (BufferedReader / error variants / is_disconnect arms) / proto 10→13 (NotificationType wire-format + FigResult arms) / daemon 3→8 (invalid JSON / DoctorAutorun / unknown bin / pipeline / RecordAccept frecency) / integrations 13→22 (backup_file / Error display) / util 37→44 (Error display + UnknownDesktopErrContext + partitioned_compare edges + gen_hex_string charset) / pty 25→32 (ReadBuffer pure).
+- ✅ **tech-debt sweep**: orphan `crates/nerv-util/src/error.rs` 삭제 (Error enum 인라인 중복, 0 consumer); `parse_zsh_version_compat` 중복 fn 삭제 (byte-identical); 8 dead `directories.rs` 함수 삭제 (chat/midway/AppImage = CLAUDE.md §4 비목표 + Linux M2+ — git history 에서 복구 가능); RwLock poison silent swallow 정책 doc-comment (graceful degradation = 의도, tracing dep 미추가). 총 -189 LOC.
+- ✅ **`spawn_with_timeout` 헬퍼 추출**: `execute_template_generator` + `cached_cargo_metadata` 의 18-line spawn-drain-timeout 블록 dedup. `CARGO_METADATA_CACHE` 에 GENERATOR_CACHE 와 동일 LRU policy (max 64) 추가 (이전 unbounded leak — cd 마다 entry 누적).
 
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
@@ -93,10 +98,10 @@
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
 - bash / fish 지원 (큼)
 - Linux / Windows 지원 (큼)
-- figterm PTY shim opt-in (`NERV_PTY=1`) — main.rs 980줄 + figterm-ipc + remote-ipc 정합 필요
-- E5 manifest, spec depth=2+ (압축으로 무난하지만 memory cost 평가 필요)
+- figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2 완료** (cmd_init 분기 / `_nerv.zsh` self-skip / `_nerv-pty.zsh` 부트스트랩 / nerv-pty 바이너리 release tarball + Homebrew 동봉 / 3 dispatch test). Phase 3 (PTY 스폰 + keystroke intercept + 인라인 렌더) = M1 §6 0-10주차 미진행. 현재는 NERV_PTY=1 설정 시 wrapper 가 zsh 를 PTY 안에서 exec 하지만 자동완성은 비활성.
+- E5 manifest (depth=2 활성화 완료 — 위 §3)
 - 브랜드 strip 잔여 (defer): RUNTIME_DIR_NAME / DATA_DIR_NAME / Linux package name / desktop entry 일부는 후속 PR 에서 정리
-- aws 624 closure-form generators (`rquickjs` opt-in 필요)
+- aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. 다음 단계: production binary 가 `quickjs` 켜고 출시할지 결정 (PLAN §0.2 opt-in 정책 검토 필요).
 
 ## 4. 절대 깨면 안 되는 불변식
 

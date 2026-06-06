@@ -54,3 +54,105 @@ pub fn daemon_log_path() -> Option<PathBuf> {
 pub fn specs_dir() -> Option<PathBuf> {
     cache_dir().map(|c| c.join(SPECS_SUBDIR))
 }
+
+#[cfg(test)]
+mod tests {
+    //! The `PathBuf` shapes returned here ARE the contract
+    //! documented in `docs/uninstall-spec.md` §2. Each test below
+    //! locks one path's suffix; bumping any of them is the
+    //! authoritative trigger for a coordinated doc + uninstaller
+    //! change.
+
+    use super::*;
+    use std::path::Path;
+
+    /// Helper: HOME → tempdir for the test, restored on drop.
+    /// std::env::set_var races with parallel tests; use a unique
+    /// tempdir so the join result is unambiguous even if a sibling
+    /// test mutates HOME concurrently.
+    fn with_temp_home<R>(f: impl FnOnce(&Path) -> R) -> R {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: env mutation. The functions under test all read
+        // HOME through `std::env::var_os` at call time, so as long
+        // as no concurrent set_var fires between our set and our
+        // call we get our path back.
+        let prev = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        let out = f(tmp.path());
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        out
+    }
+
+    #[test]
+    fn cache_dir_macos_layout() {
+        with_temp_home(|home| {
+            let got = cache_dir().expect("cache_dir");
+            assert_eq!(got, home.join("Library/Caches/nerv"));
+        });
+    }
+
+    #[test]
+    fn log_dir_macos_layout() {
+        with_temp_home(|home| {
+            let got = log_dir().expect("log_dir");
+            assert_eq!(got, home.join("Library/Logs/nerv"));
+        });
+    }
+
+    #[test]
+    fn config_dir_dotfile_layout() {
+        with_temp_home(|home| {
+            let got = config_dir().expect("config_dir");
+            assert_eq!(got, home.join(".config/nerv"));
+        });
+    }
+
+    #[test]
+    fn socket_pid_log_specs_under_cache() {
+        with_temp_home(|home| {
+            let cache = home.join("Library/Caches/nerv");
+            assert_eq!(socket_path().unwrap(), cache.join("nervd.sock"));
+            assert_eq!(pid_path().unwrap(), cache.join("nervd.pid"));
+            assert_eq!(specs_dir().unwrap(), cache.join("specs"));
+            assert_eq!(
+                daemon_log_path().unwrap(),
+                home.join("Library/Logs/nerv/nervd.log"),
+            );
+        });
+    }
+
+    /// HOME unset → every getter returns None instead of panicking.
+    /// uninstall depends on this branch for the "HOME unset" warning.
+    #[test]
+    fn home_unset_returns_none_everywhere() {
+        let prev = std::env::var_os("HOME");
+        unsafe { std::env::remove_var("HOME") };
+        let all_none = cache_dir().is_none()
+            && log_dir().is_none()
+            && config_dir().is_none()
+            && socket_path().is_none()
+            && pid_path().is_none()
+            && daemon_log_path().is_none()
+            && specs_dir().is_none();
+        if let Some(p) = prev {
+            unsafe { std::env::set_var("HOME", p) };
+        }
+        assert!(all_none);
+    }
+
+    /// Subdir constants are the documented strings — locking them
+    /// here makes a casual rename a doc-coordinated change.
+    #[test]
+    fn subdir_constants_locked() {
+        assert_eq!(CACHE_SUBDIR, "Library/Caches/nerv");
+        assert_eq!(LOG_SUBDIR, "Library/Logs/nerv");
+        assert_eq!(CONFIG_SUBDIR, ".config/nerv");
+        assert_eq!(SOCKET_NAME, "nervd.sock");
+        assert_eq!(PID_NAME, "nervd.pid");
+        assert_eq!(DAEMON_LOG_NAME, "nervd.log");
+        assert_eq!(SPECS_SUBDIR, "specs");
+    }
+}
