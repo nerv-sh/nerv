@@ -95,7 +95,7 @@
   - **0-row 클램프**: nerv-pty 가 0-row/0-col winsize 를 grid 에 넘겨 panic (`nerv-term grid/storage.rs` visible-lines assertion) 하던 것 → open-pty + resize 경로 모두 rows/cols `.max(1)` 클램프. 0×0 pty no-panic 검증.
   - **ZLE 팝업 컬럼 정렬** (`_nerv.zsh`): 박스를 `ESC[G`(컬럼1) 고정으로 그리던 것 → 프롬프트 폭+입력 길이로 커서 컬럼 계산해 `ESC[<col>G` 정렬 + 화면 우측 클램프. 긴 프롬프트서 박스가 좌측에 동떨어지던 문제 해결. DSR 미사용 (ZLE 위젯서 raw read 가 line editor 와 stdin 경쟁).
   - **e2e**: `scripts/e2e-pty-ghost.py` (PTY: `git che`→ghost "ckout" → Right-arrow accept→frecency.tsv 기록 → `git c`→popup `[1/2]` reverse → Tab→`[2/2]`) + `scripts/e2e-zle-popup.py` (ZLE: 긴 프롬프트서 팝업이 컬럼 ~71 정렬 확인). 반복 PASS. +17 unit test (ghost 8 / popup 9).
-  - **남은 follow-up**: M0 박스 chrome(`╭╮╰╯`) parity 는 PTY popup 후속 (현재 plain 행 리스트; ZLE 는 이미 박스).
+  - **3b.3 박스 chrome**: PTY popup 도 M0 ZLE 와 동일한 rounded box (╭─╮ top / `│ … │` rows, 선택행 reverse / ├─┤ divider / `[k/total]` footer / ╰─╯ bottom). `unicode-width` 로 컬럼 폭 계산 (CJK/wide glyph 우측 border 정렬), 폭은 터미널 cols 로 cap. rows()=visible+4.
 - ✅ **테스트 커버리지 sweep**: 583 → 637 (+54 across 11 crates). log 1→4 / diag 1→7 / cli 4→19 (parse_zsh_version edges + count_tree + upgrade_tier + uninstall path + init snippet pick) / ipc 10→16 (BufferedReader / error variants / is_disconnect arms) / proto 10→13 (NotificationType wire-format + FigResult arms) / daemon 3→8 (invalid JSON / DoctorAutorun / unknown bin / pipeline / RecordAccept frecency) / integrations 13→22 (backup_file / Error display) / util 37→44 (Error display + UnknownDesktopErrContext + partitioned_compare edges + gen_hex_string charset) / pty 25→32 (ReadBuffer pure).
 - ✅ **tech-debt sweep**: orphan `crates/nerv-util/src/error.rs` 삭제 (Error enum 인라인 중복, 0 consumer); `parse_zsh_version_compat` 중복 fn 삭제 (byte-identical); 8 dead `directories.rs` 함수 삭제 (chat/midway/AppImage = CLAUDE.md §4 비목표 + Linux M2+ — git history 에서 복구 가능); RwLock poison silent swallow 정책 doc-comment (graceful degradation = 의도, tracing dep 미추가). 총 -189 LOC.
 - ✅ **`spawn_with_timeout` 헬퍼 추출**: `execute_template_generator` + `cached_cargo_metadata` 의 18-line spawn-drain-timeout 블록 dedup. `CARGO_METADATA_CACHE` 에 GENERATOR_CACHE 와 동일 LRU policy (max 64) 추가 (이전 unbounded leak — cd 마다 entry 누적).
@@ -107,7 +107,7 @@
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
 - bash / fish 지원 (큼)
 - Linux / Windows 지원 (큼)
-- figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2+3a+3b 완료** (위 §3 참조). 인라인 ghost + popup + 네비 + frecency 작동, nervd UDS 재배선, 0-row 클램프, ZLE 팝업 컬럼 정렬, e2e PASS. 후속: PTY popup 박스 chrome parity (현재 plain).
+- figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2+3a+3b 완료** (위 §3 참조). 인라인 ghost + popup(박스 chrome) + 네비 + frecency 작동, nervd UDS 재배선, 0-row 클램프, ZLE 팝업 컬럼 정렬, e2e PASS. Phase 3 follow-up 전부 완료.
 - E5 manifest (depth=2 활성화 완료 — 위 §3)
 - 브랜드 strip 잔여 (defer): RUNTIME_DIR_NAME / DATA_DIR_NAME / Linux package name / desktop entry 일부는 후속 PR 에서 정리
 - aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. 다음 단계: production binary 가 `quickjs` 켜고 출시할지 결정 (PLAN §0.2 opt-in 정책 검토 필요).
