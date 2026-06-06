@@ -52,6 +52,7 @@ shell-color.workspace = true
 shell-words = "1.1"
 shellexpand.workspace = true
 shlex.workspace = true
+unicode-width.workspace = true
 sysinfo.workspace = true
 time.workspace = true
 tokio.workspace = true

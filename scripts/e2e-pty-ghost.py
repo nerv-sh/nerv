@@ -140,8 +140,9 @@ def main():
         os.write(master, b"git c")
         out = drain(master, 2.0)
         REVERSE = b"\x1b[7m"
-        popup_ok = REVERSE in out and b"[1/2]" in out
-        log(f"popup: REVERSE={REVERSE in out} FOOTER[1/2]={b'[1/2]' in out} -> {popup_ok}")
+        BOX = "╭".encode()                      # rounded-box top-left corner
+        popup_ok = REVERSE in out and b"[1/2]" in out and BOX in out
+        log(f"popup: REVERSE={REVERSE in out} FOOTER[1/2]={b'[1/2]' in out} BOX={BOX in out} -> {popup_ok}")
         if not popup_ok:
             log(f"  tail repr: {out[-400:]!r}")
 
