@@ -61,6 +61,25 @@ __nerv_cycle_prev() {
   fi
 }
 
+# Best-effort on-screen column (1-based) of the input cursor, so the
+# popup's top-left sits under it rather than at column 1 — otherwise a
+# long prompt strands the box on the far left while the cursor is on the
+# right. We compute it from the expanded prompt width plus the typed
+# text, instead of a DSR (`ESC[6n`) query: inside a ZLE widget a raw
+# `read` competes with the line editor for stdin and the terminal's
+# reply leaks into the buffer. Limitation: multi-line / dynamically
+# repainted prompts (some powerlevel themes) may be approximate.
+__nerv_cursor_col() {
+  emulate -L zsh
+  setopt local_options extended_glob
+  # Expand the prompt the way zsh would render it, strip CSI colour
+  # sequences, and keep only the last screen line.
+  local p=${(%)PS1}
+  p=${p//$'\e'\[[0-9;?]#[a-zA-Z]/}
+  p=${p##*$'\n'}
+  print -r -- $(( ${#p} + ${#LBUFFER} + 1 ))
+}
+
 __nerv_show_popup() {
   local -a items=("$@")
   local total=${#items}
@@ -236,14 +255,24 @@ __nerv_show_popup() {
 
   # Step 1: ZLE creates space (plain blanks) and positions cursor.
   zle -R "" "${plain[@]}"
+
+  # Anchor the popup's left edge under the input cursor. Query the
+  # cursor column AFTER `zle -R` so it reflects the input line. Clamp
+  # so a box near the right edge shifts left to stay on screen.
+  local start_col=$(__nerv_cursor_col)
+  (( start_col < 1 )) && start_col=1
+  (( start_col + W - 1 > term_cols )) && start_col=$(( term_cols - W + 1 ))
+  (( start_col < 1 )) && start_col=1
+
   # Step 2-4: save cursor, move down + overwrite with colored
-  # content per row, restore cursor. Works as long as the popup
-  # stays within the visible screen — MAX_VIS above clamps to
-  # $LINES so we don't trigger a mid-render scroll that would
-  # invalidate the saved cursor pos.
+  # content per row at the anchored column, restore cursor. Works as
+  # long as the popup stays within the visible screen — MAX_VIS above
+  # clamps to $LINES so we don't trigger a mid-render scroll that
+  # would invalidate the saved cursor pos.
+  local move=$'\e[B\e['${start_col}'G'
   local buf=$'\e7'
   for (( i=1; i<=${#colored}; i++ )); do
-    buf+=$'\e[B\e[G'"${colored[$i]}"$'\e[K'
+    buf+="${move}${colored[$i]}"$'\e[K'
   done
   buf+=$'\e8'
   printf '%s' "$buf"
