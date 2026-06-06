@@ -119,11 +119,24 @@ def main():
         if not ghost_ok:
             log(f"  tail repr: {out[-300:]!r}")
 
-        # 5. Popup: clear the line, type a prefix with ≥2 completions
-        #    (git c -> checkout, commit) and expect a reverse-video list
-        #    with a [1/2] footer.
-        os.write(master, b"\x15")              # Ctrl-U: kill line
+        # 4b. Accept the ghost with Right-arrow; the daemon should record
+        #     the accept for frecency (mirrors the ZLE `nerv _record`).
+        os.write(master, b"\x1b[C")            # Right-arrow → ESC [ C
+        drain(master, 1.0)
+        frec = os.path.join(home, "Library", "Caches", "nerv", "frecency.tsv")
+        frec_ok = False
+        for _ in range(10):
+            if os.path.exists(frec) and "checkout" in open(frec).read():
+                frec_ok = True
+                break
+            time.sleep(0.2)
+        log(f"frecency: recorded 'checkout' -> {frec_ok}")
+        os.write(master, b"\x15")              # Ctrl-U: clear the line
         drain(master, 0.5)
+
+        # 5. Popup: type a prefix with ≥2 completions (git c -> checkout,
+        #    commit) and expect a reverse-video list with a [1/2] footer.
+        #    (Line already cleared after the frecency step.)
         os.write(master, b"git c")
         out = drain(master, 2.0)
         REVERSE = b"\x1b[7m"
@@ -140,8 +153,8 @@ def main():
         if not nav_ok:
             log(f"  tail repr: {out[-400:]!r}")
 
-        if ghost_ok and popup_ok and nav_ok:
-            log("PASS — ghost + popup + navigation rendered end-to-end")
+        if ghost_ok and frec_ok and popup_ok and nav_ok:
+            log("PASS — ghost + accept/frecency + popup + navigation e2e")
             rc = 0
         else:
             log("FAIL — see per-check output above")
