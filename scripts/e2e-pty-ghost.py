@@ -111,23 +111,40 @@ def main():
         startup = drain(master, 2.0)
         log(f"startup bytes: {len(startup)}")
 
-        # 4. Type the partial command (no newline) and wait for the ghost.
+        # 4. Ghost: type a partial command and wait for the dim remainder.
         os.write(master, TYPED.encode())
         out = drain(master, 2.0)
+        ghost_ok = FAINT in out and GHOST in out
+        log(f"ghost: SAVE={SAVE in out} FAINT={FAINT in out} GHOST={GHOST in out} -> {ghost_ok}")
+        if not ghost_ok:
+            log(f"  tail repr: {out[-300:]!r}")
 
-        # 5. Assert the ghost render sequence is present.
-        has_faint = FAINT in out
-        has_ghost = GHOST in out
-        has_save = SAVE in out
-        log(f"saw SAVE={has_save} FAINT={has_faint} GHOST={has_ghost!r}={has_ghost}")
-        if has_faint and has_ghost:
-            log("PASS — inline ghost text rendered end-to-end")
+        # 5. Popup: clear the line, type a prefix with ≥2 completions
+        #    (git c -> checkout, commit) and expect a reverse-video list
+        #    with a [1/2] footer.
+        os.write(master, b"\x15")              # Ctrl-U: kill line
+        drain(master, 0.5)
+        os.write(master, b"git c")
+        out = drain(master, 2.0)
+        REVERSE = b"\x1b[7m"
+        popup_ok = REVERSE in out and b"[1/2]" in out
+        log(f"popup: REVERSE={REVERSE in out} FOOTER[1/2]={b'[1/2]' in out} -> {popup_ok}")
+        if not popup_ok:
+            log(f"  tail repr: {out[-400:]!r}")
+
+        # 6. Navigation: Tab advances the selection; footer becomes [2/2].
+        os.write(master, b"\t")
+        out = drain(master, 1.5)
+        nav_ok = b"[2/2]" in out
+        log(f"nav: FOOTER[2/2]={nav_ok} -> {nav_ok}")
+        if not nav_ok:
+            log(f"  tail repr: {out[-400:]!r}")
+
+        if ghost_ok and popup_ok and nav_ok:
+            log("PASS — ghost + popup + navigation rendered end-to-end")
             rc = 0
         else:
-            log("FAIL — ghost not found in pty output")
-            # Dump a trimmed view to aid debugging.
-            tail = out[-400:]
-            log(f"tail repr: {tail!r}")
+            log("FAIL — see per-check output above")
 
         # 6. Tear down the shell.
         try:
