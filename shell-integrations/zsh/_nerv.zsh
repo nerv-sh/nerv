@@ -77,10 +77,11 @@ __nerv_cursor_col() {
   local p=${(%)PS1}
   p=${p//$'\e'\[[0-9;?]#[a-zA-Z]/}
   p=${p##*$'\n'}
-  # Anchor the box's left border one cell left of the cursor (no +1 for
-  # the cursor's own cell) so it lines up under the last typed glyph
-  # rather than sitting a column to its right.
-  local col=$(( ${#p} + ${#LBUFFER} ))
+  # Anchor the box's left border under the typed text. We subtract from
+  # the cursor cell so the box edge sits beneath the input rather than a
+  # column or two to its right (the leading " " inside the box accounts
+  # for the rest of the visual offset).
+  local col=$(( ${#p} + ${#LBUFFER} - 1 ))
   (( col < 1 )) && col=1
   print -r -- $col
 }
