@@ -77,7 +77,12 @@ __nerv_cursor_col() {
   local p=${(%)PS1}
   p=${p//$'\e'\[[0-9;?]#[a-zA-Z]/}
   p=${p##*$'\n'}
-  print -r -- $(( ${#p} + ${#LBUFFER} + 1 ))
+  # Anchor the box's left border one cell left of the cursor (no +1 for
+  # the cursor's own cell) so it lines up under the last typed glyph
+  # rather than sitting a column to its right.
+  local col=$(( ${#p} + ${#LBUFFER} ))
+  (( col < 1 )) && col=1
+  print -r -- $col
 }
 
 __nerv_show_popup() {
