@@ -1,7 +1,9 @@
 #[cfg(target_os = "linux")]
 mod cleanup;
 pub mod cli;
+mod engine_client;
 mod event_handler;
+mod ghost;
 pub mod history;
 pub mod input;
 pub mod interceptor;
@@ -33,7 +35,7 @@ use nerv_settings::state;
 use nerv_term::Term;
 use nerv_term::ansi::Processor;
 use nerv_term::event::EventListener;
-use nerv_term::term::{ShellState, SizeInfo};
+use nerv_term::term::{ShellState, SizeInfo, TextBuffer};
 use nerv_util::env_var::{NERV_LOG_LEVEL, NERV_PTY_SESSION_ID, NERV_SHELL, NERV_TERM};
 use nerv_util::process_info::{Pid, PidExt};
 use nerv_util::{PRODUCT_NAME, PTY_BINARY_NAME, Terminal as FigTerminal, directories};
@@ -324,6 +326,63 @@ where
     }
 }
 
+/// Phase 3a inline preview. Ask `nervd` for the top completion at the
+/// current cursor and draw its trailing remainder as dim ghost text after
+/// the cursor. Returns the remainder now on screen (so Right-arrow can
+/// accept it) or `None` when nothing is shown.
+///
+/// Only previews when the cursor is at the end of the line — a ghost in
+/// the middle of the buffer would overprint real text. On every other
+/// outcome it erases any stale ghost so the screen never keeps a preview
+/// that no longer matches the buffer.
+async fn render_ghost<T>(term: &Term<T>, stdout: &mut io::Stdout) -> Option<String>
+where
+    T: EventListener,
+{
+    if !*AUTOCOMPLETE_ENABLED {
+        return None;
+    }
+
+    let TextBuffer { buffer, cursor_idx } = match term.get_current_buffer() {
+        Some(b) => b,
+        None => return None,
+    };
+    // `cursor_idx` is a byte offset (TextBuffer sets it to `buffer.len()`
+    // at the cursor cell). Preview only when it sits at end-of-line.
+    let cursor = cursor_idx?;
+    if cursor != buffer.len() {
+        clear_ghost(stdout).await;
+        return None;
+    }
+
+    let cwd = term
+        .shell_state()
+        .local_context
+        .current_working_directory
+        .as_ref()
+        .map(|p| p.display().to_string());
+
+    let suggestions = engine_client::complete(&buffer, cursor, cwd).await;
+    let remainder = suggestions
+        .first()
+        .and_then(|s| ghost::compute_ghost(&buffer, &s.insertion));
+
+    match &remainder {
+        Some(rem) => {
+            let _ = stdout.write_all(ghost::render_seq(rem).as_bytes()).await;
+            let _ = stdout.flush().await;
+        }
+        None => clear_ghost(stdout).await,
+    }
+    remainder
+}
+
+/// Erase a previously drawn ghost (best-effort).
+async fn clear_ghost(stdout: &mut io::Stdout) {
+    let _ = stdout.write_all(ghost::clear_seq().as_bytes()).await;
+    let _ = stdout.flush().await;
+}
+
 fn get_parent_shell() -> Result<String> {
     match env::var(NERV_SHELL).ok().filter(|s| !s.is_empty()) {
         Some(v) => Ok(v),
@@ -565,6 +624,10 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
 
         let mut csi_u_set = false;
 
+        // Phase 3a: the ghost remainder currently drawn after the cursor,
+        // or None. Right-arrow at end-of-line accepts it.
+        let mut active_ghost: Option<String> = None;
+
         let result: Result<()> = 'select_loop: loop {
             if first_time && term.shell_state().has_seen_prompt {
                 trace!("Has seen prompt and first time");
@@ -675,6 +738,19 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                         let preexec = term.shell_state().preexec;
 
                                         debug!(?event, ?raw, %preexec,  "Got key event");
+
+                                        // Phase 3a: Right-arrow at end-of-line accepts the
+                                        // ghost. Inject its bytes as if typed; the shell echo
+                                        // redraws the line and the next render clears the ghost.
+                                        if !preexec
+                                            && event.key == KeyCode::RightArrow
+                                            && event.modifiers == Modifiers::NONE
+                                        {
+                                            if let Some(rem) = active_ghost.take() {
+                                                write_buffer.extend(rem.as_bytes());
+                                                continue;
+                                            }
+                                        }
 
                                         // if we are in CSI u mode we try to encode first, otherwise we try to send the raw bytes first
                                         let raw = if csi_u_set {
@@ -805,6 +881,8 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                 if let Err(err) = send_edit_buffer(&term, &remote_sender, cursor_coordinates).await {
                                     warn!("Failed to send edit buffer: {err}");
                                 }
+                                // Phase 3a: refresh the inline ghost from nervd.
+                                active_ghost = render_ghost(&term, &mut stdout).await;
                             }
 
                             Ok(())
