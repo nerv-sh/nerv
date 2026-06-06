@@ -155,12 +155,21 @@ impl SpecRegistry {
     /// Resolve a spec by binary name, loading from disk on first hit
     /// or when the file's mtime has advanced past the cached value.
     /// Returns `None` if the spec doesn't exist or failed to parse.
+    ///
+    /// **Lock-poison policy**: every `cache.read()` / `cache.write()`
+    /// in this module discards `PoisonError` via `.ok()` /
+    /// `if let Ok(...)`. The fallback path is graceful degradation —
+    /// on a poisoned cache, lookup bypasses the cache and re-reads
+    /// from disk on every call (slower, but correct). A poison can
+    /// only fire if a worker panics while holding the lock; that
+    /// panic itself surfaces via the daemon's stderr already.
     pub fn lookup(&self, name: &str) -> Option<Arc<Spec>> {
         // Drain any FS-watcher invalidations queued since the last
         // lookup. Each drained stem evicts its cache entry so the
         // next read goes back to disk.
         self.drain_invalidations();
-        // Fast path: cache hit + mtime unchanged.
+        // Fast path: cache hit + mtime unchanged. Poisoned read →
+        // None → falls through to load_from_disk (no incorrectness).
         let cached = self.cache.read().ok().and_then(|c| c.get(name).cloned());
         if let Some(entry) = cached {
             let disk_mtime = self.disk_mtime(name);
@@ -1136,6 +1145,34 @@ fn emit_candidates_for_arg(
                         }
                     }
                 }
+                #[cfg(feature = "quickjs")]
+                crate::spec_parser::Generator::Custom {
+                    source: Some(source),
+                    ..
+                } => {
+                    // Tier C: spin up a fresh QuickJS sandbox per call,
+                    // run the captured closure with the live token list,
+                    // and surface returned strings. Soft-fail on any
+                    // error (parse / throw / timeout / non-array) —
+                    // the dispatcher just falls through to the next
+                    // generator or the smart fallback.
+                    let token_strs: Vec<String> = tokens.iter().map(|a| a.text.clone()).collect();
+                    if let Some(cands) = crate::tier_c::execute_custom_source(source, &token_strs) {
+                        out.extend(
+                            cands
+                                .into_iter()
+                                .filter(|s| matches_name(s, prefix, mode))
+                                .map(|s| Suggestion {
+                                    insertion: s.clone(),
+                                    display: s,
+                                    description: None,
+                                    kind: SuggestionKind::Argument,
+                                    priority: None,
+                                    icon: None,
+                                }),
+                        );
+                    }
+                }
                 crate::spec_parser::Generator::ZoxideQuery => {
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
@@ -1302,51 +1339,65 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
 /// cache means every keystroke after the first hits cache anyway.
 const GENERATOR_TIMEOUT_MS: u64 = 800;
 
-fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+/// Drain a spawned child process's stdout into a single Vec under
+/// [`GENERATOR_TIMEOUT_MS`]. On timeout, kill the child and return
+/// `None`. Otherwise return the captured bytes (which may be empty
+/// when the child wrote nothing).
+///
+/// A dedicated thread does the read so the pipe buffer (~64 KB on
+/// macOS) never fills and blocks the child. An earlier `try_wait()` +
+/// 10ms tick loop without reading the pipe deadlocked on commands
+/// that wrote more than ~64 KB before exiting (e.g. `ps axo
+/// pid,comm` on a busy machine: 1600+ lines / ~50 KB) — even when
+/// the command itself finished in <100 ms.
+///
+/// `buf_cap` sets the initial Vec capacity; pick the rough expected
+/// payload size to avoid reallocs (8 KB for line-shaped Fig
+/// generators, 64 KB for blob payloads like `cargo metadata`).
+fn spawn_with_timeout(mut child: std::process::Child, buf_cap: usize) -> Option<Vec<u8>> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    std::thread::spawn(move || {
+        let mut buf = Vec::with_capacity(buf_cap);
+        let _ = stdout.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
+        Ok(buf) => {
+            let _ = child.wait();
+            Some(buf)
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            None
+        }
+    }
+}
+
+fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+    use std::process::{Command, Stdio};
     if script.is_empty() {
         return None;
     }
     let bin = script.first()?;
     let args = &script[1..];
-    let mut child = Command::new(bin)
+    let child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    // Drain stdout in a dedicated thread so the pipe buffer (~64 KB
-    // on macOS) never fills and blocks the child. A previous version
-    // try_wait()'d in 10ms ticks but never read the pipe — anything
-    // that wrote more than ~64 KB before exiting (e.g. `ps axo
-    // pid,comm` on a busy machine: 1600+ lines / ~50 KB) deadlocked
-    // and tripped the 200 ms cap even when the command itself
-    // finished in <100 ms.
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = Vec::with_capacity(8192);
-        let _ = stdout.read_to_end(&mut buf);
-        let _ = tx.send(buf);
-    });
-    let buf = match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
+    let buf = spawn_with_timeout(child, 8192)?;
     // Don't gate on exit status alone — many Fig generators run
     // `find $i ...` over `$PATH`-derived dirs that may not all exist,
     // so the script exits non-zero on the missing-path case even
     // though stdout was usefully populated. If we got stdout bytes,
     // use them; only return None when there's truly nothing to parse.
-    let _ = child.wait();
     if buf.is_empty() {
         return None;
     }
@@ -1706,14 +1757,21 @@ fn cargo_targets(
 
 /// Per-cwd cache for `cargo metadata` raw output. Keyed by cwd
 /// (canonicalized), TTL 5s. Lives separately from
-/// [`GENERATOR_CACHE`] because that cache routes JSON-shaped output
-/// through `extract_json_candidates`, which would lose the nested
+/// [`GENERATOR_CACHE`] because that cache splits stdout by lines
+/// and routes `{`-prefixed payloads through `extract_json_candidates`
+/// — both transforms would destroy the nested
 /// `packages[*].targets[*]` structure cargo_targets needs.
+///
+/// Bounded with the same LRU policy as `GENERATOR_CACHE`
+/// ([`GENERATOR_CACHE_MAX`] entries, oldest-evicted on overflow)
+/// so a long-running daemon that the user `cd`s through dozens of
+/// cargo workspaces doesn't leak.
 static CARGO_METADATA_CACHE: std::sync::LazyLock<
     std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, String)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
+    use std::process::{Command, Stdio};
     let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     if let Ok(cache) = CARGO_METADATA_CACHE.lock() {
         if let Some((stamp, blob)) = cache.get(&canon) {
@@ -1722,11 +1780,7 @@ fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
             }
         }
     }
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    use std::sync::mpsc;
-    use std::time::Duration;
-    let mut child = Command::new("cargo")
+    let child = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(&canon)
         .stdin(Stdio::null())
@@ -1734,27 +1788,21 @@ fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
-    std::thread::spawn(move || {
-        let mut buf = Vec::with_capacity(65_536);
-        let _ = stdout.read_to_end(&mut buf);
-        let _ = tx.send(buf);
-    });
-    let buf = match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
-        Ok(b) => b,
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-    };
-    let _ = child.wait();
+    let buf = spawn_with_timeout(child, 65_536)?;
     if buf.is_empty() {
         return None;
     }
     let blob = String::from_utf8_lossy(&buf).into_owned();
     if let Ok(mut cache) = CARGO_METADATA_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
         cache.insert(canon, (std::time::Instant::now(), blob.clone()));
     }
     Some(blob)
@@ -3762,6 +3810,123 @@ mod tests {
         let s = dir_summary(&tmp);
         assert!(s.ends_with("+ items"), "expected truncated label: {s}");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Tier C closure dispatch — only compiled under `--features
+    /// quickjs`. Default builds skip these (the arm itself is feature-
+    /// gated; without it the `Custom` variant falls through to the
+    /// catch-all and emits zero candidates, which the
+    /// `custom_without_feature_falls_through` test below verifies).
+    #[cfg(feature = "quickjs")]
+    mod tier_c_dispatch {
+        use super::*;
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+
+        fn spec_with_custom(source: &str) -> Subcommand {
+            Subcommand {
+                name: "x".into(),
+                args: vec![Arg {
+                    name: Some("opt".into()),
+                    generators: vec![Generator::Custom {
+                        description_hint: None,
+                        source: Some(source.into()),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn closure_returns_string_array() {
+            // Engine post-sorts emitted candidates alphabetically;
+            // assert on the sorted set rather than insertion order.
+            let src = r#"(() => ["main", "dev", "feature/x"])()"#;
+            let r = complete("x ", 2, &registry_with(spec_with_custom(src)));
+            let mut names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+            names.sort();
+            assert_eq!(names, ["dev", "feature/x", "main"]);
+        }
+
+        #[test]
+        fn closure_sees_tokens_via_global() {
+            // Closures that capture the live token list reach it via
+            // `globalThis.__nerv_tokens`. Lower-case each token so the
+            // case-sensitive prefix gate still admits the result.
+            let src = "(tokens => tokens.map(t => t.toLowerCase()))(globalThis.__nerv_tokens)";
+            let r = complete("x gi", 4, &registry_with(spec_with_custom(src)));
+            let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+            // Tokens are ["x", "gi"]; lower-cased → ["x", "gi"]. The
+            // current-token prefix is "gi" → only "gi" survives the
+            // matches_name (prefix) gate.
+            assert_eq!(names, ["gi"]);
+        }
+
+        #[test]
+        fn closure_throw_falls_through_silently() {
+            let src = r#"(() => { throw new Error("boom") })()"#;
+            let r = complete("x ", 2, &registry_with(spec_with_custom(src)));
+            assert!(r.items.is_empty());
+        }
+
+        #[test]
+        fn closure_with_no_source_is_skipped() {
+            // Generator::Custom without `source` — the Tier C arm
+            // doesn't match, so no candidates emit. The smart
+            // filepaths fallback might fire if arg.name implies a
+            // path; here arg name is "opt" so nothing kicks in.
+            let spec = Subcommand {
+                name: "x".into(),
+                args: vec![Arg {
+                    name: Some("opt".into()),
+                    generators: vec![Generator::Custom {
+                        description_hint: None,
+                        source: None,
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let r = complete("x ", 2, &registry_with(spec));
+            assert!(r.items.is_empty());
+        }
+
+        #[test]
+        fn closure_extracts_name_from_object_array() {
+            // Fig closures often return `[{name, description}]` — the
+            // tier_c extractor reads the `name` field.
+            let src = r#"(() => [{ name: "alpha" }, { name: "beta" }])()"#;
+            let r = complete("x ", 2, &registry_with(spec_with_custom(src)));
+            let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+            assert_eq!(names, ["alpha", "beta"]);
+        }
+    }
+
+    /// When the `quickjs` feature is OFF (default), a `Generator::Custom`
+    /// with `source: Some(...)` still parses cleanly and emits no
+    /// candidates. This locks in the wire-compat guarantee: converter
+    /// JSON written by a quickjs-aware build is still loadable by the
+    /// quickjs-free default binary.
+    #[cfg(not(feature = "quickjs"))]
+    #[test]
+    fn custom_with_source_loads_in_default_build() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("opt".into()),
+                generators: vec![Generator::Custom {
+                    description_hint: None,
+                    source: Some(r#"(() => ["unused"])()"#.into()),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        // Default build: no Tier C arm, no candidates. (smart
+        // filepaths fallback ignores arg.name = "opt".)
+        assert!(r.items.is_empty());
     }
 
     #[test]

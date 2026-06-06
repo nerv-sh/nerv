@@ -151,10 +151,20 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
 
                 let bin = std::env::current_exe()?.to_string_lossy().into_owned();
                 println!("export NERV_BIN={bin:?}");
-                print!(
-                    "{}",
-                    include_str!("../../../shell-integrations/zsh/_nerv.zsh")
-                );
+                // NERV_PTY=1 opts the user into the figterm-style PTY
+                // shim (PLAN §5.8). Emit the PTY bootstrap script
+                // INSTEAD OF the ZLE widget; the widget itself
+                // self-skips when NERV_PTY is set, but emitting both
+                // wastes bytes and confuses `nerv doctor`. The PTY
+                // path is mutually exclusive with the widget by
+                // CLAUDE.md §4 invariant.
+                let pty_mode = std::env::var_os("NERV_PTY").is_some();
+                if pty_mode {
+                    if let Some(pty_bin) = resolve_pty_bin_for_init(&bin) {
+                        println!("export NERV_PTY_BIN={pty_bin:?}");
+                    }
+                }
+                print!("{}", init_snippet_for_zsh(pty_mode));
                 Ok(())
             } else {
                 // Outer block: just emit the ~/.zshrc marker. The inner
@@ -170,6 +180,34 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 Ok(())
             }
         }
+    }
+}
+
+/// Returns the zsh integration snippet to emit for the inner hook.
+/// Two flavors: the default ZLE widget (`_nerv.zsh`) and the
+/// PTY-shim bootstrap (`_nerv-pty.zsh`). The PTY flavor activates
+/// only when `NERV_PTY=1` was set in the parent environment.
+fn init_snippet_for_zsh(pty_mode: bool) -> &'static str {
+    if pty_mode {
+        include_str!("../../../shell-integrations/zsh/_nerv-pty.zsh")
+    } else {
+        include_str!("../../../shell-integrations/zsh/_nerv.zsh")
+    }
+}
+
+/// Locate the `nerv-pty` binary that ships next to the `nerv` CLI.
+/// `bin` is the path to the running `nerv` executable. We look for a
+/// sibling named `nerv-pty` (Homebrew + cargo install both place
+/// them in the same dir). When the sibling exists we export the
+/// absolute path so the shim doesn't depend on PATH — important
+/// inside an interactive shell with a freshly-stripped PATH.
+fn resolve_pty_bin_for_init(bin: &str) -> Option<String> {
+    let parent = std::path::Path::new(bin).parent()?;
+    let candidate = parent.join("nerv-pty");
+    if candidate.exists() {
+        Some(candidate.to_string_lossy().into_owned())
+    } else {
+        None
     }
 }
 
@@ -194,7 +232,7 @@ fn check_zsh_env_compat() -> Result<(), String> {
                     or run: ZSH_VERSION=\"$ZSH_VERSION\" eval \"$(nerv init zsh)\""
             .into());
     }
-    let (major, minor) = parse_zsh_version_compat(&ver);
+    let (major, minor) = parse_zsh_version(&ver);
     if major > 5 || (major == 5 && minor >= 8) {
         return Ok(());
     }
@@ -222,13 +260,6 @@ fn detect_zsh_version_via_shell() -> Option<String> {
     }
     let text = String::from_utf8_lossy(&out.stdout);
     text.split_whitespace().nth(1).map(|s| s.to_string())
-}
-
-fn parse_zsh_version_compat(s: &str) -> (u32, u32) {
-    let mut it = s.split('.');
-    let major = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    let minor = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
-    (major, minor)
 }
 
 /// E4 (error-states.md §3.4): scan env for known widget-conflict
@@ -326,7 +357,77 @@ fn build_doctor_report() -> DoctorReport {
     check_shell_hook(&mut r);
     check_daemon(&mut r);
     check_specs(&mut r);
+    check_pty_mode(&mut r);
     r
+}
+
+/// PLAN §5.8 PTY shim is M1 opt-in via `NERV_PTY=1`. Doctor
+/// reports the active state so users can confirm their env flag
+/// took effect AND that the `nerv-pty` binary the shim execs is
+/// actually present. Silent when NERV_PTY isn't set — the default
+/// ZLE-widget path doesn't need this row.
+fn check_pty_mode(r: &mut DoctorReport) {
+    if std::env::var_os("NERV_PTY").is_none() {
+        return;
+    }
+    // Inside the PTY shim already? Re-entry detector — the wrapper
+    // exports NERV_PTY_SESSION_ID before re-execing zsh under
+    // itself, so non-empty means doctor is running INSIDE the
+    // shim's child shell (expected).
+    let inside_shim = std::env::var_os("NERV_PTY_SESSION_ID").is_some();
+
+    // Resolve nerv-pty: prefer NERV_PTY_BIN (set by the init hook),
+    // else look for a sibling of the running nerv binary, else
+    // fall back to PATH.
+    let from_env = std::env::var_os("NERV_PTY_BIN").map(std::path::PathBuf::from);
+    let from_sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| {
+            exe.parent().map(|d| {
+                d.join(if cfg!(windows) {
+                    "nerv-pty.exe"
+                } else {
+                    "nerv-pty"
+                })
+            })
+        })
+        .filter(|p| p.exists());
+    let from_path = which("nerv-pty").ok();
+
+    match from_env
+        .filter(|p| p.exists())
+        .or(from_sibling)
+        .or(from_path)
+    {
+        Some(p) => {
+            let detail = if inside_shim {
+                format!("active, binary at {} (running inside shim)", p.display())
+            } else {
+                format!("opt-in set, binary at {}", p.display())
+            };
+            r.push(DoctorLevel::Ok, "pty shim", detail, None);
+        }
+        None => {
+            r.push(
+                DoctorLevel::Err,
+                "pty shim",
+                "NERV_PTY=1 but nerv-pty binary not found".into(),
+                Some("unset NERV_PTY or install nerv-pty (brew reinstall nerv)".into()),
+            );
+        }
+    }
+}
+
+/// Minimal PATH lookup. Returns the first matching executable.
+fn which(name: &str) -> Result<std::path::PathBuf, ()> {
+    let path = std::env::var_os("PATH").ok_or(())?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(())
 }
 
 /// E3: zsh version ≥ 5.8.
@@ -1136,5 +1237,356 @@ mod tests {
         let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
         assert!(backup.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `parse_zsh_version` accepts the `zsh --version`-style output —
+    /// digits separated by dots, ignoring suffixes. E3 (zsh < 5.8
+    /// hint) gates entirely on this parser.
+    #[test]
+    fn parse_zsh_version_handles_common_shapes() {
+        assert_eq!(parse_zsh_version("5.8"), (5, 8));
+        assert_eq!(parse_zsh_version("5.9.1"), (5, 9));
+        assert_eq!(parse_zsh_version("5.8.2-1"), (5, 8));
+        assert_eq!(parse_zsh_version("4.3.11"), (4, 3));
+    }
+
+    /// Garbage / empty input falls back to (0, 0) — the doctor table
+    /// then prints "unknown" and the E3 gate stays open. Don't panic.
+    #[test]
+    fn parse_zsh_version_falls_back_on_garbage() {
+        assert_eq!(parse_zsh_version(""), (0, 0));
+        assert_eq!(parse_zsh_version("five.eight"), (0, 0));
+        assert_eq!(parse_zsh_version("nope"), (0, 0));
+        // Leading non-numeric major still degrades cleanly.
+        assert_eq!(parse_zsh_version("v5.8"), (0, 8));
+    }
+
+    /// `read_pid` parses the PID file written by `nerv start`.
+    /// Whitespace and trailing newlines are trimmed before parsing.
+    #[test]
+    fn read_pid_parses_clean_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("nervd.pid");
+        std::fs::write(&path, "12345\n").unwrap();
+        assert_eq!(read_pid(&path), Some(12345));
+        // No trailing whitespace.
+        std::fs::write(&path, "67890").unwrap();
+        assert_eq!(read_pid(&path), Some(67890));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Missing PID file / garbage contents must return None, never
+    /// panic. The uninstall path uses None to mean "daemon not
+    /// running".
+    #[test]
+    fn read_pid_returns_none_on_garbage_or_missing() {
+        let tmp = std::env::temp_dir().join(format!("nerv-pid-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let path = tmp.join("nervd.pid");
+        // Missing entirely.
+        assert_eq!(read_pid(&tmp.join("nope")), None);
+        // Non-numeric content.
+        std::fs::write(&path, "garbage\n").unwrap();
+        assert_eq!(read_pid(&path), None);
+        // Empty.
+        std::fs::write(&path, "").unwrap();
+        assert_eq!(read_pid(&path), None);
+        // Negative — u32::parse rejects.
+        std::fs::write(&path, "-1\n").unwrap();
+        assert_eq!(read_pid(&path), None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `process_alive(0)` on unix: kill(0,0) sends to the current
+    /// process group; succeeds when called from the test binary
+    /// itself. Verify the wrapper returns true for the test process
+    /// own PID, and false for an obviously-dead PID.
+    #[cfg(unix)]
+    #[test]
+    fn process_alive_self_and_dead() {
+        let self_pid = std::process::id();
+        assert!(process_alive(self_pid), "test process should be alive");
+        // A PID just above current is statistically unlikely to map
+        // to a live process on a sleep-light CI host. Skip the
+        // assertion if it happens to be alive (no false-positive).
+        let probe = u32::MAX - 1;
+        // u32::MAX - 1 is rejected by some kernels as invalid; expect
+        // false either way (the kill syscall returns -1 / ESRCH).
+        assert!(!process_alive(probe));
+    }
+
+    /// `strip_zsh_hooks` cycles through .zshrc, .zshenv, .zprofile,
+    /// .zlogin in that order and reports the first backup path. When
+    /// only .zshenv has a marker block, the backup path returned must
+    /// point at .zshenv.
+    #[test]
+    fn strip_zsh_hooks_first_backup_picks_first_modified_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-first-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let plain_rc = "alias ll=ls\n";
+        std::fs::write(tmp.join(".zshrc"), plain_rc).unwrap();
+        let env_with_block = format!(
+            "{}export FOO=bar\n",
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+        );
+        std::fs::write(tmp.join(".zshenv"), &env_with_block).unwrap();
+        let mut log = UninstallLog::new(true);
+        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap().expect("backup");
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".zshenv"),
+            "first backup should be the .zshenv file, got {backup:?}",
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(".zshrc")).unwrap(),
+            plain_rc,
+            ".zshrc must stay untouched",
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Multiple marker blocks within a single init file are all
+    /// stripped + counted. Catches a regression where the
+    /// total_blocks_removed counter would only see the first match.
+    #[test]
+    fn strip_zsh_hooks_counts_multiple_blocks_per_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-multi-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts");
+        let zshrc = format!("alias a=1\n{blk}alias b=2\n{blk}alias c=3\n");
+        std::fs::write(tmp.join(".zshrc"), &zshrc).unwrap();
+        let mut log = UninstallLog::new(true);
+        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let after = std::fs::read_to_string(tmp.join(".zshrc")).unwrap();
+        assert_eq!(nerv_shell::count_blocks(&after), 0);
+        assert!(after.contains("alias a=1"));
+        assert!(after.contains("alias b=2"));
+        assert!(after.contains("alias c=3"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The atomic-write path writes a `.nerv-tmp` sibling and renames
+    /// over the original. Confirm no `.nerv-tmp` leftover is left
+    /// behind on the happy path.
+    #[test]
+    fn strip_zsh_hooks_cleans_up_temp_file() {
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-tmp-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let body = format!(
+            "alias x=ls\n{}\n",
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+        );
+        std::fs::write(tmp.join(".zshrc"), &body).unwrap();
+        let mut log = UninstallLog::new(true);
+        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let leftover = tmp.join(".nerv-tmp");
+        assert!(
+            !leftover.exists(),
+            "atomic temp file should be renamed away"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `which("...")` mirrors PATH lookup for the doctor's PTY check.
+    /// Empty PATH returns Err; missing binary returns Err; existing
+    /// file returns the resolved path.
+    #[test]
+    fn which_finds_existing_path_entry() {
+        let tmp = std::env::temp_dir().join(format!("nerv-which-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let exe = tmp.join("nerv-pty");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        // Preserve current PATH and prepend our tempdir; restore on
+        // exit so other tests don't see the override.
+        let original = std::env::var_os("PATH");
+        let new_path = match &original {
+            Some(p) => {
+                let mut v = std::ffi::OsString::from(&tmp);
+                v.push(":");
+                v.push(p);
+                v
+            }
+            None => std::ffi::OsString::from(&tmp),
+        };
+        unsafe { std::env::set_var("PATH", &new_path) };
+        let got = which("nerv-pty");
+        let missing = which("nerv-no-such-binary-xyz-9876");
+        match original {
+            Some(p) => unsafe { std::env::set_var("PATH", p) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+        assert_eq!(got.unwrap(), exe);
+        assert!(missing.is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `init_snippet_for_zsh(false)` returns the ZLE widget body —
+    /// recognisable by its `__NERV_LOADED` re-entry guard. The PTY
+    /// flavor's bootstrap uses `NERV_PTY_SESSION_ID` instead.
+    #[test]
+    fn init_snippet_for_zsh_default_is_zle_widget() {
+        let body = init_snippet_for_zsh(false);
+        assert!(body.contains("__NERV_LOADED"));
+        assert!(!body.contains("NERV_PTY_BIN"));
+    }
+
+    /// `init_snippet_for_zsh(true)` returns the PTY bootstrap —
+    /// recognisable by its NERV_PTY_SESSION_ID re-entry guard and
+    /// the exec of NERV_PTY_BIN.
+    #[test]
+    fn init_snippet_for_zsh_pty_mode_is_pty_bootstrap() {
+        let body = init_snippet_for_zsh(true);
+        assert!(body.contains("NERV_PTY_SESSION_ID"));
+        assert!(body.contains("NERV_PTY_BIN"));
+        // Mutual exclusion: PTY snippet must NOT define the ZLE
+        // widget global.
+        assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// `resolve_pty_bin_for_init` returns Some(path) when a sibling
+    /// `nerv-pty` exists next to the given `nerv` binary; None
+    /// otherwise. Used by the inner init hook to export
+    /// NERV_PTY_BIN so the shim doesn't depend on PATH.
+    #[test]
+    fn resolve_pty_bin_for_init_finds_sibling() {
+        let tmp = std::env::temp_dir().join(format!("nerv-pty-init-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let nerv = tmp.join("nerv");
+        let pty = tmp.join("nerv-pty");
+        std::fs::write(&nerv, b"#!/bin/sh\n").unwrap();
+        // No sibling yet.
+        assert_eq!(
+            resolve_pty_bin_for_init(nerv.to_str().unwrap()),
+            None,
+            "should be None when sibling missing",
+        );
+        std::fs::write(&pty, b"#!/bin/sh\n").unwrap();
+        let got = resolve_pty_bin_for_init(nerv.to_str().unwrap()).unwrap();
+        assert_eq!(std::path::PathBuf::from(got), pty);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `count_tree` walks the spec tree and returns (subs, opts). The
+    /// root itself is not counted; only descendants. Empty spec → 0/0.
+    #[test]
+    fn count_tree_empty_returns_zero_zero() {
+        let root = SpecNode {
+            name: "x".into(),
+            ..Default::default()
+        };
+        assert_eq!(count_tree(&root), (0, 0));
+    }
+
+    /// Two levels of nesting + a few options per node — the totals
+    /// sum across the whole tree, root excluded.
+    #[test]
+    fn count_tree_sums_across_descendants() {
+        use nerv_engine::Opt;
+        let leaf = SpecNode {
+            name: "leaf".into(),
+            options: vec![Opt {
+                names: vec!["-x".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mid = SpecNode {
+            name: "mid".into(),
+            options: vec![
+                Opt {
+                    names: vec!["-a".into()],
+                    ..Default::default()
+                },
+                Opt {
+                    names: vec!["-b".into()],
+                    ..Default::default()
+                },
+            ],
+            subcommands: vec![leaf],
+            ..Default::default()
+        };
+        let root = SpecNode {
+            name: "root".into(),
+            subcommands: vec![mid],
+            ..Default::default()
+        };
+        // Subs: mid + leaf = 2. Opts: root 0 + mid 2 + leaf 1 = 3.
+        assert_eq!(count_tree(&root), (2, 3));
+    }
+
+    /// `upgrade_tier` is monotone: once C, never downgrades; B stays
+    /// when only A-level generators follow. Custom + Script-with-pp
+    /// are the only Tier C upgrades.
+    #[test]
+    fn upgrade_tier_classifies_generators() {
+        use nerv_engine::Generator;
+        // No generators → stays A.
+        assert_eq!(upgrade_tier('A', std::iter::empty()), 'A');
+        // Template → B.
+        let g = [Generator::Template {
+            script: vec!["echo".into()],
+        }];
+        assert_eq!(upgrade_tier('A', g.iter()), 'B');
+        // Custom (no source) → C.
+        let g = [Generator::Custom {
+            description_hint: None,
+            source: None,
+        }];
+        assert_eq!(upgrade_tier('A', g.iter()), 'C');
+        // Script with post-process → C, never downgrades.
+        let g = [
+            Generator::Script {
+                script: vec!["echo".into()],
+                has_post_process: true,
+            },
+            Generator::Template {
+                script: vec!["echo".into()],
+            },
+        ];
+        assert_eq!(upgrade_tier('A', g.iter()), 'C');
+        // Already C → stays C even with A-only follow-ups.
+        assert_eq!(upgrade_tier('C', std::iter::empty()), 'C');
+    }
+
+    /// `compute_tier` returns the human-readable label
+    /// `nerv spec list` prints in its TIER column.
+    #[test]
+    fn compute_tier_labels_are_stable() {
+        use nerv_engine::{Arg, Generator};
+        // Empty spec → A.
+        let root = SpecNode {
+            name: "x".into(),
+            ..Default::default()
+        };
+        assert_eq!(compute_tier(&root), "A");
+        // Spec with Template arg → B (limited).
+        let root = SpecNode {
+            name: "x".into(),
+            args: vec![Arg {
+                generators: vec![Generator::Template {
+                    script: vec!["echo".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(compute_tier(&root), "B (limited)");
+        // Spec with Custom arg → C (M1).
+        let root = SpecNode {
+            name: "x".into(),
+            args: vec![Arg {
+                generators: vec![Generator::Custom {
+                    description_hint: None,
+                    source: None,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(compute_tier(&root), "C (M1)");
     }
 }
