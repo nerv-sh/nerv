@@ -858,6 +858,33 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                                 && event.modifiers == Modifiers::NONE
                                             {
                                                 if let Some(rem) = overlay.ghost.take() {
+                                                    // Frecency: record the accepted insertion so
+                                                    // the next request can boost it (mirrors the
+                                                    // M0 ZLE widget's `nerv _record`). The spec is
+                                                    // the first word; the insertion is the popup
+                                                    // selection, or the completed current token.
+                                                    let spec = overlay
+                                                        .buffer
+                                                        .split_whitespace()
+                                                        .next()
+                                                        .unwrap_or("")
+                                                        .to_string();
+                                                    let insertion = match &overlay.popup {
+                                                        Some(p) => p.selected_item().insertion.clone(),
+                                                        None => {
+                                                            let tok = overlay
+                                                                .buffer
+                                                                .rsplit(char::is_whitespace)
+                                                                .next()
+                                                                .unwrap_or("");
+                                                            format!("{tok}{rem}")
+                                                        }
+                                                    };
+                                                    if !spec.is_empty() && !insertion.is_empty() {
+                                                        tokio::spawn(engine_client::record_accept(
+                                                            spec, insertion,
+                                                        ));
+                                                    }
                                                     write_buffer.extend(rem.as_bytes());
                                                     continue;
                                                 }

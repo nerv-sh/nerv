@@ -17,6 +17,33 @@ use nerv_engine::{Request, Response, Suggestion};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+/// Record an accepted suggestion for frecency ranking (fire-and-forget).
+/// Mirrors what the M0 ZLE widget does via `nerv _record`: the daemon
+/// bumps its in-memory table so the next request can float this pick to
+/// the top. Errors are swallowed — a missing boost must never disrupt
+/// the keystroke path.
+pub async fn record_accept(spec: String, insertion: String) {
+    let _ = record_inner(spec, insertion).await;
+}
+
+async fn record_inner(spec: String, insertion: String) -> Result<()> {
+    let sock_path =
+        nerv_engine::paths::socket_path().ok_or_else(|| anyhow!("HOME unset; no socket path"))?;
+    let stream = UnixStream::connect(&sock_path).await?;
+    let (read_half, mut write_half) = stream.into_split();
+
+    let req = Request::RecordAccept { spec, insertion };
+    let mut json = serde_json::to_string(&req)?;
+    json.push('\n');
+    write_half.write_all(json.as_bytes()).await?;
+
+    // Drain the one-line ack so the daemon closes the conn cleanly.
+    let mut reader = BufReader::new(read_half);
+    let mut resp_line = String::new();
+    let _ = reader.read_line(&mut resp_line).await;
+    Ok(())
+}
+
 /// Hard ceiling on a single completion round-trip. The daemon's own p95
 /// is well under a millisecond (see CLAUDE.md §3 latency bench); this is
 /// a safety valve so a wedged daemon can't stall keystroke echo. On
