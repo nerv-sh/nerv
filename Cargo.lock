@@ -1864,6 +1864,7 @@ dependencies = [
  "lazy_static",
  "memmem",
  "mimalloc",
+ "nerv-engine",
  "nerv-ipc",
  "nerv-log",
  "nerv-os",

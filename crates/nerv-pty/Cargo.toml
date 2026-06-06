@@ -17,6 +17,7 @@ profiling_early_exit = []
 
 [dependencies]
 nerv-term = { path = "../nerv-term" }
+nerv-engine = { path = "../nerv-engine" }
 anyhow.workspace = true
 async-trait.workspace = true
 bitflags.workspace = true
