@@ -579,9 +579,12 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
     let mut terminal = SystemTerminal::new_from_stdio()?;
     let screen_size = terminal.get_screen_size()?;
 
+    // Clamp to ≥1×1. A 0-row/0-col winsize (detached or not-yet-sized
+    // terminal) makes the shadow terminal's grid panic on its
+    // visible-lines assertion, so no zero dimension may reach it.
     let pty_size = PtySize {
-        rows: screen_size.rows as u16,
-        cols: screen_size.cols as u16,
+        rows: (screen_size.rows as u16).max(1),
+        cols: (screen_size.cols as u16).max(1),
         pixel_width: screen_size.xpixel as u16,
         pixel_height: screen_size.ypixel as u16,
     };
@@ -946,15 +949,20 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                         terminal.flush()?;
 
                                         let size = terminal.get_screen_size()?;
+                                        // Clamp to ≥1×1 (see open-pty note) so a
+                                        // degenerate resize can't panic the grid.
+                                        let rows = (size.rows as u16).max(1);
+                                        let cols = (size.cols as u16).max(1);
                                         let pty_size = PtySize {
-                                            rows: size.rows as u16,
-                                            cols: size.cols as u16,
+                                            rows,
+                                            cols,
                                             pixel_width: size.xpixel as u16,
                                             pixel_height: size.ypixel as u16,
                                         };
 
                                         master.resize(pty_size)?;
-                                        let window_size = SizeInfo::new(size.rows, size.cols);
+                                        let window_size =
+                                            SizeInfo::new(rows as usize, cols as usize);
                                         debug!("Window size changed: {window_size:?}");
                                         term.resize(window_size);
                                     }
