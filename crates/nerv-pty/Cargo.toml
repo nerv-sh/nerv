@@ -17,6 +17,7 @@ profiling_early_exit = []
 
 [dependencies]
 nerv-term = { path = "../nerv-term" }
+nerv-engine = { path = "../nerv-engine" }
 anyhow.workspace = true
 async-trait.workspace = true
 bitflags.workspace = true
@@ -51,6 +52,7 @@ shell-color.workspace = true
 shell-words = "1.1"
 shellexpand.workspace = true
 shlex.workspace = true
+unicode-width.workspace = true
 sysinfo.workspace = true
 time.workspace = true
 tokio.workspace = true

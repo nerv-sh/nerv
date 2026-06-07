@@ -1,13 +1,16 @@
 #[cfg(target_os = "linux")]
 mod cleanup;
 pub mod cli;
+mod engine_client;
 mod event_handler;
+mod ghost;
 pub mod history;
 pub mod input;
 pub mod interceptor;
 pub mod ipc;
 pub mod logger;
 mod message;
+mod popup;
 pub mod pty;
 pub mod term;
 pub mod update;
@@ -33,7 +36,7 @@ use nerv_settings::state;
 use nerv_term::Term;
 use nerv_term::ansi::Processor;
 use nerv_term::event::EventListener;
-use nerv_term::term::{ShellState, SizeInfo};
+use nerv_term::term::{ShellState, SizeInfo, TextBuffer};
 use nerv_util::env_var::{NERV_LOG_LEVEL, NERV_PTY_SESSION_ID, NERV_SHELL, NERV_TERM};
 use nerv_util::process_info::{Pid, PidExt};
 use nerv_util::{PRODUCT_NAME, PTY_BINARY_NAME, Terminal as FigTerminal, directories};
@@ -324,6 +327,139 @@ where
     }
 }
 
+/// Live inline-completion overlay state for PTY mode (Phase 3a + 3b):
+/// the ghost remainder drawn on the prompt line, the popup list below it,
+/// and the bookkeeping needed to paint and erase them without corrupting
+/// the shell's own output.
+#[derive(Default)]
+struct Overlay {
+    /// Ghost remainder currently shown (Right-arrow accepts it).
+    ghost: Option<String>,
+    /// Popup list, when there are ≥2 suggestions.
+    popup: Option<popup::Popup>,
+    /// Buffer the current popup was built for — used to keep the
+    /// selection stable across re-queries while the line is unchanged.
+    buffer: String,
+    /// High-water mark of rows reserved below the cursor this prompt
+    /// (monotonic so we never re-scroll and walk the prompt up the
+    /// screen). Reset when a command runs.
+    reserved: usize,
+    /// Rows the popup last painted, for erase-before-redraw.
+    drawn: usize,
+}
+
+/// Re-query `nervd` for the line under the cursor and update `overlay`'s
+/// ghost + popup (without drawing). Selection is preserved while the
+/// buffer is unchanged; a changed buffer rebuilds the popup from the top.
+/// Clears the overlay model when there's nothing to show.
+async fn refresh_suggestions<T>(term: &Term<T>, overlay: &mut Overlay, max_vis: usize)
+where
+    T: EventListener,
+{
+    if !*AUTOCOMPLETE_ENABLED {
+        overlay.ghost = None;
+        overlay.popup = None;
+        return;
+    }
+
+    let Some(TextBuffer { buffer, cursor_idx }) = term.get_current_buffer() else {
+        overlay.ghost = None;
+        overlay.popup = None;
+        return;
+    };
+    // `cursor_idx` is a byte offset; only preview at end-of-line.
+    let at_eol = cursor_idx == Some(buffer.len());
+    if !at_eol {
+        overlay.ghost = None;
+        overlay.popup = None;
+        return;
+    }
+    let cursor = buffer.len();
+
+    let cwd = term
+        .shell_state()
+        .local_context
+        .current_working_directory
+        .as_ref()
+        .map(|p| p.display().to_string());
+
+    let suggestions = engine_client::complete(&buffer, cursor, cwd).await;
+    if suggestions.is_empty() {
+        overlay.ghost = None;
+        overlay.popup = None;
+        overlay.buffer = buffer;
+        return;
+    }
+
+    // Rebuild the popup only when the line changed; otherwise keep the
+    // user's current selection.
+    if buffer != overlay.buffer || overlay.popup.is_none() {
+        let items = suggestions
+            .iter()
+            .map(|s| popup::PopupItem {
+                display: s.display.clone(),
+                insertion: s.insertion.clone(),
+            })
+            .collect();
+        overlay.popup = popup::Popup::new(items, max_vis);
+    }
+    overlay.buffer = buffer.clone();
+
+    // Ghost mirrors the active row (selected popup item, else the top).
+    let active = overlay
+        .popup
+        .as_ref()
+        .map(|p| p.selected_item().insertion.clone())
+        .unwrap_or_else(|| suggestions[0].insertion.clone());
+    overlay.ghost = ghost::compute_ghost(&buffer, &active);
+}
+
+/// Paint the current overlay model: reserve rows as needed, erase the
+/// previous popup, draw the popup and ghost, and leave the cursor where
+/// it started.
+async fn draw_overlay(stdout: &mut io::Stdout, overlay: &mut Overlay, cols: usize) {
+    let need = overlay.popup.as_ref().map(|p| p.rows()).unwrap_or(0);
+    if need > overlay.reserved {
+        let _ = stdout
+            .write_all(popup::reserve_seq(need - overlay.reserved).as_bytes())
+            .await;
+        overlay.reserved = need;
+    }
+    if overlay.drawn > 0 {
+        let _ = stdout
+            .write_all(popup::clear_seq(overlay.drawn).as_bytes())
+            .await;
+    }
+    if let Some(p) = &overlay.popup {
+        let _ = stdout.write_all(p.render_seq(cols).as_bytes()).await;
+        overlay.drawn = p.rows();
+    } else {
+        overlay.drawn = 0;
+    }
+    match &overlay.ghost {
+        Some(g) => {
+            let _ = stdout.write_all(ghost::render_seq(g).as_bytes()).await;
+        }
+        None => {
+            let _ = stdout.write_all(ghost::clear_seq().as_bytes()).await;
+        }
+    }
+    let _ = stdout.flush().await;
+}
+
+/// Erase the overlay from the screen and reset its drawing bookkeeping
+/// (called when a command runs — the screen scrolls past anyway).
+async fn reset_overlay(stdout: &mut io::Stdout, overlay: &mut Overlay) {
+    if overlay.drawn > 0 {
+        let _ = stdout
+            .write_all(popup::clear_seq(overlay.drawn).as_bytes())
+            .await;
+    }
+    let _ = stdout.write_all(ghost::clear_seq().as_bytes()).await;
+    let _ = stdout.flush().await;
+    *overlay = Overlay::default();
+}
+
 fn get_parent_shell() -> Result<String> {
     match env::var(NERV_SHELL).ok().filter(|s| !s.is_empty()) {
         Some(v) => Ok(v),
@@ -443,9 +579,12 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
     let mut terminal = SystemTerminal::new_from_stdio()?;
     let screen_size = terminal.get_screen_size()?;
 
+    // Clamp to ≥1×1. A 0-row/0-col winsize (detached or not-yet-sized
+    // terminal) makes the shadow terminal's grid panic on its
+    // visible-lines assertion, so no zero dimension may reach it.
     let pty_size = PtySize {
-        rows: screen_size.rows as u16,
-        cols: screen_size.cols as u16,
+        rows: (screen_size.rows as u16).max(1),
+        cols: (screen_size.cols as u16).max(1),
         pixel_width: screen_size.xpixel as u16,
         pixel_height: screen_size.ypixel as u16,
     };
@@ -565,6 +704,9 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
 
         let mut csi_u_set = false;
 
+        // Phase 3a/3b: live inline-completion overlay (ghost + popup).
+        let mut overlay = Overlay::default();
+
         let result: Result<()> = 'select_loop: loop {
             if first_time && term.shell_state().has_seen_prompt {
                 trace!("Has seen prompt and first time");
@@ -676,6 +818,89 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
 
                                         debug!(?event, ?raw, %preexec,  "Got key event");
 
+                                        // Phase 3a/3b: drive the inline overlay before the
+                                        // key reaches the shell. Navigation, accept and
+                                        // dismiss are consumed; everything else falls through.
+                                        if !preexec
+                                            && (overlay.popup.is_some() || overlay.ghost.is_some())
+                                        {
+                                            let cols = terminal
+                                                .get_screen_size()
+                                                .map(|s| s.cols.max(1))
+                                                .unwrap_or(80);
+
+                                            // Tab / Down → next, Shift-Tab / Up → prev.
+                                            let nav = match (event.key, event.modifiers) {
+                                                (KeyCode::DownArrow, _) => Some(true),
+                                                (KeyCode::Tab, m) if !m.contains(Modifiers::SHIFT) => {
+                                                    Some(true)
+                                                }
+                                                (KeyCode::UpArrow, _) => Some(false),
+                                                (KeyCode::Tab, m) if m.contains(Modifiers::SHIFT) => {
+                                                    Some(false)
+                                                }
+                                                _ => None,
+                                            };
+                                            if let (Some(down), Some(p)) =
+                                                (nav, overlay.popup.as_mut())
+                                            {
+                                                if down {
+                                                    p.next();
+                                                } else {
+                                                    p.prev();
+                                                }
+                                                let ins = p.selected_item().insertion.clone();
+                                                overlay.ghost =
+                                                    ghost::compute_ghost(&overlay.buffer, &ins);
+                                                draw_overlay(&mut stdout, &mut overlay, cols).await;
+                                                continue;
+                                            }
+
+                                            // Right-arrow at end-of-line accepts the ghost.
+                                            if event.key == KeyCode::RightArrow
+                                                && event.modifiers == Modifiers::NONE
+                                            {
+                                                if let Some(rem) = overlay.ghost.take() {
+                                                    // Frecency: record the accepted insertion so
+                                                    // the next request can boost it (mirrors the
+                                                    // M0 ZLE widget's `nerv _record`). The spec is
+                                                    // the first word; the insertion is the popup
+                                                    // selection, or the completed current token.
+                                                    let spec = overlay
+                                                        .buffer
+                                                        .split_whitespace()
+                                                        .next()
+                                                        .unwrap_or("")
+                                                        .to_string();
+                                                    let insertion = match &overlay.popup {
+                                                        Some(p) => p.selected_item().insertion.clone(),
+                                                        None => {
+                                                            let tok = overlay
+                                                                .buffer
+                                                                .rsplit(char::is_whitespace)
+                                                                .next()
+                                                                .unwrap_or("");
+                                                            format!("{tok}{rem}")
+                                                        }
+                                                    };
+                                                    if !spec.is_empty() && !insertion.is_empty() {
+                                                        tokio::spawn(engine_client::record_accept(
+                                                            spec, insertion,
+                                                        ));
+                                                    }
+                                                    write_buffer.extend(rem.as_bytes());
+                                                    continue;
+                                                }
+                                            }
+
+                                            // Escape dismisses the overlay.
+                                            if event.key == KeyCode::Escape {
+                                                reset_overlay(&mut stdout, &mut overlay).await;
+                                                key_interceptor.reset();
+                                                continue;
+                                            }
+                                        }
+
                                         // if we are in CSI u mode we try to encode first, otherwise we try to send the raw bytes first
                                         let raw = if csi_u_set {
                                             event.key.encode(event.modifiers, key_code_encode_mode, true)
@@ -724,15 +949,20 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                         terminal.flush()?;
 
                                         let size = terminal.get_screen_size()?;
+                                        // Clamp to ≥1×1 (see open-pty note) so a
+                                        // degenerate resize can't panic the grid.
+                                        let rows = (size.rows as u16).max(1);
+                                        let cols = (size.cols as u16).max(1);
                                         let pty_size = PtySize {
-                                            rows: size.rows as u16,
-                                            cols: size.cols as u16,
+                                            rows,
+                                            cols,
                                             pixel_width: size.xpixel as u16,
                                             pixel_height: size.ypixel as u16,
                                         };
 
                                         master.resize(pty_size)?;
-                                        let window_size = SizeInfo::new(size.rows, size.cols);
+                                        let window_size =
+                                            SizeInfo::new(rows as usize, cols as usize);
                                         debug!("Window size changed: {window_size:?}");
                                         term.resize(window_size);
                                     }
@@ -805,6 +1035,18 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                 if let Err(err) = send_edit_buffer(&term, &remote_sender, cursor_coordinates).await {
                                     warn!("Failed to send edit buffer: {err}");
                                 }
+                                // Phase 3a/3b: refresh ghost + popup from nervd
+                                // and repaint. Popup window mirrors the M0
+                                // widget: LINES-6, clamped to [3,10].
+                                let (cols, max_vis) = match terminal.get_screen_size() {
+                                    Ok(s) => (s.cols.max(1), s.rows.saturating_sub(6).clamp(3, 10)),
+                                    Err(_) => (80, 5),
+                                };
+                                refresh_suggestions(&term, &mut overlay, max_vis).await;
+                                draw_overlay(&mut stdout, &mut overlay, cols).await;
+                            } else if overlay.drawn > 0 || overlay.ghost.is_some() {
+                                // A command started running (preexec) — clear.
+                                reset_overlay(&mut stdout, &mut overlay).await;
                             }
 
                             Ok(())

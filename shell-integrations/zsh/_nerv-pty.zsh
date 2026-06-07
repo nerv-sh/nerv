@@ -22,8 +22,51 @@
 # only handles the bootstrap: detect, exec wrapper, restore TTY
 # on exit.
 
-# Re-entry guard. Set by nerv-pty before it execs us.
+# Inner shell. NERV_PTY_SESSION_ID is set by nerv-pty before it execs
+# us, so we must NOT re-spawn the wrapper. Instead this is where we
+# install the figterm-style OSC 697 prompt markers that let the
+# wrapper's shadow terminal locate the command line:
+#
+#   StartPrompt .. EndPrompt   bound the prompt region (so prompt text
+#                              is excluded from the edit buffer)
+#   NewCmd=<session>           marks a fresh command line
+#   Shell=zsh / Dir=<pwd>      shell context (Shell gates completion)
+#   PreExec                    a command started running (preview off)
+#
+# Without these the shadow terminal can't tell the prompt from the
+# typed command and inline completion never fires. Ordering mirrors the
+# upstream figterm zsh integration (NewCmd trails EndPrompt at the end
+# of the prompt, right before user input).
 if [[ -n "${NERV_PTY_SESSION_ID-}" ]]; then
+  # Guard against double-wrapping the prompt if sourced more than once.
+  if [[ -n "${_NERV_PTY_PROMPT_SET-}" ]]; then
+    return 0
+  fi
+  typeset -g _NERV_PTY_PROMPT_SET=1
+
+  autoload -Uz add-zsh-hook
+
+  _nerv_pty_osc() { printf '\033]697;'"$1"'\007' "${@:2}"; }
+
+  _nerv_pty_preexec() { _nerv_pty_osc PreExec; }
+  _nerv_pty_precmd() {
+    _nerv_pty_osc Shell=zsh
+    _nerv_pty_osc "Dir=%s" "$PWD"
+    _nerv_pty_osc "TTY=%s" "$TTY"
+    _nerv_pty_osc "PID=%d" "$$"
+  }
+  add-zsh-hook preexec _nerv_pty_preexec
+  add-zsh-hook precmd _nerv_pty_precmd
+
+  typeset -g _NERV_PTY_SP=$'\033]697;StartPrompt\007'
+  typeset -g _NERV_PTY_EP=$'\033]697;EndPrompt\007'
+  typeset -g _NERV_PTY_NC=$'\033]697;NewCmd='"${NERV_PTY_SESSION_ID}"$'\007'
+  if [[ -n "${PROMPT+x}" ]]; then
+    PROMPT="%{${_NERV_PTY_SP}%}${PROMPT}%{${_NERV_PTY_EP}${_NERV_PTY_NC}%}"
+  else
+    PS1="%{${_NERV_PTY_SP}%}${PS1}%{${_NERV_PTY_EP}${_NERV_PTY_NC}%}"
+  fi
+
   return 0
 fi
 
