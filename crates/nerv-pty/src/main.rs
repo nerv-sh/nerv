@@ -1,3 +1,4 @@
+mod ansi;
 #[cfg(target_os = "linux")]
 mod cleanup;
 pub mod cli;
