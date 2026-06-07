@@ -13,11 +13,12 @@
 
 use anyhow::Context;
 use nerv_engine::{
-    FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, complete_in, paths,
+    FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, complete_in,
+    manifest, paths,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> anyhow::Result<()> {
@@ -43,6 +44,25 @@ async fn main() -> anyhow::Result<()> {
         specs_dir = %specs_dir.display(),
         "spec registry initialized (lazy)"
     );
+
+    // E5: reject a spec cache built for a different schema version
+    // (error-states.md §3.5). On mismatch the daemon stays up but every
+    // Complete returns empty with this reason, which the CLI bridge turns
+    // into the grey ZLE hint. A missing manifest is tolerated.
+    let schema_block: Arc<Option<String>> = Arc::new(match manifest::check_schema(&specs_dir) {
+        manifest::SchemaStatus::Mismatch { found } => {
+            let reason = format!(
+                "spec schema mismatch — daemon expects v{}, found v{found}",
+                manifest::SUPPORTED_SCHEMA_VERSION
+            );
+            error!(
+                "{reason}. Run: brew reinstall nerv (or: nerv doctor). \
+                 Autocomplete disabled until resolved."
+            );
+            Some(reason)
+        }
+        _ => None,
+    });
 
     // Frecency: per-spec usage history that nudges repeat picks to
     // the top of suggestion lists. Persisted as a TSV next to specs.
@@ -92,7 +112,14 @@ async fn main() -> anyhow::Result<()> {
                     Ok((stream, _addr)) => {
                         let registry = registry.clone();
                         let frecency = frecency.clone();
-                        tokio::spawn(handle_connection(stream, registry, frecency, matching.mode));
+                        let schema_block = schema_block.clone();
+                        tokio::spawn(handle_connection(
+                            stream,
+                            registry,
+                            frecency,
+                            matching.mode,
+                            schema_block,
+                        ));
                     }
                     Err(e) => warn!(?e, "accept error"),
                 }
@@ -114,6 +141,7 @@ async fn handle_connection(
     registry: Arc<SpecRegistry>,
     frecency: Arc<FrecencyStore>,
     mode: MatchMode,
+    schema_block: Arc<Option<String>>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -127,9 +155,14 @@ async fn handle_connection(
             Ok(Request::Ping) => Response::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
-            Ok(Request::Complete { line, cursor, cwd }) => {
-                engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref(), mode)
-            }
+            Ok(Request::Complete { line, cursor, cwd }) => match schema_block.as_ref() {
+                // E5: schema mismatch disables all completion; the reason
+                // string is what the CLI bridge sniffs for the ZLE hint.
+                Some(reason) => Response::Empty {
+                    reason: Some(reason.clone()),
+                },
+                None => engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref(), mode),
+            },
             Ok(Request::DoctorAutorun) => Response::Empty {
                 reason: Some("doctor-autorun-stub".to_string()),
             },

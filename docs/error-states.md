@@ -191,7 +191,9 @@ THEN:
 
 ---
 
-### 3.5 E5 — spec 버전 불일치
+### 3.5 E5 — spec 버전 불일치 ✅ 구현 완료 (2026-06-07)
+
+> 구현: `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2`, `check_schema`). build-specs 가 `manifest.json` 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` → CLI bridge exit 3 → ZLE 회색 1줄 + `nerv doctor` red row. **missing manifest 는 관대** (pre-manifest 설치 호환). 테스트: manifest 5 unit + `schema_mismatch_disables_completion` e2e.
 
 **감지**:
 

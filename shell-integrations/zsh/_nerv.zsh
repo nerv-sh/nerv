@@ -22,6 +22,7 @@ typeset -g __NERV_LOADED=1
 typeset -g __NERV_BIN="${NERV_BIN:-nerv}"
 typeset -g __NERV_PREV_LBUFFER=""
 typeset -gi __NERV_E1_SHOWN=0
+typeset -gi __NERV_E5_SHOWN=0
 typeset -gi __NERV_SELECTED=1
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
@@ -386,17 +387,27 @@ __nerv_complete() {
   [[ "$LBUFFER" != *" "* ]] && { __nerv_hide_popup; return; }
 
   local resp
-  resp=$("$__NERV_BIN" _complete "$LBUFFER" $CURSOR 2>/dev/null) || {
+  resp=$("$__NERV_BIN" _complete "$LBUFFER" $CURSOR 2>/dev/null)
+  local rc=$?
+  if (( rc != 0 )); then
     if [[ -n "${NERV_DEBUG:-}" ]]; then
-      print -r -- "  complete: BIN call FAILED" >> /tmp/nerv-debug.log
+      print -r -- "  complete: BIN call FAILED rc=$rc" >> /tmp/nerv-debug.log
     fi
-    if (( ! __NERV_E1_SHOWN )); then
+    # rc 3 = E5 spec schema mismatch (daemon up, cache wrong version);
+    # any other non-zero = E1 daemon not reachable.
+    if (( rc == 3 )); then
+      if (( ! __NERV_E5_SHOWN )); then
+        __NERV_E5_SHOWN=1
+        zle -R "[nerv] spec mismatch — run: brew reinstall nerv"
+        __NERV_ACTIVE=1
+      fi
+    elif (( ! __NERV_E1_SHOWN )); then
       __NERV_E1_SHOWN=1
       zle -R "[nerv] daemon not running — run: nerv start"
       __NERV_ACTIVE=1
     fi
     return
-  }
+  fi
   if [[ -n "${NERV_DEBUG:-}" ]]; then
     print -r -- "  complete: got $(print -r -- "$resp" | wc -l | tr -d ' ') lines" >> /tmp/nerv-debug.log
   fi

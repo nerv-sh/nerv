@@ -357,8 +357,41 @@ fn build_doctor_report() -> DoctorReport {
     check_shell_hook(&mut r);
     check_daemon(&mut r);
     check_specs(&mut r);
+    check_schema_version(&mut r);
     check_pty_mode(&mut r);
     r
+}
+
+/// E5: spec cache schema version vs the daemon's supported version
+/// (error-states.md §3.5). A mismatch is a blocking (red) row.
+fn check_schema_version(r: &mut DoctorReport) {
+    let specs_dir = match std::env::var_os("NERV_SPECS_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(paths::specs_dir)
+    {
+        Some(d) => d,
+        None => return,
+    };
+    match nerv_engine::manifest::check_schema(&specs_dir) {
+        nerv_engine::manifest::SchemaStatus::Ok => r.push(
+            DoctorLevel::Ok,
+            "spec schema",
+            format!("v{}", nerv_engine::manifest::SUPPORTED_SCHEMA_VERSION),
+            None,
+        ),
+        // Missing manifest is non-fatal (pre-manifest install); stay quiet
+        // rather than nag — E2/specs row already covers an empty cache.
+        nerv_engine::manifest::SchemaStatus::Missing => {}
+        nerv_engine::manifest::SchemaStatus::Mismatch { found } => r.push(
+            DoctorLevel::Err,
+            "spec schema",
+            format!(
+                "mismatch — daemon expects v{}, found v{found}",
+                nerv_engine::manifest::SUPPORTED_SCHEMA_VERSION
+            ),
+            Some("run: brew reinstall nerv".into()),
+        ),
+    }
 }
 
 /// PLAN §5.8 PTY shim is M1 opt-in via `NERV_PTY=1`. Doctor
@@ -1101,11 +1134,20 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
         .enable_io()
         .build()?;
 
-    // Any non-`Suggestions` response → no output → no popup in zsh.
-    if let Response::Suggestions { items } = rt.block_on(nerv_engine::ipc_client::query(&req))? {
-        for s in &items {
-            print_suggestion(s);
+    match rt.block_on(nerv_engine::ipc_client::query(&req))? {
+        Response::Suggestions { items } => {
+            for s in &items {
+                print_suggestion(s);
+            }
         }
+        // E5: a schema-mismatch reason exits 3 (distinct from the daemon-
+        // down failure) so the ZLE widget can show its one-line hint.
+        Response::Empty { reason: Some(r) } if r.starts_with("spec schema mismatch") => {
+            eprintln!("[nerv] {r}");
+            std::process::exit(3);
+        }
+        // Any other response → no output → no popup in zsh.
+        _ => {}
     }
     Ok(())
 }

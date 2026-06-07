@@ -63,9 +63,15 @@ fn main() -> Result<()> {
         );
         std::process::exit(1);
     }
+    // Stamp the cache with the schema version so the daemon's E5 gate can
+    // reject a swapped-in cache from a different nerv build.
+    nerv_engine::manifest::write_manifest(&cli.output, summary.loaded)
+        .with_context(|| format!("writing manifest to {}", cli.output.display()))?;
     println!(
-        "build-specs: {} loaded, {} skipped",
-        summary.loaded, summary.skipped
+        "build-specs: {} loaded, {} skipped (manifest v{})",
+        summary.loaded,
+        summary.skipped,
+        nerv_engine::manifest::SUPPORTED_SCHEMA_VERSION
     );
     Ok(())
 }

@@ -20,6 +20,7 @@ pub mod complete;
 pub mod config;
 pub mod ipc;
 pub mod ipc_client;
+pub mod manifest;
 pub mod parser;
 pub mod paths;
 pub mod ranker;
