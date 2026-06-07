@@ -21,6 +21,8 @@
 
 ## 3. 현재 단계
 
+> **M1 4주차 체크포인트 ✅ PASS (2026-06-07)** — 4항목 전부 green: 50-spec 시나리오 54/54 (`crates/nerv-engine/tests/scenario_specs.rs`) / latency p95 **0.055 ms** (<25 ms) / tmux+2터미널 회귀 (`scripts/e2e-tmux-2term.sh`, cwd 격리 + 20-way 동시성) / uninstall 흔적 0. 상세 = PLAN §10 4주차 체크포인트.
+
 **M0 흡수 스파이크 (v0.6 재정의)** — 산출물 8개 중 7개 완료:
 
 - ✅ M0-9 (v0.5 산출물): `withfig/autocomplete` subtree pin (`aef52acf…`, 1,484 TS spec, ISC)
@@ -273,7 +275,7 @@ Refs: PLAN.md §<section>  또는  Refs: docs/<file>.md §<section>
 PLAN §10 에 명시된 차단 요건을 *직접* 점검하기 전엔 다음 단계 진입 금지:
 
 - **M0 종료**: 산출물 8개 중 1+2+3+7+8 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과. (현재 1-7 완료; git fixture 시나리오 11개 integration test 통과. docker / kubectl fixture + 상위 50 spec 확장은 M1 진입과 함께.)
-- **M1 4주차**: 50개 spec 시나리오 통과 / latency p95 < 25 ms / tmux+2터미널 회귀 / uninstall 흔적 0
+- **M1 4주차** ✅ **PASS (2026-06-07)**: 50개 spec 시나리오 통과 (`scenario_specs.rs` 54/54) / latency p95 0.055 ms (<25 ms) / tmux+2터미널 회귀 (`e2e-tmux-2term.sh`) / uninstall 흔적 0
 - **M1 10주차**: 내부 dogfooding 2주
 
 미달 시 PLAN §10 M0-2 흡수 의사결정 트리 또는 wrapper crate 격리 전략.

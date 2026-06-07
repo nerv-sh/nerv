@@ -378,7 +378,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 v0.5.1 의 M1 (16주) 단축. Fig 엔진 흡수로 0–6주차 작업 80% 제거.
 
 - **0–4주차**: `nerv-engine` 자작 부분과 흡수 crate 통합 마무리. 50 spec 변환 파이프라인 완성. ZLE 안정화. 인라인 `?`. 에러 상태 UX 5종. **upstream PR 흡수 인프라** (`upstream-prs.yml` + `vendor-patches/{upstream,self}/` + 첫 cherry-pick 1건 시연 — withfig 측 + aws 측 양쪽).
-  - **4주차 체크포인트**: 50개 spec 시나리오 통과 / latency p95 < 25 ms / tmux+2터미널 회귀 / uninstall 흔적 0.
+  - **4주차 체크포인트** ✅ **PASS (2026-06-07)**: 50개 spec 시나리오 통과 (`scenario_specs.rs` 54/54, git/docker/kubectl/npm/cargo/gh/brew/go/terraform/helm/pip) / latency p95 **0.055 ms** (<25 ms, 455× 여유) / tmux+2터미널 회귀 (`scripts/e2e-tmux-2term.sh` — cwd 격리 + 20-way 동시성) / uninstall 흔적 0 (nerv-shell strip 11종 + desktop_entry + uninstall-spec §4 atomic).
 - **5–10주차**: 1,484 spec 전체 Tier A/B 자동 변환 + 변환률 측정. `nerv doctor` 자동 감지 5종 완성. zsh 플러그인 매니저 패키지 (`nerv-omz`, `nerv-zsh`) e2e. **figterm (`nerv-pty`) opt-in 통합** + 서명/공증 자동화. **rquickjs Tier C opt-in** PoC.
   - **10주차 베타 체크포인트**: 내부 dogfooding 2주.
 - **11–14주차**: Homebrew tap 공개, 30초 KPI 자동 측정 CI, 매니저 e2e CI, 문서 6종 v1.4 완비, v1.0 출시.
