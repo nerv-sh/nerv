@@ -112,7 +112,7 @@
 - figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2+3a+3b 완료** (위 §3 참조). 인라인 ghost + popup(박스 chrome) + 네비 + frecency 작동, nervd UDS 재배선, 0-row 클램프, ZLE 팝업 컬럼 정렬, e2e PASS. Phase 3 follow-up 전부 완료.
 - E5 manifest (depth=2 활성화 완료 — 위 §3)
 - 브랜드 strip 잔여 (defer): RUNTIME_DIR_NAME / DATA_DIR_NAME / Linux package name / desktop entry 일부는 후속 PR 에서 정리
-- aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. 다음 단계: production binary 가 `quickjs` 켜고 출시할지 결정 (PLAN §0.2 opt-in 정책 검토 필요).
+- aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. **출시 결정 확정 (2026-06-07)**: Tier C 실행률 e2e = **0%** (473 캡처 / 0 실행) → `--features quickjs` scaffold 는 유지하되 **production 기본 OFF, 출시 바이너리 미동봉** (opt-in 만). PLAN §0.2 JS generator 행 + `docs/findings/tier-c-quickjs-e2e.md` 갱신. 재개 조건 = async Promise drain + `__awaiter`/shell host-global 주입 (finding §Root causes).
 
 ## 4. 절대 깨면 안 되는 불변식
 

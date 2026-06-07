@@ -25,7 +25,7 @@
 | 상위 의존 | `aws/amazon-q-developer-cli-autocomplete` (Apache-2.0 + MIT, 2026-02-03 활성) 의 Rust crates 흡수 |
 | 흡수 방식 | `vendor/aws-autocomplete/` 미수정 mirror (drift 감지) + `crates/nerv-*` 에 `git filter-repo` 로 9개 crate strip+rename 임포트 |
 | TS 엔진 처리 | `packages/autocomplete-parser/` + `packages/shell-parser/` 는 subtree 하지 않음. `docs/reference/` 에 복사 → Rust 1:1 포팅 |
-| JS generator | M0 = Tier A/B JSON only (현 정책 유지). M1 = **rquickjs** opt-in (Tier C 회복). deno_core 비채택 (~30MB 과잉) |
+| JS generator | M0 = Tier A/B JSON only (현 정책 유지). M1 = **rquickjs** opt-in (Tier C 회복). deno_core 비채택 (~30MB 과잉). **⚠️ 출시 결정 (2026-06-07): Tier C 실행률 e2e 검증 = 0% (473 캡처 / 0 실행, async 未drain + `__awaiter` 미정의). `--features quickjs` 는 scaffold 유지하되 production 기본 OFF 확정 — opt-in 만, 출시 바이너리 미동봉. 상세 = `docs/findings/tier-c-quickjs-e2e.md`** |
 | Edit-buffer 인터셉트 | M0 = 기존 ZLE widget 유지 (latency 검증 우선). M1 = **figterm opt-in 추가** (bash/fish 도달 + ANSI 엣지케이스 해소). 두 path 사용자 선택 |
 | 새 비목표 | deno_core 임베드, fig_desktop webview UI, Q chat/AI 기능 (모두 strip 대상) |
 
