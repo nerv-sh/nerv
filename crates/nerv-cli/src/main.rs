@@ -94,6 +94,8 @@ enum Shell {
     Zsh,
     /// bash reaches autocomplete only through the PTY shim (no ZLE).
     Bash,
+    /// fish reaches autocomplete only through the PTY shim.
+    Fish,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -183,48 +185,76 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 Ok(())
             }
         }
-        Shell::Bash => cmd_init_bash(shell_script),
+        Shell::Bash => cmd_init_pty_only(shell_script, PtyShell::Bash),
+        Shell::Fish => cmd_init_pty_only(shell_script, PtyShell::Fish),
     }
 }
 
-/// bash integration. Unlike zsh there is no ZLE widget path — bash gets
-/// inline autocomplete only via the PTY shim (PLAN §6.2), so the inner
-/// hook emits the PTY bootstrap when `NERV_PTY=1` and otherwise prints a
-/// one-line note (the `eval` stays a no-op so the user's shell is fine).
-fn cmd_init_bash(shell_script: bool) -> anyhow::Result<()> {
+/// Shells that reach autocomplete only through the PTY shim (no ZLE).
+#[derive(Clone, Copy)]
+enum PtyShell {
+    Bash,
+    Fish,
+}
+
+impl PtyShell {
+    fn name(self) -> &'static str {
+        match self {
+            PtyShell::Bash => "bash",
+            PtyShell::Fish => "fish",
+        }
+    }
+
+    /// The `export`/`set` line that pins NERV_PTY_BIN, in the shell's own
+    /// syntax. fish uses `set -gx`, POSIX shells use `export`.
+    fn export_pty_bin(self, pty_bin: &str) -> String {
+        match self {
+            PtyShell::Bash => format!("export NERV_PTY_BIN={pty_bin:?}"),
+            PtyShell::Fish => format!("set -gx NERV_PTY_BIN {pty_bin:?}"),
+        }
+    }
+
+    fn snippet(self) -> &'static str {
+        match self {
+            PtyShell::Bash => include_str!("../../../shell-integrations/bash/_nerv-pty.bash"),
+            PtyShell::Fish => include_str!("../../../shell-integrations/fish/_nerv-pty.fish"),
+        }
+    }
+}
+
+/// bash/fish integration. Unlike zsh there is no ZLE widget path — these
+/// shells get inline autocomplete only via the PTY shim (PLAN §6.2), so
+/// the inner hook emits the PTY bootstrap when `NERV_PTY=1` and otherwise
+/// prints a one-line note (the sourced output stays empty so shell
+/// startup is unaffected).
+fn cmd_init_pty_only(shell_script: bool, shell: PtyShell) -> anyhow::Result<()> {
     let bin = std::env::current_exe()?.to_string_lossy().into_owned();
     if !shell_script {
-        // Outer block for ~/.bashrc; same markers as zsh so the
-        // uninstaller strips both identically.
+        // Outer rc block; same markers as zsh so the uninstaller strips
+        // every shell's block identically.
         let block = nerv_shell::init_block(
             &bin,
             env!("CARGO_PKG_VERSION"),
             "TODO-RFC3339-timestamp",
-            "bash",
+            shell.name(),
         );
         print!("{block}");
         return Ok(());
     }
 
     if std::env::var_os("NERV_PTY").is_none() {
-        // E-tone note (error-states §4): one grey line, no apology. The
-        // eval produces no stdout so bash startup is unaffected.
+        // E-tone note (error-states §4): one grey line, no apology.
         eprintln!(
-            "[nerv] bash autocomplete requires NERV_PTY=1 — export NERV_PTY=1 before launching bash."
+            "[nerv] {0} autocomplete requires NERV_PTY=1 — export NERV_PTY=1 before launching {0}.",
+            shell.name()
         );
         return Ok(());
     }
     if let Some(pty_bin) = resolve_pty_bin_for_init(&bin) {
-        println!("export NERV_PTY_BIN={pty_bin:?}");
+        println!("{}", shell.export_pty_bin(&pty_bin));
     }
-    print!("{}", bash_pty_snippet());
+    print!("{}", shell.snippet());
     Ok(())
-}
-
-/// The bash PTY-shim bootstrap. bash has no ZLE flavor, so this is the
-/// only bash snippet.
-fn bash_pty_snippet() -> &'static str {
-    include_str!("../../../shell-integrations/bash/_nerv-pty.bash")
 }
 
 /// Returns the zsh integration snippet to emit for the inner hook.
@@ -1504,7 +1534,7 @@ mod tests {
     /// emitter, re-exec nerv-pty, and self-skip when NERV_PTY is unset.
     #[test]
     fn bash_pty_snippet_is_pty_bootstrap() {
-        let body = bash_pty_snippet();
+        let body = PtyShell::Bash.snippet();
         // OSC 697 prompt markers + session correlation.
         assert!(body.contains("697"));
         assert!(body.contains("NERV_PTY_SESSION_ID"));
@@ -1518,6 +1548,38 @@ mod tests {
         assert!(body.contains("NERV_PTY"));
         // Must NOT define the zsh ZLE widget global.
         assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// fish bootstrap: PTY-only, fish-syntax, must carry the mandatory
+    /// `Shell=fish` marker and re-exec nerv-pty.
+    #[test]
+    fn fish_pty_snippet_is_pty_bootstrap() {
+        let body = PtyShell::Fish.snippet();
+        assert!(body.contains("697"));
+        assert!(body.contains("NERV_PTY_SESSION_ID"));
+        // fish event hook + prompt wrap (not bash's PROMPT_COMMAND).
+        assert!(body.contains("--on-event fish_prompt"));
+        assert!(body.contains("function fish_prompt"));
+        // Same gating requirement as bash.
+        assert!(body.contains("Shell=fish"));
+        // fish-syntax re-exec.
+        assert!(body.contains("exec $__nerv_pty_bin -- $SHELL"));
+        assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// fish pins NERV_PTY_BIN with `set -gx`, bash with `export`.
+    #[test]
+    fn pty_shell_export_uses_native_syntax() {
+        assert!(
+            PtyShell::Bash
+                .export_pty_bin("/x/nerv-pty")
+                .starts_with("export NERV_PTY_BIN=")
+        );
+        assert!(
+            PtyShell::Fish
+                .export_pty_bin("/x/nerv-pty")
+                .starts_with("set -gx NERV_PTY_BIN ")
+        );
     }
 
     /// `resolve_pty_bin_for_init` returns Some(path) when a sibling

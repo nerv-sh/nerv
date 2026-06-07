@@ -38,19 +38,26 @@ pub fn init_block(
     installed_at_iso8601: &str,
     shell: &str,
 ) -> String {
+    // fish is not POSIX: it sources command output via `| source`, not
+    // the POSIX `eval "$(...)"`. zsh/bash use the POSIX form.
+    let eval_line = if shell == "fish" {
+        format!("{bin_path} init fish --shell-script | source")
+    } else {
+        format!("eval \"$({bin_path} init {shell} --shell-script)\"")
+    };
     format!(
         "{start}\n\
          # Managed by `nerv init {shell}`. Do not edit between markers.\n\
          # Version: {version}\n\
          # Installed: {when}\n\
-         eval \"$({bin} init {shell} --shell-script)\"\n\
+         {eval_line}\n\
          {end}\n",
         start = MARKER_START,
         end = MARKER_END,
         shell = shell,
         version = version,
         when = installed_at_iso8601,
-        bin = bin_path,
+        eval_line = eval_line,
     )
 }
 
@@ -120,6 +127,17 @@ mod tests {
         assert!(b.contains("eval \"$(/opt/homebrew/bin/nerv init bash --shell-script)\""));
         assert!(b.contains("Managed by `nerv init bash`"));
         assert!(!b.contains("init zsh"));
+    }
+
+    #[test]
+    fn init_block_fish_uses_source_pipe_not_posix_eval() {
+        let b = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "fish");
+        assert!(b.starts_with(MARKER_START));
+        assert!(b.trim_end().ends_with(MARKER_END));
+        // fish sources via `| source`, never the POSIX `eval "$(...)"`.
+        assert!(b.contains("/opt/homebrew/bin/nerv init fish --shell-script | source"));
+        assert!(!b.contains("eval \"$("));
+        assert!(b.contains("Managed by `nerv init fish`"));
     }
 
     #[test]
