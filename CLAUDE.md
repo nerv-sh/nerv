@@ -61,7 +61,8 @@
 - ✅ **UTF-8 char boundary 클램프**: `cursor` 가 multibyte (한글/CJK/emoji) 중간에 떨어질 때 `clamp_cursor_to_char_boundary` 로 직전 boundary 까지 감소. `'ㅊㅇ .'` 입력 시 패닉 → empty 응답.
 - ✅ **inline ghost text**: top 제안 trailing 부분을 `POSTDISPLAY` 에 dim grey 로 표시. Right-arrow (line 끝일 때만) 로 accept. LBUFFER 끝이 공백이거나 prefix 비면 ghost off — "토큰 타이핑 중" 시그널 일치.
 - ✅ **frecency ranking**: per-spec usage TSV (`~/Library/Caches/nerv/frecency.tsv`). 데몬이 `Request::RecordAccept` 받아 in-memory + opportunistic flush. score = `(count-1) / (1+age_days)` — single pick = no boost, 2+ picks 부터. daemon post-sort 가 alpha 결과를 boost-first 로 재정렬. `NERV_FRECENCY_FILE=-` 로 테스트 격리.
-- ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지 (E5 manifest 도입 후)
+- ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지, **E5 spec schema mismatch**
+- ✅ **E5 spec schema 버전 게이트** (error-states §3.5): `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2` + `check_schema(dir) -> {Ok/Missing/Mismatch}`). build-specs 가 `manifest.json` (schema_version) 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` 차단 (missing=관대, 구버전 호환). CLI bridge 가 schema reason 감지 → exit 3 → `_nerv.zsh` E5 회색 1줄 (`__NERV_E5_SHOWN`). doctor red row. 5 manifest unit + 1 daemon e2e (`schema_mismatch_disables_completion`).
 - ✅ **widget UX**: sliding window (`MAX_VIS = min(LINES-6, 10)`), footer 카운터 `[k/total]` 항상 표시, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow 모두 wrap-cycle, precmd 에서 self-insert/accept-line/backward-delete/space 재바인딩 (Q/oh-my-zsh/fzf-tab hijack 방지), description 매행 → footer 단일 라인 (Fig style).
 - ✅ SIGPIPE → SIG_DFL: `nerv spec list | head` panic 제거
 - ✅ **CI 확장**: rust 1.85 핀 + `brew install protobuf` (nerv-proto build.rs 회피) + `build-specs-smoke` (plain+gzip vs 9 fixture) + `ts-to-json` (bun convert:one + JSON sanity) job. **ARM64-only** 매트릭스 (macos-13 queue 너무 길어서 drop).
@@ -110,7 +111,7 @@
 - bash / fish 지원 (큼)
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2+3a+3b 완료** (위 §3 참조). 인라인 ghost + popup(박스 chrome) + 네비 + frecency 작동, nervd UDS 재배선, 0-row 클램프, ZLE 팝업 컬럼 정렬, e2e PASS. Phase 3 follow-up 전부 완료.
-- E5 manifest (depth=2 활성화 완료 — 위 §3)
+- ✅ E5 manifest 완료 (위 §3 — schema 버전 게이트 + doctor red + ZLE 회색 1줄)
 - 브랜드 strip 잔여 (defer): RUNTIME_DIR_NAME / DATA_DIR_NAME / Linux package name / desktop entry 일부는 후속 PR 에서 정리
 - aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. **출시 결정 확정 (2026-06-07)**: Tier C 실행률 e2e = **0%** (473 캡처 / 0 실행) → `--features quickjs` scaffold 는 유지하되 **production 기본 OFF, 출시 바이너리 미동봉** (opt-in 만). PLAN §0.2 JS generator 행 + `docs/findings/tier-c-quickjs-e2e.md` 갱신. 재개 조건 = async Promise drain + `__awaiter`/shell host-global 주입 (finding §Root causes).
 
@@ -141,6 +142,7 @@
 | 4-field wire format | `nerv _complete` 출력은 `insertion\tdisplay\tdescription\ticon` 4-tab. icon 비면 빈 문자열. **field 추가 시 widget parser 동시 갱신 필수** | `crates/nerv-cli/src/main.rs::print_suggestion` + `_nerv.zsh` |
 | parserDirectives 적용 | `flagsArePosixNoncompliant` 는 root spec 의 directive 만 체크 (subcommand chain 상속 X). Go/docker/kubectl 처럼 root 부터 일관된 스타일이 권장 | `nerv-engine/src/spec_parser.rs::ShortOption` arm |
 | getQueryTerm 범위 | string form 만 (single-byte delim chars). function form 은 Tier C → M1. delim chars 마지막 위치에서 split, insertion 에 context prefix 보존 | `nerv-engine/src/complete.rs::split_by_query_term` |
+| spec schema 버전 (E5) | `SUPPORTED_SCHEMA_VERSION` bump 시 build-specs(manifest 작성) + daemon(게이트) + error-states §3.5 동시 갱신. **manifest 부재 = 관대 (구버전 호환), mismatch 만 차단**. corrupt manifest = missing 취급 | `nerv-engine/src/manifest.rs` |
 
 ## 5. 자주 쓰는 명령
 
@@ -217,7 +219,7 @@ crates/
   # 기존 보존
   nerv-cli/        # `nerv` 바이너리 (clap, 5 cmd + hidden _complete IPC bridge)
   nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
-  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / paths / ranker)
+  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / ipc_client (nervd UDS 클라 단일소스) / manifest (E5 schema 게이트) / paths / ranker)
                    #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer, --compress 플래그)
                    #   + tests/fixtures/specs/{git,echo,docker,kubectl,npm,cargo,gh,brew,make}.json (9 hand-rolled)
                    #   + tests/fixtures/converted/ (.gitignore; bun 변환 결과 715 spec; depth=1, 176MB plain or 10MB gzipped)
