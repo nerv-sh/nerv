@@ -108,7 +108,7 @@
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
-- bash / fish 지원 (큼)
+- ✅ **bash 지원 (PTY 경로 MVP)**: `nerv init bash` → `shell-integrations/bash/_nerv-pty.bash`. bash 는 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. inner 가 PROMPT_COMMAND 로 OSC 697 (`Shell=bash` 필수 — `can_send_edit_buffer` 게이트) + StartPrompt/EndPrompt/NewCmd PS1 wrap. PreExec(DEBUG trap) defer (naive trap 이 첫 prompt 前 발화 → shadow term "executing" 고착 → ghost 억제; bash-preexec 정식 bookkeeping 필요). ghost 작동 e2e PASS (`scripts/e2e-pty-bash.py`). `init_block` shell 파라미터화. fish 미지원 (큼)
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2+3a+3b 완료** (위 §3 참조). 인라인 ghost + popup(박스 chrome) + 네비 + frecency 작동, nervd UDS 재배선, 0-row 클램프, ZLE 팝업 컬럼 정렬, e2e PASS. Phase 3 follow-up 전부 완료.
 - ✅ E5 manifest 완료 (위 §3 — schema 버전 게이트 + doctor red + ZLE 회색 1줄)
@@ -238,6 +238,8 @@ crates/
   nerv-diag/       # ← fig_diagnostic
 
 shell-integrations/zsh/_nerv.zsh     # ZLE widget (M0 유지, M1 figterm 도입 시 deprecate)
+shell-integrations/zsh/_nerv-pty.zsh # zsh PTY bootstrap (NERV_PTY=1)
+shell-integrations/bash/_nerv-pty.bash # bash PTY bootstrap (PTY 전용, Shell=bash 마커 필수)
 tools/ts-to-json/                    # bun-based TS→JSON 변환 (M1 entry; 715 spec 자동 변환)
 packaging/homebrew/nerv.rb           # Homebrew Formula 템플릿 (auto-bumped on release)
 vendor/withfig-autocomplete/         # subtree, ISC, pin = aef52acf… (TS specs 1,484)

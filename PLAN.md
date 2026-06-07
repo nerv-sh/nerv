@@ -64,7 +64,7 @@ PRD 승인 이후의 핵심 마일스톤. PLAN.md 정책은 변경 없음 — *�
 **아직 인 진척 (M1 이후)**:
 - M0-8 서명/공증 (Apple Developer 계정 + 인프라 의존)
 - aws Phase 3 (closure 가 token 에 의존하는 624 케이스 — rquickjs opt-in 필요)
-- bash / fish 지원 (큼)
+- ✅ **bash 지원 (PTY 경로, MVP)**: `nerv init bash` → `_nerv-pty.bash` (OSC 697 markers via PROMPT_COMMAND, `Shell=bash` 필수). bash 는 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. ghost 작동 (`scripts/e2e-pty-bash.py` PASS). PreExec(DEBUG trap)는 defer — prompt boundary 마커만으로 ghost 충분. fish 는 미지원 (큼)
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in 실런타임 (`NERV_PTY=1`) — main.rs 980줄 + figterm-ipc + remote-ipc 정합 필요
 - E5 manifest, spec depth=2+ (압축으로 무난, memory cost 평가)

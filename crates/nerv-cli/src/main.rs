@@ -92,6 +92,8 @@ enum SpecCmd {
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 enum Shell {
     Zsh,
+    /// bash reaches autocomplete only through the PTY shim (no ZLE).
+    Bash,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -175,12 +177,54 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                     &bin,
                     env!("CARGO_PKG_VERSION"),
                     "TODO-RFC3339-timestamp",
+                    "zsh",
                 );
                 print!("{block}");
                 Ok(())
             }
         }
+        Shell::Bash => cmd_init_bash(shell_script),
     }
+}
+
+/// bash integration. Unlike zsh there is no ZLE widget path — bash gets
+/// inline autocomplete only via the PTY shim (PLAN §6.2), so the inner
+/// hook emits the PTY bootstrap when `NERV_PTY=1` and otherwise prints a
+/// one-line note (the `eval` stays a no-op so the user's shell is fine).
+fn cmd_init_bash(shell_script: bool) -> anyhow::Result<()> {
+    let bin = std::env::current_exe()?.to_string_lossy().into_owned();
+    if !shell_script {
+        // Outer block for ~/.bashrc; same markers as zsh so the
+        // uninstaller strips both identically.
+        let block = nerv_shell::init_block(
+            &bin,
+            env!("CARGO_PKG_VERSION"),
+            "TODO-RFC3339-timestamp",
+            "bash",
+        );
+        print!("{block}");
+        return Ok(());
+    }
+
+    if std::env::var_os("NERV_PTY").is_none() {
+        // E-tone note (error-states §4): one grey line, no apology. The
+        // eval produces no stdout so bash startup is unaffected.
+        eprintln!(
+            "[nerv] bash autocomplete requires NERV_PTY=1 — export NERV_PTY=1 before launching bash."
+        );
+        return Ok(());
+    }
+    if let Some(pty_bin) = resolve_pty_bin_for_init(&bin) {
+        println!("export NERV_PTY_BIN={pty_bin:?}");
+    }
+    print!("{}", bash_pty_snippet());
+    Ok(())
+}
+
+/// The bash PTY-shim bootstrap. bash has no ZLE flavor, so this is the
+/// only bash snippet.
+fn bash_pty_snippet() -> &'static str {
+    include_str!("../../../shell-integrations/bash/_nerv-pty.bash")
 }
 
 /// Returns the zsh integration snippet to emit for the inner hook.
@@ -1200,7 +1244,7 @@ mod tests {
         let zshrc = tmp.join(".zshrc");
         let original = format!(
             "alias ll='ls -la'\n{}# trailing user comment\n",
-            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts")
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh")
         );
         std::fs::write(&zshrc, &original).unwrap();
 
@@ -1337,7 +1381,7 @@ mod tests {
         std::fs::write(tmp.join(".zshrc"), plain_rc).unwrap();
         let env_with_block = format!(
             "{}export FOO=bar\n",
-            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh"),
         );
         std::fs::write(tmp.join(".zshenv"), &env_with_block).unwrap();
         let mut log = UninstallLog::new(true);
@@ -1365,7 +1409,7 @@ mod tests {
     fn strip_zsh_hooks_counts_multiple_blocks_per_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-multi-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts");
+        let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh");
         let zshrc = format!("alias a=1\n{blk}alias b=2\n{blk}alias c=3\n");
         std::fs::write(tmp.join(".zshrc"), &zshrc).unwrap();
         let mut log = UninstallLog::new(true);
@@ -1387,7 +1431,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let body = format!(
             "alias x=ls\n{}\n",
-            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh"),
         );
         std::fs::write(tmp.join(".zshrc"), &body).unwrap();
         let mut log = UninstallLog::new(true);
@@ -1453,6 +1497,26 @@ mod tests {
         assert!(body.contains("NERV_PTY_BIN"));
         // Mutual exclusion: PTY snippet must NOT define the ZLE
         // widget global.
+        assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// The bash bootstrap is PTY-only: it must carry the OSC 697 marker
+    /// emitter, re-exec nerv-pty, and self-skip when NERV_PTY is unset.
+    #[test]
+    fn bash_pty_snippet_is_pty_bootstrap() {
+        let body = bash_pty_snippet();
+        // OSC 697 prompt markers + session correlation.
+        assert!(body.contains("697"));
+        assert!(body.contains("NERV_PTY_SESSION_ID"));
+        // bash prompt hook (not zsh's add-zsh-hook precmd).
+        assert!(body.contains("PROMPT_COMMAND"));
+        // Shell=bash is mandatory — the shadow term gates edit-buffer
+        // reads on a recognized shell, so dropping it kills the ghost.
+        assert!(body.contains("Shell=bash"));
+        // Hands off to the shim and self-skips without opt-in.
+        assert!(body.contains("exec \"$__NERV_PTY_BIN\""));
+        assert!(body.contains("NERV_PTY"));
+        // Must NOT define the zsh ZLE widget global.
         assert!(!body.contains("__NERV_LOADED"));
     }
 

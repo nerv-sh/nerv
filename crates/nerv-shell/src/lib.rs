@@ -19,25 +19,35 @@ pub const MARKER_START: &str = "# >>> nerv >>>";
 /// Marker that closes a Nerv-managed block in `~/.zshrc`.
 pub const MARKER_END: &str = "# <<< nerv <<<";
 
-/// Generate the `~/.zshrc` block that `nerv init zsh >> ~/.zshrc` produces.
+/// Generate the rc-file block that `nerv init <shell> >> ~/.<shell>rc`
+/// produces.
 ///
 /// `bin_path` is the absolute path to the `nerv` binary (typically
 /// `/opt/homebrew/bin/nerv` from Homebrew). `version` and `installed_at`
-/// are written into the metadata comment lines.
+/// are written into the metadata comment lines. `shell` is the shell name
+/// (`zsh` / `bash`) used in the managed comment and the `eval` line — the
+/// `# >>> nerv >>>` markers themselves stay identical across shells so the
+/// uninstaller strips both the same way.
 ///
 /// The output starts with `MARKER_START` and ends with `MARKER_END`, no
 /// trailing newline beyond the closing marker line. Callers append as
 /// appropriate.
-pub fn init_block(bin_path: &str, version: &str, installed_at_iso8601: &str) -> String {
+pub fn init_block(
+    bin_path: &str,
+    version: &str,
+    installed_at_iso8601: &str,
+    shell: &str,
+) -> String {
     format!(
         "{start}\n\
-         # Managed by `nerv init zsh`. Do not edit between markers.\n\
+         # Managed by `nerv init {shell}`. Do not edit between markers.\n\
          # Version: {version}\n\
          # Installed: {when}\n\
-         eval \"$({bin} init zsh --shell-script)\"\n\
+         eval \"$({bin} init {shell} --shell-script)\"\n\
          {end}\n",
         start = MARKER_START,
         end = MARKER_END,
+        shell = shell,
         version = version,
         when = installed_at_iso8601,
         bin = bin_path,
@@ -88,11 +98,28 @@ mod tests {
 
     #[test]
     fn init_block_is_well_formed() {
-        let b = init_block("/opt/homebrew/bin/nerv", "1.0.0", "2026-04-29T15:30:00Z");
+        let b = init_block(
+            "/opt/homebrew/bin/nerv",
+            "1.0.0",
+            "2026-04-29T15:30:00Z",
+            "zsh",
+        );
         assert!(b.starts_with(MARKER_START));
         assert!(b.contains("Version: 1.0.0"));
         assert!(b.contains("eval \"$(/opt/homebrew/bin/nerv init zsh --shell-script)\""));
         assert!(b.trim_end().ends_with(MARKER_END));
+    }
+
+    #[test]
+    fn init_block_bash_uses_bash_in_eval_and_markers_unchanged() {
+        let b = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "bash");
+        // Markers are shell-agnostic (uninstaller strips both the same).
+        assert!(b.starts_with(MARKER_START));
+        assert!(b.trim_end().ends_with(MARKER_END));
+        // The eval + managed comment reference bash, not zsh.
+        assert!(b.contains("eval \"$(/opt/homebrew/bin/nerv init bash --shell-script)\""));
+        assert!(b.contains("Managed by `nerv init bash`"));
+        assert!(!b.contains("init zsh"));
     }
 
     #[test]
@@ -102,7 +129,7 @@ mod tests {
              alias ll=\"ls -la\"\n\
              {block}\
              # user comment after\n",
-            block = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts"),
+            block = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "zsh"),
         );
         let out = strip_blocks(&zshrc);
         assert_eq!(count_blocks(&out), 0);
@@ -113,7 +140,7 @@ mod tests {
 
     #[test]
     fn strip_removes_multiple_blocks_idempotently() {
-        let blk = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts");
+        let blk = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "zsh");
         let zshrc = format!("a\n{blk}b\n{blk}c\n");
         let stripped = strip_blocks(&zshrc);
         assert_eq!(count_blocks(&stripped), 0);
@@ -135,7 +162,7 @@ mod tests {
 
     #[test]
     fn strip_handles_only_block_no_user_code() {
-        let zshrc = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts");
+        let zshrc = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "zsh");
         assert_eq!(strip_blocks(&zshrc), "");
     }
 
@@ -166,7 +193,7 @@ mod tests {
 
     #[test]
     fn count_blocks_counts_start_markers_only() {
-        let blk = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts");
+        let blk = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "zsh");
         let zshrc = format!("a\n{blk}b\n{blk}c\n{blk}");
         assert_eq!(count_blocks(&zshrc), 3);
         assert_eq!(count_blocks(""), 0);
@@ -176,7 +203,7 @@ mod tests {
     fn strip_tolerates_crlf_line_endings() {
         // Windows-style \r\n on every line. trim_end_matches drops
         // both CR and LF, so marker detection still works.
-        let blk_lf = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts");
+        let blk_lf = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "zsh");
         let zshrc_crlf = format!("a\r\n{}", blk_lf.replace('\n', "\r\n"));
         let out = strip_blocks(&zshrc_crlf);
         assert_eq!(count_blocks(&out), 0);
@@ -187,7 +214,7 @@ mod tests {
     fn init_block_preserves_bin_path_with_spaces() {
         // macOS Applications path can have spaces. The eval line
         // should round-trip them verbatim.
-        let b = init_block("/Applications/My Tools/nerv", "1.0.0", "ts");
+        let b = init_block("/Applications/My Tools/nerv", "1.0.0", "ts", "zsh");
         assert!(b.contains("/Applications/My Tools/nerv"));
         assert!(b.contains("Version: 1.0.0"));
     }
