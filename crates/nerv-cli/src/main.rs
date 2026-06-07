@@ -178,7 +178,7 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 let block = nerv_shell::init_block(
                     &bin,
                     env!("CARGO_PKG_VERSION"),
-                    "TODO-RFC3339-timestamp",
+                    &installed_at_rfc3339(),
                     "zsh",
                 );
                 print!("{block}");
@@ -235,7 +235,7 @@ fn cmd_init_pty_only(shell_script: bool, shell: PtyShell) -> anyhow::Result<()> 
         let block = nerv_shell::init_block(
             &bin,
             env!("CARGO_PKG_VERSION"),
-            "TODO-RFC3339-timestamp",
+            &installed_at_rfc3339(),
             shell.name(),
         );
         print!("{block}");
@@ -1132,6 +1132,15 @@ fn strip_zsh_hooks(
 
 /// Minimal timestamp generator: YYYY-MM-DDTHH-MM-SS (filesystem-safe).
 /// Uses SystemTime to avoid pulling chrono in.
+/// RFC 3339 / ISO-8601 UTC timestamp for the marker block's
+/// `# Installed:` line (e.g. `2026-06-07T08:30:00Z`). Falls back to
+/// `"unknown"` if formatting somehow fails.
+fn installed_at_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
 fn chrono_like_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -1251,6 +1260,15 @@ fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_at_rfc3339_is_well_formed() {
+        let ts = installed_at_rfc3339();
+        // RFC 3339 UTC: contains the date/time separator and a zone.
+        assert!(ts.contains('T'), "missing T separator: {ts}");
+        assert!(ts.ends_with('Z') || ts.contains('+'), "missing zone: {ts}");
+        assert!(ts.starts_with("20"), "implausible year: {ts}");
+    }
 
     #[test]
     fn chrono_like_timestamp_is_numeric_and_growing() {

@@ -21,6 +21,7 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+time = { workspace = true }
 nerv-engine = { workspace = true }
 nerv-shell = { workspace = true }
 
