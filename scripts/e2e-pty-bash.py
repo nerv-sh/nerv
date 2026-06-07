@@ -112,11 +112,21 @@ def main():
         if not ghost_ok:
             log(f"  tail repr: {out[-300:]!r}")
 
-        if ghost_ok:
-            log("PASS — bash PTY ghost e2e")
+        # PreExec: submitting a command emits the figterm PreExec marker
+        # (the gated DEBUG trap must fire on a real command, NOT during
+        # startup — the latter would have already broken the ghost above).
+        os.write(master, b"\r")
+        submit = drain(master, 1.5)
+        preexec_ok = b"\x1b]697;PreExec\x07" in submit
+        log(f"preexec on submit: {preexec_ok}")
+        if not preexec_ok:
+            log(f"  submit tail: {submit[-200:]!r}")
+
+        if ghost_ok and preexec_ok:
+            log("PASS — bash PTY ghost + preexec e2e")
             rc = 0
         else:
-            log("FAIL — no ghost under bash; see tail above")
+            log("FAIL — see per-check output above")
 
         try:
             os.write(master, b"\x03")

@@ -64,7 +64,7 @@ PRD 승인 이후의 핵심 마일스톤. PLAN.md 정책은 변경 없음 — *�
 **아직 인 진척 (M1 이후)**:
 - M0-8 서명/공증 (Apple Developer 계정 + 인프라 의존)
 - aws Phase 3 (closure 가 token 에 의존하는 624 케이스 — rquickjs opt-in 필요)
-- ✅ **bash + fish 지원 (PTY 경로, MVP)**: `nerv init {bash,fish}` → `_nerv-pty.{bash,fish}` (OSC 697 markers, `Shell={bash,fish}` 필수). 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. ghost 작동 (`scripts/e2e-pty-{bash,fish}.py` PASS). bash=PROMPT_COMMAND, fish=`--on-event fish_prompt`+prompt wrap. PreExec 는 defer (bash DEBUG trap 이 첫 prompt 前 발화 → shadow term 고착; prompt boundary 마커만으로 ghost 충분). **fish 주의**: (1) fish 4.x 는 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 — 실 터미널은 응답하나 e2e harness 는 emulate 필요. (2) fish 자체 grey autosuggestion 과 nerv ghost 공존 (사용자가 한쪽 비활성 선택 가능). `init_block` 이 fish 용 `| source` 문법 emit (POSIX `eval` 아님)
+- ✅ **bash + fish 지원 (PTY 경로, MVP)**: `nerv init {bash,fish}` → `_nerv-pty.{bash,fish}` (OSC 697 markers, `Shell={bash,fish}` 필수). 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. ghost 작동 (`scripts/e2e-pty-{bash,fish}.py` PASS). bash=PROMPT_COMMAND, fish=`--on-event fish_prompt`+prompt wrap. **PreExec 구현**: fish=`--on-event fish_preexec` (clean), bash=gated DEBUG trap (2-guard: `PROMPT_SHOWN` 으로 startup 발화 차단 + `PREEXEC_DONE` 으로 커맨드당 1회). submit 시 발화 e2e 검증. **fish 주의**: (1) fish 4.x 는 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 — 실 터미널은 응답하나 e2e harness 는 emulate 필요. (2) fish 자체 grey autosuggestion 과 nerv ghost 공존 (사용자가 한쪽 비활성 선택 가능). `init_block` 이 fish 용 `| source` 문법 emit (POSIX `eval` 아님)
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in 실런타임 (`NERV_PTY=1`) — main.rs 980줄 + figterm-ipc + remote-ipc 정합 필요
 - E5 manifest, spec depth=2+ (압축으로 무난, memory cost 평가)
