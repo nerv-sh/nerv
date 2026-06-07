@@ -1085,47 +1085,29 @@ impl UninstallLog {
 // ---------- internal: _complete (M0-1 IPC bridge) ----------
 
 fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
-    let sock_path = paths::socket_path().ok_or_else(|| anyhow::anyhow!("HOME unset"))?;
+    let req = nerv_engine::Request::Complete {
+        line: line.to_string(),
+        cursor,
+        // Capture the client's cwd so filesystem-aware generators
+        // (package.json scripts, etc.) see the user's working dir,
+        // not the daemon's. Falls back to None on error so the
+        // daemon picks its own cwd as a last resort.
+        cwd: std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string())),
+    };
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()?;
 
-    rt.block_on(async {
-        let stream = UnixStream::connect(&sock_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-
-        let req = nerv_engine::Request::Complete {
-            line: line.to_string(),
-            cursor,
-            // Capture the client's cwd so filesystem-aware generators
-            // (package.json scripts, etc.) see the user's working dir,
-            // not the daemon's. Falls back to None on error so the
-            // daemon picks its own cwd as a last resort.
-            cwd: std::env::current_dir()
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string())),
-        };
-        let mut json = serde_json::to_string(&req)?;
-        json.push('\n');
-        write_half.write_all(json.as_bytes()).await?;
-
-        let mut reader = BufReader::new(read_half);
-        let mut resp_line = String::new();
-        reader.read_line(&mut resp_line).await?;
-
-        let resp: Response = serde_json::from_str(resp_line.trim())?;
-        if let Response::Suggestions { items } = resp {
-            for s in &items {
-                print_suggestion(s);
-            }
+    // Any non-`Suggestions` response → no output → no popup in zsh.
+    if let Response::Suggestions { items } = rt.block_on(nerv_engine::ipc_client::query(&req))? {
+        for s in &items {
+            print_suggestion(s);
         }
-        // Any other response type → no output → no popup in zsh.
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 fn print_suggestion(s: &Suggestion) {
@@ -1138,31 +1120,16 @@ fn print_suggestion(s: &Suggestion) {
 }
 
 fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
-    let sock_path = paths::socket_path().ok_or_else(|| anyhow::anyhow!("HOME unset"))?;
+    let req = nerv_engine::Request::RecordAccept {
+        spec: spec.to_string(),
+        insertion: insertion.to_string(),
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()?;
-
-    rt.block_on(async {
-        let stream = UnixStream::connect(&sock_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let req = nerv_engine::Request::RecordAccept {
-            spec: spec.to_string(),
-            insertion: insertion.to_string(),
-        };
-        let mut json = serde_json::to_string(&req)?;
-        json.push('\n');
-        write_half.write_all(json.as_bytes()).await?;
-        // Drain the single-line response so the daemon can close
-        // the conn cleanly. We don't act on the body.
-        let mut reader = BufReader::new(read_half);
-        let mut resp_line = String::new();
-        let _ = reader.read_line(&mut resp_line).await;
-        anyhow::Ok(())
-    })
+    // We don't act on the ack body, just let the daemon record + close.
+    rt.block_on(nerv_engine::ipc_client::query(&req))?;
+    Ok(())
 }
 
 #[cfg(test)]

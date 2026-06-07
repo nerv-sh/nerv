@@ -30,6 +30,9 @@ flate2 = "1.1"
 notify = { workspace = true }
 toml = { workspace = true }
 unicode-width = { workspace = true }
+# Async UDS client to nervd (ipc_client) — the daemon wire protocol's
+# single source of truth, shared by the CLI bridge and the PTY shim.
+tokio = { workspace = true }
 # Optional Tier C executor — only compiled when --features quickjs.
 nerv-quickjs = { path = "../nerv-quickjs", optional = true }
 
