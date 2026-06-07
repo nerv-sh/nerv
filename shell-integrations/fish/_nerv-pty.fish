@@ -51,10 +51,13 @@ if set -q NERV_PTY_SESSION_ID
             __nerv_pty_osc "NewCmd=$NERV_PTY_SESSION_ID"
         end
 
-        # PreExec is intentionally omitted for parity with the bash MVP;
-        # the next prompt's StartPrompt resets the shadow term's state.
-        # (fish's fish_preexec event would make a clean PreExec trivial —
-        # a follow-up, PLAN §6.2.)
+        # PreExec: fish fires fish_preexec right after the user submits a
+        # command, before it runs. This tells the shadow term to stop
+        # offering completions while the command executes. fish's event
+        # is clean (no DEBUG-trap startup hazard), so we emit it directly.
+        function __nerv_pty_preexec --on-event fish_preexec
+            __nerv_pty_osc PreExec
+        end
     end
 else if set -q NERV_PTY
     # ---- Top-level: re-exec under nerv-pty -------------------------------

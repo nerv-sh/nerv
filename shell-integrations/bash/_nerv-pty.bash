@@ -39,13 +39,8 @@ if [[ -n "${NERV_PTY_SESSION_ID-}" ]]; then
   #      (can_send_edit_buffer), so without it no ghost/popup ever shows.
   #   2. Wrap PS1 with the Start/End/NewCmd markers bracketing the
   #      editable region. Mirrors _nerv-pty.zsh's precmd.
-  #
-  # We deliberately do NOT emit a PreExec marker (the figterm "command
-  # submitted" signal). The robust way to get it in bash is a DEBUG trap,
-  # but a naive trap fires before the first prompt and leaves the shadow
-  # term stuck in "executing" state — suppressing the ghost. A correct
-  # implementation needs bash-preexec's bookkeeping (deferred, PLAN §6.2);
-  # until then the next prompt's StartPrompt resets state.
+  #   3. Arm the PreExec gate: mark that a prompt has been shown and that
+  #      no command has run yet this cycle.
   __nerv_pty_precmd() {
     _nerv_pty_osc "Shell=bash"
     _nerv_pty_osc "Dir=$PWD"
@@ -55,13 +50,38 @@ if [[ -n "${NERV_PTY_SESSION_ID-}" ]]; then
       *697*) ;; # already wrapped
       *) PS1="${_NERV_PTY_SP}${PS1}${_NERV_PTY_EP}${_NERV_PTY_NC}" ;;
     esac
+    # Set the gate LAST so the DEBUG trap firing for precmd's own
+    # statements (above) is suppressed.
+    _NERV_PTY_PROMPT_SHOWN=1
+    _NERV_PTY_PREEXEC_DONE=
   }
+
+  # PreExec via a *gated* DEBUG trap (the figterm "command submitted"
+  # signal). A naive trap fires during shell startup — before the first
+  # prompt — and wedges the shadow term in "executing" state, killing the
+  # ghost. Two guards prevent that:
+  #   - _NERV_PTY_PROMPT_SHOWN: stays empty until the first precmd runs,
+  #     so nothing fires during rc sourcing / startup.
+  #   - _NERV_PTY_PREEXEC_DONE: fire at most once per command line; reset
+  #     by precmd. While precmd runs it is still set (from the previous
+  #     command), so the trap stays quiet for precmd's own statements.
+  _NERV_PTY_PROMPT_SHOWN=
+  _NERV_PTY_PREEXEC_DONE=1
+  __nerv_pty_debug() {
+    [[ -n "${COMP_LINE-}" ]] && return            # tab-completion, not a command
+    [[ -z "${_NERV_PTY_PROMPT_SHOWN-}" ]] && return
+    [[ -n "${_NERV_PTY_PREEXEC_DONE-}" ]] && return
+    _NERV_PTY_PREEXEC_DONE=1
+    _nerv_pty_osc PreExec
+  }
+
   # Prepend so we don't clobber a user's existing PROMPT_COMMAND.
   if [[ -n "${PROMPT_COMMAND-}" ]]; then
     PROMPT_COMMAND="__nerv_pty_precmd; ${PROMPT_COMMAND}"
   else
     PROMPT_COMMAND="__nerv_pty_precmd"
   fi
+  trap '__nerv_pty_debug' DEBUG
 
   return 0
 fi
