@@ -22,6 +22,7 @@
 //! relative cursor-up returns to the prompt — scroll-safe, unlike the
 //! absolute save/restore used for the overlay itself.
 
+use crate::ansi::{DOWN_COL0, ERASE_EOL, RESET, RESTORE, REVERSE, SAVE};
 use unicode_width::UnicodeWidthStr;
 
 /// One row in the popup.
@@ -41,13 +42,6 @@ pub struct Popup {
     offset: usize,
     max_vis: usize,
 }
-
-const SAVE: &str = "\x1b7";
-const RESTORE: &str = "\x1b8";
-const DOWN_COL0: &str = "\x1b[B\r"; // cursor down one row, then column 0
-const ERASE_EOL: &str = "\x1b[K";
-const REVERSE: &str = "\x1b[7m";
-const RESET: &str = "\x1b[0m";
 
 impl Popup {
     /// Build a popup. `max_vis` is clamped to at least 1. Returns `None`

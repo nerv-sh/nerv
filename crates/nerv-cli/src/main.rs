@@ -92,6 +92,10 @@ enum SpecCmd {
 #[derive(clap::ValueEnum, Debug, Clone, Copy)]
 enum Shell {
     Zsh,
+    /// bash reaches autocomplete only through the PTY shim (no ZLE).
+    Bash,
+    /// fish reaches autocomplete only through the PTY shim.
+    Fish,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -174,13 +178,83 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 let block = nerv_shell::init_block(
                     &bin,
                     env!("CARGO_PKG_VERSION"),
-                    "TODO-RFC3339-timestamp",
+                    &installed_at_rfc3339(),
+                    "zsh",
                 );
                 print!("{block}");
                 Ok(())
             }
         }
+        Shell::Bash => cmd_init_pty_only(shell_script, PtyShell::Bash),
+        Shell::Fish => cmd_init_pty_only(shell_script, PtyShell::Fish),
     }
+}
+
+/// Shells that reach autocomplete only through the PTY shim (no ZLE).
+#[derive(Clone, Copy)]
+enum PtyShell {
+    Bash,
+    Fish,
+}
+
+impl PtyShell {
+    fn name(self) -> &'static str {
+        match self {
+            PtyShell::Bash => "bash",
+            PtyShell::Fish => "fish",
+        }
+    }
+
+    /// The `export`/`set` line that pins NERV_PTY_BIN, in the shell's own
+    /// syntax. fish uses `set -gx`, POSIX shells use `export`.
+    fn export_pty_bin(self, pty_bin: &str) -> String {
+        match self {
+            PtyShell::Bash => format!("export NERV_PTY_BIN={pty_bin:?}"),
+            PtyShell::Fish => format!("set -gx NERV_PTY_BIN {pty_bin:?}"),
+        }
+    }
+
+    fn snippet(self) -> &'static str {
+        match self {
+            PtyShell::Bash => include_str!("../../../shell-integrations/bash/_nerv-pty.bash"),
+            PtyShell::Fish => include_str!("../../../shell-integrations/fish/_nerv-pty.fish"),
+        }
+    }
+}
+
+/// bash/fish integration. Unlike zsh there is no ZLE widget path — these
+/// shells get inline autocomplete only via the PTY shim (PLAN §6.2), so
+/// the inner hook emits the PTY bootstrap when `NERV_PTY=1` and otherwise
+/// prints a one-line note (the sourced output stays empty so shell
+/// startup is unaffected).
+fn cmd_init_pty_only(shell_script: bool, shell: PtyShell) -> anyhow::Result<()> {
+    let bin = std::env::current_exe()?.to_string_lossy().into_owned();
+    if !shell_script {
+        // Outer rc block; same markers as zsh so the uninstaller strips
+        // every shell's block identically.
+        let block = nerv_shell::init_block(
+            &bin,
+            env!("CARGO_PKG_VERSION"),
+            &installed_at_rfc3339(),
+            shell.name(),
+        );
+        print!("{block}");
+        return Ok(());
+    }
+
+    if std::env::var_os("NERV_PTY").is_none() {
+        // E-tone note (error-states §4): one grey line, no apology.
+        eprintln!(
+            "[nerv] {0} autocomplete requires NERV_PTY=1 — export NERV_PTY=1 before launching {0}.",
+            shell.name()
+        );
+        return Ok(());
+    }
+    if let Some(pty_bin) = resolve_pty_bin_for_init(&bin) {
+        println!("{}", shell.export_pty_bin(&pty_bin));
+    }
+    print!("{}", shell.snippet());
+    Ok(())
 }
 
 /// Returns the zsh integration snippet to emit for the inner hook.
@@ -357,8 +431,41 @@ fn build_doctor_report() -> DoctorReport {
     check_shell_hook(&mut r);
     check_daemon(&mut r);
     check_specs(&mut r);
+    check_schema_version(&mut r);
     check_pty_mode(&mut r);
     r
+}
+
+/// E5: spec cache schema version vs the daemon's supported version
+/// (error-states.md §3.5). A mismatch is a blocking (red) row.
+fn check_schema_version(r: &mut DoctorReport) {
+    let specs_dir = match std::env::var_os("NERV_SPECS_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(paths::specs_dir)
+    {
+        Some(d) => d,
+        None => return,
+    };
+    match nerv_engine::manifest::check_schema(&specs_dir) {
+        nerv_engine::manifest::SchemaStatus::Ok => r.push(
+            DoctorLevel::Ok,
+            "spec schema",
+            format!("v{}", nerv_engine::manifest::SUPPORTED_SCHEMA_VERSION),
+            None,
+        ),
+        // Missing manifest is non-fatal (pre-manifest install); stay quiet
+        // rather than nag — E2/specs row already covers an empty cache.
+        nerv_engine::manifest::SchemaStatus::Missing => {}
+        nerv_engine::manifest::SchemaStatus::Mismatch { found } => r.push(
+            DoctorLevel::Err,
+            "spec schema",
+            format!(
+                "mismatch — daemon expects v{}, found v{found}",
+                nerv_engine::manifest::SUPPORTED_SCHEMA_VERSION
+            ),
+            Some("run: brew reinstall nerv".into()),
+        ),
+    }
 }
 
 /// PLAN §5.8 PTY shim is M1 opt-in via `NERV_PTY=1`. Doctor
@@ -1025,6 +1132,15 @@ fn strip_zsh_hooks(
 
 /// Minimal timestamp generator: YYYY-MM-DDTHH-MM-SS (filesystem-safe).
 /// Uses SystemTime to avoid pulling chrono in.
+/// RFC 3339 / ISO-8601 UTC timestamp for the marker block's
+/// `# Installed:` line (e.g. `2026-06-07T08:30:00Z`). Falls back to
+/// `"unknown"` if formatting somehow fails.
+fn installed_at_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
 fn chrono_like_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
@@ -1085,47 +1201,38 @@ impl UninstallLog {
 // ---------- internal: _complete (M0-1 IPC bridge) ----------
 
 fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
-    let sock_path = paths::socket_path().ok_or_else(|| anyhow::anyhow!("HOME unset"))?;
+    let req = nerv_engine::Request::Complete {
+        line: line.to_string(),
+        cursor,
+        // Capture the client's cwd so filesystem-aware generators
+        // (package.json scripts, etc.) see the user's working dir,
+        // not the daemon's. Falls back to None on error so the
+        // daemon picks its own cwd as a last resort.
+        cwd: std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string())),
+    };
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()?;
 
-    rt.block_on(async {
-        let stream = UnixStream::connect(&sock_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-
-        let req = nerv_engine::Request::Complete {
-            line: line.to_string(),
-            cursor,
-            // Capture the client's cwd so filesystem-aware generators
-            // (package.json scripts, etc.) see the user's working dir,
-            // not the daemon's. Falls back to None on error so the
-            // daemon picks its own cwd as a last resort.
-            cwd: std::env::current_dir()
-                .ok()
-                .and_then(|p| p.to_str().map(|s| s.to_string())),
-        };
-        let mut json = serde_json::to_string(&req)?;
-        json.push('\n');
-        write_half.write_all(json.as_bytes()).await?;
-
-        let mut reader = BufReader::new(read_half);
-        let mut resp_line = String::new();
-        reader.read_line(&mut resp_line).await?;
-
-        let resp: Response = serde_json::from_str(resp_line.trim())?;
-        if let Response::Suggestions { items } = resp {
+    match rt.block_on(nerv_engine::ipc_client::query(&req))? {
+        Response::Suggestions { items } => {
             for s in &items {
                 print_suggestion(s);
             }
         }
-        // Any other response type → no output → no popup in zsh.
-        Ok(())
-    })
+        // E5: a schema-mismatch reason exits 3 (distinct from the daemon-
+        // down failure) so the ZLE widget can show its one-line hint.
+        Response::Empty { reason: Some(r) } if r.starts_with("spec schema mismatch") => {
+            eprintln!("[nerv] {r}");
+            std::process::exit(3);
+        }
+        // Any other response → no output → no popup in zsh.
+        _ => {}
+    }
+    Ok(())
 }
 
 fn print_suggestion(s: &Suggestion) {
@@ -1138,36 +1245,30 @@ fn print_suggestion(s: &Suggestion) {
 }
 
 fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
-
-    let sock_path = paths::socket_path().ok_or_else(|| anyhow::anyhow!("HOME unset"))?;
+    let req = nerv_engine::Request::RecordAccept {
+        spec: spec.to_string(),
+        insertion: insertion.to_string(),
+    };
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()?;
-
-    rt.block_on(async {
-        let stream = UnixStream::connect(&sock_path).await?;
-        let (read_half, mut write_half) = stream.into_split();
-        let req = nerv_engine::Request::RecordAccept {
-            spec: spec.to_string(),
-            insertion: insertion.to_string(),
-        };
-        let mut json = serde_json::to_string(&req)?;
-        json.push('\n');
-        write_half.write_all(json.as_bytes()).await?;
-        // Drain the single-line response so the daemon can close
-        // the conn cleanly. We don't act on the body.
-        let mut reader = BufReader::new(read_half);
-        let mut resp_line = String::new();
-        let _ = reader.read_line(&mut resp_line).await;
-        anyhow::Ok(())
-    })
+    // We don't act on the ack body, just let the daemon record + close.
+    rt.block_on(nerv_engine::ipc_client::query(&req))?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn installed_at_rfc3339_is_well_formed() {
+        let ts = installed_at_rfc3339();
+        // RFC 3339 UTC: contains the date/time separator and a zone.
+        assert!(ts.contains('T'), "missing T separator: {ts}");
+        assert!(ts.ends_with('Z') || ts.contains('+'), "missing zone: {ts}");
+        assert!(ts.starts_with("20"), "implausible year: {ts}");
+    }
 
     #[test]
     fn chrono_like_timestamp_is_numeric_and_growing() {
@@ -1191,7 +1292,7 @@ mod tests {
         let zshrc = tmp.join(".zshrc");
         let original = format!(
             "alias ll='ls -la'\n{}# trailing user comment\n",
-            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts")
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh")
         );
         std::fs::write(&zshrc, &original).unwrap();
 
@@ -1328,7 +1429,7 @@ mod tests {
         std::fs::write(tmp.join(".zshrc"), plain_rc).unwrap();
         let env_with_block = format!(
             "{}export FOO=bar\n",
-            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh"),
         );
         std::fs::write(tmp.join(".zshenv"), &env_with_block).unwrap();
         let mut log = UninstallLog::new(true);
@@ -1356,7 +1457,7 @@ mod tests {
     fn strip_zsh_hooks_counts_multiple_blocks_per_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-multi-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts");
+        let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh");
         let zshrc = format!("alias a=1\n{blk}alias b=2\n{blk}alias c=3\n");
         std::fs::write(tmp.join(".zshrc"), &zshrc).unwrap();
         let mut log = UninstallLog::new(true);
@@ -1378,7 +1479,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let body = format!(
             "alias x=ls\n{}\n",
-            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts"),
+            nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh"),
         );
         std::fs::write(tmp.join(".zshrc"), &body).unwrap();
         let mut log = UninstallLog::new(true);
@@ -1445,6 +1546,58 @@ mod tests {
         // Mutual exclusion: PTY snippet must NOT define the ZLE
         // widget global.
         assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// The bash bootstrap is PTY-only: it must carry the OSC 697 marker
+    /// emitter, re-exec nerv-pty, and self-skip when NERV_PTY is unset.
+    #[test]
+    fn bash_pty_snippet_is_pty_bootstrap() {
+        let body = PtyShell::Bash.snippet();
+        // OSC 697 prompt markers + session correlation.
+        assert!(body.contains("697"));
+        assert!(body.contains("NERV_PTY_SESSION_ID"));
+        // bash prompt hook (not zsh's add-zsh-hook precmd).
+        assert!(body.contains("PROMPT_COMMAND"));
+        // Shell=bash is mandatory — the shadow term gates edit-buffer
+        // reads on a recognized shell, so dropping it kills the ghost.
+        assert!(body.contains("Shell=bash"));
+        // Hands off to the shim and self-skips without opt-in.
+        assert!(body.contains("exec \"$__NERV_PTY_BIN\""));
+        assert!(body.contains("NERV_PTY"));
+        // Must NOT define the zsh ZLE widget global.
+        assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// fish bootstrap: PTY-only, fish-syntax, must carry the mandatory
+    /// `Shell=fish` marker and re-exec nerv-pty.
+    #[test]
+    fn fish_pty_snippet_is_pty_bootstrap() {
+        let body = PtyShell::Fish.snippet();
+        assert!(body.contains("697"));
+        assert!(body.contains("NERV_PTY_SESSION_ID"));
+        // fish event hook + prompt wrap (not bash's PROMPT_COMMAND).
+        assert!(body.contains("--on-event fish_prompt"));
+        assert!(body.contains("function fish_prompt"));
+        // Same gating requirement as bash.
+        assert!(body.contains("Shell=fish"));
+        // fish-syntax re-exec.
+        assert!(body.contains("exec $__nerv_pty_bin -- $SHELL"));
+        assert!(!body.contains("__NERV_LOADED"));
+    }
+
+    /// fish pins NERV_PTY_BIN with `set -gx`, bash with `export`.
+    #[test]
+    fn pty_shell_export_uses_native_syntax() {
+        assert!(
+            PtyShell::Bash
+                .export_pty_bin("/x/nerv-pty")
+                .starts_with("export NERV_PTY_BIN=")
+        );
+        assert!(
+            PtyShell::Fish
+                .export_pty_bin("/x/nerv-pty")
+                .starts_with("set -gx NERV_PTY_BIN ")
+        );
     }
 
     /// `resolve_pty_bin_for_init` returns Some(path) when a sibling

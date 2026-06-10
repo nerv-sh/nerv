@@ -8,19 +8,11 @@
 //! actual write.
 //!
 //! ANSI budget (terminal-compat §3 / CLAUDE.md §4 invariant): we use only
-//! DECSC/DECRC cursor save-restore (`ESC 7` / `ESC 8`), the faint SGR
-//! (`ESC [ 2 m`), a reset (`ESC [ 0 m`), and erase-to-end-of-line
-//! (`ESC [ K`). No alternate screen, no true colour, no OSC.
+//! the whitelisted sequences in [`crate::ansi`] — DECSC/DECRC save-restore,
+//! the faint SGR, a reset, and erase-to-end-of-line. No alternate screen,
+//! no true colour, no OSC.
 
-/// `ESC 7` — save cursor position (DECSC).
-const SAVE: &str = "\x1b7";
-/// `ESC 8` — restore cursor position (DECRC).
-const RESTORE: &str = "\x1b8";
-/// `ESC [ 2 m` — faint, then the text, then `ESC [ 0 m` reset.
-const FAINT: &str = "\x1b[2m";
-const RESET: &str = "\x1b[0m";
-/// `ESC [ K` — erase from cursor to end of line.
-const ERASE_EOL: &str = "\x1b[K";
+use crate::ansi::{ERASE_EOL, FAINT, RESET, RESTORE, SAVE};
 
 /// Compute the ghost remainder to display, or `None` when nothing should
 /// be drawn.
