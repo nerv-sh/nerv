@@ -220,7 +220,7 @@ crates/
   # 기존 보존
   nerv-cli/        # `nerv` 바이너리 (clap, 5 cmd + hidden _complete IPC bridge)
   nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
-  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / ipc_client (nervd UDS 클라 단일소스) / manifest (E5 schema 게이트) / paths / ranker)
+  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / ipc_client (nervd UDS 클라 단일소스) / manifest (E5 schema 게이트) / paths / frecency (per-spec usage ranking))
                    #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer, --compress 플래그)
                    #   + tests/fixtures/specs/{git,echo,docker,kubectl,npm,cargo,gh,brew,make}.json (9 hand-rolled)
                    #   + tests/fixtures/converted/ (.gitignore; bun 변환 결과 715 spec; depth=1, 176MB plain or 10MB gzipped)
