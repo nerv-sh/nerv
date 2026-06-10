@@ -21,7 +21,6 @@ pub mod config;
 pub mod ipc;
 pub mod ipc_client;
 pub mod manifest;
-pub mod parser;
 pub mod paths;
 pub mod ranker;
 pub mod shell_parser;
@@ -38,7 +37,6 @@ pub use complete::{CompleteResult, SpecRegistry, complete, complete_in};
 pub use config::{MatchMode, MatchingConfig};
 pub use frecency::FrecencyStore;
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
-pub use parser::{Position, Token};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};
 pub use spec_loader::{
     SpecLoadError, load_spec_file, parse_spec_str, write_spec_file, write_spec_str,

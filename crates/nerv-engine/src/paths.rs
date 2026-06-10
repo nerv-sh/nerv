@@ -65,17 +65,20 @@ mod tests {
 
     use super::*;
     use std::path::Path;
+    use std::sync::Mutex;
 
-    /// Helper: HOME → tempdir for the test, restored on drop.
-    /// std::env::set_var races with parallel tests; use a unique
-    /// tempdir so the join result is unambiguous even if a sibling
-    /// test mutates HOME concurrently.
+    /// HOME is process-global; every test that mutates it must hold this
+    /// lock so parallel `set_var`/`remove_var` calls can't interleave.
+    /// Poison-tolerant: a panicking test still releases a usable guard.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: HOME → tempdir for the test, restored on drop. Serialized
+    /// against every other HOME mutator via `HOME_LOCK`.
     fn with_temp_home<R>(f: impl FnOnce(&Path) -> R) -> R {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        // SAFETY: env mutation. The functions under test all read
-        // HOME through `std::env::var_os` at call time, so as long
-        // as no concurrent set_var fires between our set and our
-        // call we get our path back.
+        // SAFETY: env mutation, serialized by HOME_LOCK. The functions
+        // under test read HOME through `std::env::var_os` at call time.
         let prev = std::env::var_os("HOME");
         unsafe { std::env::set_var("HOME", tmp.path()) };
         let out = f(tmp.path());
@@ -128,6 +131,7 @@ mod tests {
     /// uninstall depends on this branch for the "HOME unset" warning.
     #[test]
     fn home_unset_returns_none_everywhere() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("HOME");
         unsafe { std::env::remove_var("HOME") };
         let all_none = cache_dir().is_none()
