@@ -22,7 +22,6 @@ pub mod ipc;
 pub mod ipc_client;
 pub mod manifest;
 pub mod paths;
-pub mod ranker;
 pub mod shell_parser;
 pub mod spec;
 pub mod spec_loader;

@@ -1,4 +1,6 @@
-//! Spec data model — mirrors the JSON produced by `build/spec-transpile`.
+//! Manifest data model — the `manifest.json` written by the `build-specs`
+//! binary and read by the E5 schema gate (`manifest.rs`). The per-spec JSON
+//! body model lives in `spec_parser`, not here.
 //!
 //! See `docs/spec-conversion-policy.md` for Tier A/B/C semantics and
 //! `manifest.json` schema (v2).
@@ -46,49 +48,4 @@ pub struct LimitedArg {
     pub reason: String,
     /// Suggested shell command for the §5.1 hint UX.
     pub hint: String,
-}
-
-/// Body of a single spec JSON file (one per CLI). Schema TBD in M1.
-///
-/// **Stub** — populated when spec-transpile is implemented.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Spec {
-    pub name: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub subcommands: Vec<Subcommand>,
-    #[serde(default)]
-    pub options: Vec<Option_>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Subcommand {
-    pub name: String,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub subcommands: Vec<Subcommand>,
-    #[serde(default)]
-    pub options: Vec<Option_>,
-    #[serde(default)]
-    pub args: Vec<Argument>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename = "Option")]
-pub struct Option_ {
-    /// All names the option can be invoked under (e.g., `["-m", "--message"]`).
-    pub names: Vec<String>,
-    pub description: Option<String>,
-    #[serde(default)]
-    pub args: Vec<Argument>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Argument {
-    pub name: String,
-    pub description: Option<String>,
-    /// If true, this argument needed a dynamic generator at the upstream
-    /// spec; v1.0 surfaces a §5.1 hint instead of completing.
-    #[serde(default)]
-    pub limited: bool,
 }
