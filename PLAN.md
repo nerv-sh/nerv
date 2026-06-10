@@ -25,7 +25,7 @@
 | 상위 의존 | `aws/amazon-q-developer-cli-autocomplete` (Apache-2.0 + MIT, 2026-02-03 활성) 의 Rust crates 흡수 |
 | 흡수 방식 | `vendor/aws-autocomplete/` 미수정 mirror (drift 감지) + `crates/nerv-*` 에 `git filter-repo` 로 9개 crate strip+rename 임포트 |
 | TS 엔진 처리 | `packages/autocomplete-parser/` + `packages/shell-parser/` 는 subtree 하지 않음. `docs/reference/` 에 복사 → Rust 1:1 포팅 |
-| JS generator | M0 = Tier A/B JSON only (현 정책 유지). M1 = **rquickjs** opt-in (Tier C 회복). deno_core 비채택 (~30MB 과잉) |
+| JS generator | M0 = Tier A/B JSON only (현 정책 유지). M1 = **rquickjs** opt-in (Tier C 회복). deno_core 비채택 (~30MB 과잉). **⚠️ 출시 결정 (2026-06-07): Tier C 실행률 e2e 검증 = 0% (473 캡처 / 0 실행, async 未drain + `__awaiter` 미정의). `--features quickjs` 는 scaffold 유지하되 production 기본 OFF 확정 — opt-in 만, 출시 바이너리 미동봉. 상세 = `docs/findings/tier-c-quickjs-e2e.md`** |
 | Edit-buffer 인터셉트 | M0 = 기존 ZLE widget 유지 (latency 검증 우선). M1 = **figterm opt-in 추가** (bash/fish 도달 + ANSI 엣지케이스 해소). 두 path 사용자 선택 |
 | 새 비목표 | deno_core 임베드, fig_desktop webview UI, Q chat/AI 기능 (모두 strip 대상) |
 
@@ -64,7 +64,7 @@ PRD 승인 이후의 핵심 마일스톤. PLAN.md 정책은 변경 없음 — *�
 **아직 인 진척 (M1 이후)**:
 - M0-8 서명/공증 (Apple Developer 계정 + 인프라 의존)
 - aws Phase 3 (closure 가 token 에 의존하는 624 케이스 — rquickjs opt-in 필요)
-- bash / fish 지원 (큼)
+- ✅ **bash + fish 지원 (PTY 경로, MVP)**: `nerv init {bash,fish}` → `_nerv-pty.{bash,fish}` (OSC 697 markers, `Shell={bash,fish}` 필수). 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. ghost 작동 (`scripts/e2e-pty-{bash,fish}.py` PASS). bash=PROMPT_COMMAND, fish=`--on-event fish_prompt`+prompt wrap. **PreExec 구현**: fish=`--on-event fish_preexec` (clean), bash=gated DEBUG trap (2-guard: `PROMPT_SHOWN` 으로 startup 발화 차단 + `PREEXEC_DONE` 으로 커맨드당 1회). submit 시 발화 e2e 검증. **fish 주의**: (1) fish 4.x 는 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 — 실 터미널은 응답하나 e2e harness 는 emulate 필요. (2) fish 자체 grey autosuggestion 과 nerv ghost 공존 (사용자가 한쪽 비활성 선택 가능). `init_block` 이 fish 용 `| source` 문법 emit (POSIX `eval` 아님)
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in 실런타임 (`NERV_PTY=1`) — main.rs 980줄 + figterm-ipc + remote-ipc 정합 필요
 - E5 manifest, spec depth=2+ (압축으로 무난, memory cost 평가)
@@ -378,7 +378,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 v0.5.1 의 M1 (16주) 단축. Fig 엔진 흡수로 0–6주차 작업 80% 제거.
 
 - **0–4주차**: `nerv-engine` 자작 부분과 흡수 crate 통합 마무리. 50 spec 변환 파이프라인 완성. ZLE 안정화. 인라인 `?`. 에러 상태 UX 5종. **upstream PR 흡수 인프라** (`upstream-prs.yml` + `vendor-patches/{upstream,self}/` + 첫 cherry-pick 1건 시연 — withfig 측 + aws 측 양쪽).
-  - **4주차 체크포인트**: 50개 spec 시나리오 통과 / latency p95 < 25 ms / tmux+2터미널 회귀 / uninstall 흔적 0.
+  - **4주차 체크포인트** ✅ **PASS (2026-06-07)**: 50개 spec 시나리오 통과 (`scenario_specs.rs` 54/54, git/docker/kubectl/npm/cargo/gh/brew/go/terraform/helm/pip) / latency p95 **0.055 ms** (<25 ms, 455× 여유) / tmux+2터미널 회귀 (`scripts/e2e-tmux-2term.sh` — cwd 격리 + 20-way 동시성) / uninstall 흔적 0 (nerv-shell strip 11종 + desktop_entry + uninstall-spec §4 atomic).
 - **5–10주차**: 1,484 spec 전체 Tier A/B 자동 변환 + 변환률 측정. `nerv doctor` 자동 감지 5종 완성. zsh 플러그인 매니저 패키지 (`nerv-omz`, `nerv-zsh`) e2e. **figterm (`nerv-pty`) opt-in 통합** + 서명/공증 자동화. **rquickjs Tier C opt-in** PoC.
   - **10주차 베타 체크포인트**: 내부 dogfooding 2주.
 - **11–14주차**: Homebrew tap 공개, 30초 KPI 자동 측정 CI, 매니저 e2e CI, 문서 6종 v1.4 완비, v1.0 출시.

@@ -1,8 +1,10 @@
 # Finding — Tier C (quickjs) e2e recovery rate = 0%
 
-**Date**: 2026-06-06
+**Date**: 2026-06-06 (decision recorded 2026-06-07)
 **Branch**: feat/m1-batch-v3
-**Status**: verified, blocking quickjs ship decision
+**Status**: ✅ **decided — defer**. `--features quickjs` scaffold stays, but
+production ships with it **OFF / not bundled** (opt-in only). Re-open when the
+root causes below are addressed. Recorded in PLAN §0.2 (JS generator) + CLAUDE.md §3.
 
 ## TL;DR
 

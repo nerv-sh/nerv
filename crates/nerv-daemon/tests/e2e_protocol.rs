@@ -43,6 +43,10 @@ struct DaemonHandle {
 
 impl DaemonHandle {
     async fn spawn(frecency_mode: FrecencyMode) -> Self {
+        Self::spawn_with_specs(frecency_mode, fixture_specs_dir()).await
+    }
+
+    async fn spawn_with_specs(frecency_mode: FrecencyMode, specs: PathBuf) -> Self {
         let tmp = tempfile::tempdir().expect("create tempdir");
         let sock = tmp.path().join("nervd.sock");
         let pid = tmp.path().join("nervd.pid");
@@ -50,8 +54,7 @@ impl DaemonHandle {
             FrecencyMode::Disabled => PathBuf::from("-"),
             FrecencyMode::Tempfile => tmp.path().join("frecency.tsv"),
         };
-        let specs = fixture_specs_dir();
-        assert!(specs.exists(), "fixture specs dir missing");
+        assert!(specs.exists(), "specs dir missing");
 
         let child = tokio::process::Command::new(nervd_bin())
             .env("NERV_SOCK", &sock)
@@ -320,6 +323,60 @@ async fn record_accept_boosts_subsequent_complete() {
             body.contains("git\tstatus"),
             "frecency entry not persisted: {body:?}"
         );
+    })
+    .await;
+    daemon.shutdown().await;
+    run.expect("test timeout");
+}
+
+#[tokio::test]
+async fn schema_mismatch_disables_completion() {
+    // E5 (error-states.md §3.5): a spec cache stamped with a different
+    // schema version disables all completion. The daemon stays up and
+    // every Complete returns Empty with the mismatch reason — which the
+    // CLI bridge turns into the grey ZLE hint.
+    let specs = tempfile::tempdir().expect("specs tempdir");
+    // Need at least one real spec present so this isn't an empty-cache
+    // case; copy the fixture git.json in.
+    std::fs::copy(
+        fixture_specs_dir().join("git.json"),
+        specs.path().join("git.json"),
+    )
+    .expect("copy git fixture");
+    // Stamp a deliberately wrong schema version.
+    std::fs::write(
+        specs.path().join("manifest.json"),
+        r#"{"schema_version":1,"nerv_version":"test","withfig_commit":"x","build_date":"0","specs":[]}"#,
+    )
+    .expect("write mismatched manifest");
+
+    let daemon =
+        DaemonHandle::spawn_with_specs(FrecencyMode::Disabled, specs.path().to_path_buf()).await;
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        let resp = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "git co".into(),
+                cursor: 6,
+                cwd: None,
+            },
+        )
+        .await;
+        match resp {
+            Response::Empty { reason } => {
+                let reason = reason.expect("mismatch reason present");
+                assert!(
+                    reason.starts_with("spec schema mismatch"),
+                    "unexpected reason: {reason}"
+                );
+                assert!(
+                    reason.contains("found v1"),
+                    "reason missing found: {reason}"
+                );
+            }
+            other => panic!("expected Empty (disabled), got {other:?}"),
+        }
     })
     .await;
     daemon.shutdown().await;

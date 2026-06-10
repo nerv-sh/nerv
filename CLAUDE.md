@@ -21,6 +21,8 @@
 
 ## 3. 현재 단계
 
+> **M1 4주차 체크포인트 ✅ PASS (2026-06-07)** — 4항목 전부 green: 50-spec 시나리오 54/54 (`crates/nerv-engine/tests/scenario_specs.rs`) / latency p95 **0.055 ms** (<25 ms) / tmux+2터미널 회귀 (`scripts/e2e-tmux-2term.sh`, cwd 격리 + 20-way 동시성) / uninstall 흔적 0. 상세 = PLAN §10 4주차 체크포인트.
+
 **M0 흡수 스파이크 (v0.6 재정의)** — 산출물 8개 중 7개 완료:
 
 - ✅ M0-9 (v0.5 산출물): `withfig/autocomplete` subtree pin (`aef52acf…`, 1,484 TS spec, ISC)
@@ -59,7 +61,8 @@
 - ✅ **UTF-8 char boundary 클램프**: `cursor` 가 multibyte (한글/CJK/emoji) 중간에 떨어질 때 `clamp_cursor_to_char_boundary` 로 직전 boundary 까지 감소. `'ㅊㅇ .'` 입력 시 패닉 → empty 응답.
 - ✅ **inline ghost text**: top 제안 trailing 부분을 `POSTDISPLAY` 에 dim grey 로 표시. Right-arrow (line 끝일 때만) 로 accept. LBUFFER 끝이 공백이거나 prefix 비면 ghost off — "토큰 타이핑 중" 시그널 일치.
 - ✅ **frecency ranking**: per-spec usage TSV (`~/Library/Caches/nerv/frecency.tsv`). 데몬이 `Request::RecordAccept` 받아 in-memory + opportunistic flush. score = `(count-1) / (1+age_days)` — single pick = no boost, 2+ picks 부터. daemon post-sort 가 alpha 결과를 boost-first 로 재정렬. `NERV_FRECENCY_FILE=-` 로 테스트 격리.
-- ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지 (E5 manifest 도입 후)
+- ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지, **E5 spec schema mismatch**
+- ✅ **E5 spec schema 버전 게이트** (error-states §3.5): `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2` + `check_schema(dir) -> {Ok/Missing/Mismatch}`). build-specs 가 `manifest.json` (schema_version) 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` 차단 (missing=관대, 구버전 호환). CLI bridge 가 schema reason 감지 → exit 3 → `_nerv.zsh` E5 회색 1줄 (`__NERV_E5_SHOWN`). doctor red row. 5 manifest unit + 1 daemon e2e (`schema_mismatch_disables_completion`).
 - ✅ **widget UX**: sliding window (`MAX_VIS = min(LINES-6, 10)`), footer 카운터 `[k/total]` 항상 표시, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow 모두 wrap-cycle, precmd 에서 self-insert/accept-line/backward-delete/space 재바인딩 (Q/oh-my-zsh/fzf-tab hijack 방지), description 매행 → footer 단일 라인 (Fig style).
 - ✅ SIGPIPE → SIG_DFL: `nerv spec list | head` panic 제거
 - ✅ **CI 확장**: rust 1.85 핀 + `brew install protobuf` (nerv-proto build.rs 회피) + `build-specs-smoke` (plain+gzip vs 9 fixture) + `ts-to-json` (bun convert:one + JSON sanity) job. **ARM64-only** 매트릭스 (macos-13 queue 너무 길어서 drop).
@@ -105,12 +108,12 @@
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
-- bash / fish 지원 (큼)
+- ✅ **bash + fish 지원 (PTY 경로 MVP)**: `nerv init {bash,fish}` → `shell-integrations/{bash/_nerv-pty.bash,fish/_nerv-pty.fish}`. 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. inner 가 OSC 697 (`Shell={bash,fish}` 필수 — `can_send_edit_buffer` 게이트, bash 첫 e2e 실패의 root cause) + StartPrompt/EndPrompt/NewCmd prompt wrap. bash=PROMPT_COMMAND, fish=`--on-event fish_prompt` 이벤트 + fish_prompt 함수 wrap. **PreExec 구현**: fish=`--on-event fish_preexec` (clean event), bash=gated DEBUG trap (2-guard: `_NERV_PTY_PROMPT_SHOWN` 가 첫 precmd 까지 empty → startup 발화 차단; `_NERV_PTY_PREEXEC_DONE` 가 커맨드당 1회 보장, precmd 가 reset). ghost+preexec e2e PASS (`scripts/e2e-pty-{bash,fish}.py`). `init_block` shell 파라미터화 + fish `| source` 문법 (POSIX `eval` 아님). cli `PtyShell` enum (export 문법 native: bash `export` / fish `set -gx`). **fish 주의**: fish 4.x 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 (실 터미널 OK, e2e harness 는 emulate) + fish 자체 grey autosuggestion 과 공존
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2+3a+3b 완료** (위 §3 참조). 인라인 ghost + popup(박스 chrome) + 네비 + frecency 작동, nervd UDS 재배선, 0-row 클램프, ZLE 팝업 컬럼 정렬, e2e PASS. Phase 3 follow-up 전부 완료.
-- E5 manifest (depth=2 활성화 완료 — 위 §3)
+- ✅ E5 manifest 완료 (위 §3 — schema 버전 게이트 + doctor red + ZLE 회색 1줄)
 - 브랜드 strip 잔여 (defer): RUNTIME_DIR_NAME / DATA_DIR_NAME / Linux package name / desktop entry 일부는 후속 PR 에서 정리
-- aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. 다음 단계: production binary 가 `quickjs` 켜고 출시할지 결정 (PLAN §0.2 opt-in 정책 검토 필요).
+- aws 624 closure-form generators 중 89 = `aws_list` 회복, 나머지 = `Generator::Custom { source }` 로 캡처됨 → `--features quickjs` 빌드에서 실행. 기본 빌드는 여전히 skip. **출시 결정 확정 (2026-06-07)**: Tier C 실행률 e2e = **0%** (473 캡처 / 0 실행) → `--features quickjs` scaffold 는 유지하되 **production 기본 OFF, 출시 바이너리 미동봉** (opt-in 만). PLAN §0.2 JS generator 행 + `docs/findings/tier-c-quickjs-e2e.md` 갱신. 재개 조건 = async Promise drain + `__awaiter`/shell host-global 주입 (finding §Root causes).
 
 ## 4. 절대 깨면 안 되는 불변식
 
@@ -139,6 +142,7 @@
 | 4-field wire format | `nerv _complete` 출력은 `insertion\tdisplay\tdescription\ticon` 4-tab. icon 비면 빈 문자열. **field 추가 시 widget parser 동시 갱신 필수** | `crates/nerv-cli/src/main.rs::print_suggestion` + `_nerv.zsh` |
 | parserDirectives 적용 | `flagsArePosixNoncompliant` 는 root spec 의 directive 만 체크 (subcommand chain 상속 X). Go/docker/kubectl 처럼 root 부터 일관된 스타일이 권장 | `nerv-engine/src/spec_parser.rs::ShortOption` arm |
 | getQueryTerm 범위 | string form 만 (single-byte delim chars). function form 은 Tier C → M1. delim chars 마지막 위치에서 split, insertion 에 context prefix 보존 | `nerv-engine/src/complete.rs::split_by_query_term` |
+| spec schema 버전 (E5) | `SUPPORTED_SCHEMA_VERSION` bump 시 build-specs(manifest 작성) + daemon(게이트) + error-states §3.5 동시 갱신. **manifest 부재 = 관대 (구버전 호환), mismatch 만 차단**. corrupt manifest = missing 취급 | `nerv-engine/src/manifest.rs` |
 
 ## 5. 자주 쓰는 명령
 
@@ -215,7 +219,7 @@ crates/
   # 기존 보존
   nerv-cli/        # `nerv` 바이너리 (clap, 5 cmd + hidden _complete IPC bridge)
   nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
-  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / paths / ranker)
+  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / ipc_client (nervd UDS 클라 단일소스) / manifest (E5 schema 게이트) / paths / ranker)
                    #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer, --compress 플래그)
                    #   + tests/fixtures/specs/{git,echo,docker,kubectl,npm,cargo,gh,brew,make}.json (9 hand-rolled)
                    #   + tests/fixtures/converted/ (.gitignore; bun 변환 결과 715 spec; depth=1, 176MB plain or 10MB gzipped)
@@ -234,6 +238,9 @@ crates/
   nerv-diag/       # ← fig_diagnostic
 
 shell-integrations/zsh/_nerv.zsh     # ZLE widget (M0 유지, M1 figterm 도입 시 deprecate)
+shell-integrations/zsh/_nerv-pty.zsh # zsh PTY bootstrap (NERV_PTY=1)
+shell-integrations/bash/_nerv-pty.bash # bash PTY bootstrap (PTY 전용, Shell=bash 마커 필수)
+shell-integrations/fish/_nerv-pty.fish # fish PTY bootstrap (PTY 전용, Shell=fish 마커 필수)
 tools/ts-to-json/                    # bun-based TS→JSON 변환 (M1 entry; 715 spec 자동 변환)
 packaging/homebrew/nerv.rb           # Homebrew Formula 템플릿 (auto-bumped on release)
 vendor/withfig-autocomplete/         # subtree, ISC, pin = aef52acf… (TS specs 1,484)
@@ -273,7 +280,7 @@ Refs: PLAN.md §<section>  또는  Refs: docs/<file>.md §<section>
 PLAN §10 에 명시된 차단 요건을 *직접* 점검하기 전엔 다음 단계 진입 금지:
 
 - **M0 종료**: 산출물 8개 중 1+2+3+7+8 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과. (현재 1-7 완료; git fixture 시나리오 11개 integration test 통과. docker / kubectl fixture + 상위 50 spec 확장은 M1 진입과 함께.)
-- **M1 4주차**: 50개 spec 시나리오 통과 / latency p95 < 25 ms / tmux+2터미널 회귀 / uninstall 흔적 0
+- **M1 4주차** ✅ **PASS (2026-06-07)**: 50개 spec 시나리오 통과 (`scenario_specs.rs` 54/54) / latency p95 0.055 ms (<25 ms) / tmux+2터미널 회귀 (`e2e-tmux-2term.sh`) / uninstall 흔적 0
 - **M1 10주차**: 내부 dogfooding 2주
 
 미달 시 PLAN §10 M0-2 흡수 의사결정 트리 또는 wrapper crate 격리 전략.
