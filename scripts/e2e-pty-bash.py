@@ -105,6 +105,7 @@ def main():
         startup = drain(master, 2.0)
         log(f"startup bytes: {len(startup)}  OSC697={b'697' in startup}")
 
+        # 1. Ghost: partial command → dim remainder.
         os.write(master, TYPED.encode())
         out = drain(master, 2.0)
         ghost_ok = FAINT in out and GHOST in out
@@ -112,18 +113,50 @@ def main():
         if not ghost_ok:
             log(f"  tail repr: {out[-300:]!r}")
 
-        # PreExec: submitting a command emits the figterm PreExec marker
-        # (the gated DEBUG trap must fire on a real command, NOT during
-        # startup — the latter would have already broken the ghost above).
-        os.write(master, b"\r")
+        # 2. Accept the ghost with Right-arrow → daemon records the accept
+        #    for frecency (mirrors the zsh harness).
+        os.write(master, b"\x1b[C")
+        drain(master, 1.0)
+        frec = os.path.join(home, "Library", "Caches", "nerv", "frecency.tsv")
+        frec_ok = False
+        for _ in range(10):
+            if os.path.exists(frec) and "checkout" in open(frec).read():
+                frec_ok = True
+                break
+            time.sleep(0.2)
+        log(f"frecency: recorded 'checkout' -> {frec_ok}")
+        os.write(master, b"\x15")  # Ctrl-U clear line
+        drain(master, 0.5)
+
+        # 3. Popup: a prefix with >=2 completions (git c → checkout, commit)
+        #    → boxed reverse-video list with a [1/2] footer.
+        os.write(master, b"git c")
+        out = drain(master, 2.0)
+        REVERSE = b"\x1b[7m"
+        BOX = "╭".encode()  # rounded box top-left
+        popup_ok = REVERSE in out and b"[1/2]" in out and BOX in out
+        log(f"popup: REVERSE={REVERSE in out} [1/2]={b'[1/2]' in out} BOX={BOX in out} -> {popup_ok}")
+        if not popup_ok:
+            log(f"  tail repr: {out[-400:]!r}")
+
+        # 4. Navigation: Tab advances selection; footer → [2/2].
+        os.write(master, b"\t")
+        out = drain(master, 1.5)
+        nav_ok = b"[2/2]" in out
+        log(f"nav: [2/2]={nav_ok} -> {nav_ok}")
+
+        # 5. PreExec: submitting a command emits the figterm PreExec marker
+        #    (the gated DEBUG trap must fire on a real command, NOT during
+        #    startup — the latter would have already broken the ghost).
+        os.write(master, b"\x15")  # clear the popup line first
+        drain(master, 0.3)
+        os.write(master, b"echo hi\r")
         submit = drain(master, 1.5)
         preexec_ok = b"\x1b]697;PreExec\x07" in submit
         log(f"preexec on submit: {preexec_ok}")
-        if not preexec_ok:
-            log(f"  submit tail: {submit[-200:]!r}")
 
-        if ghost_ok and preexec_ok:
-            log("PASS — bash PTY ghost + preexec e2e")
+        if ghost_ok and frec_ok and popup_ok and nav_ok and preexec_ok:
+            log("PASS — bash PTY ghost + accept/frecency + popup + nav + preexec")
             rc = 0
         else:
             log("FAIL — see per-check output above")
