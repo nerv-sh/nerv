@@ -459,7 +459,14 @@ pub fn complete_in(
     // — `emit_arg_candidates` would otherwise look at the surrounding
     // subcommand's positional args, which is the wrong slot.
     if let Some((opt_name, arg_idx)) = result.active_option_arg.as_ref() {
-        if let Some(opt) = current.options.iter().find(|o| o.names.contains(opt_name)) {
+        // Inherited lookup, not just `current.options`: the parser
+        // binds isPersistent ancestor options too (`kubectl get pods
+        // -n <here>` with `-n` declared at the root), so the dispatch
+        // must search the same scope or those args' generators
+        // silently never run and the positional slot wins instead.
+        if let Some(opt) =
+            crate::spec_parser::find_option_inherited(spec_ref, &result.subcommand_path, opt_name)
+        {
             if let Some(arg) = opt.args.get(*arg_idx) {
                 let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens);
                 return CompleteResult {
@@ -2600,6 +2607,52 @@ mod tests {
         let r = complete("x ", 2, &registry_with(spec));
         let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(names, ["alpha", "beta", "gamma"]);
+    }
+
+    /// `kubectl get pods -n <Tab>` regression: a persistent ROOT
+    /// option bound mid-chain must dispatch to ITS arg's generator,
+    /// not fall through to the subcommand's positional slot. The
+    /// dispatch in `complete_in` used to look at `current.options`
+    /// only, so root-declared persistent options silently lost their
+    /// generators after any subcommand.
+    #[test]
+    fn persistent_root_option_arg_generator_runs_mid_chain() {
+        use crate::spec_parser::{Arg, Generator, Opt, Subcommand};
+        let spec = Subcommand {
+            name: "k".into(),
+            options: vec![Opt {
+                names: vec!["-n".into(), "--namespace".into()],
+                is_persistent: true,
+                args: vec![Arg {
+                    name: Some("namespace".into()),
+                    generators: vec![Generator::Template {
+                        script: vec!["/usr/bin/printf".into(), "ns-one\nns-two\n".into()],
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            subcommands: vec![Subcommand {
+                name: "get".into(),
+                args: vec![Arg {
+                    name: Some("type".into()),
+                    generators: vec![Generator::Template {
+                        script: vec!["/usr/bin/printf".into(), "pos-only\n".into()],
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let line = "k get -n ";
+        let r = complete(line, line.len(), &registry_with(spec));
+        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(
+            names,
+            ["ns-one", "ns-two"],
+            "expected the -n option's generator, not the positional slot"
+        );
     }
 
     // NOTE: NERV_NO_GENERATORS env-var kill switch is documented but

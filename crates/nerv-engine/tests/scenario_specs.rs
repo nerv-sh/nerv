@@ -27,6 +27,21 @@ fn converted_dir() -> PathBuf {
         .collect()
 }
 
+/// The converted cache is real only if it holds spec files. The directory
+/// itself exists on every checkout (it carries a tracked `.gitignore`), so
+/// `is_dir()` alone would make CI load an empty registry and fail all 54
+/// scenarios instead of skipping.
+fn has_converted_specs(dir: &PathBuf) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|e| {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        name.ends_with(".json") || name.ends_with(".json.gz")
+    })
+}
+
 /// (command line typed so far, subcommand insertion expected in result).
 /// Cursor is always end-of-line.
 const SCENARIOS: &[(&str, &str)] = &[
@@ -100,7 +115,7 @@ const SCENARIOS: &[(&str, &str)] = &[
 #[test]
 fn top_spec_subcommand_scenarios() {
     let dir = converted_dir();
-    if !dir.is_dir() {
+    if !has_converted_specs(&dir) {
         eprintln!(
             "[skip] converted spec cache absent at {} — \
              run `cd tools/ts-to-json && bun run convert:all` to enable \
