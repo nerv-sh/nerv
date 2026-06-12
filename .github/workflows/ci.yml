@@ -1,14 +1,10 @@
 name: CI
 
-# Auto-triggers paused until 2026-06-01 billing reset (Actions minutes
-# at 90% / 1,806 of 2,000). Manual run via Actions tab → "Run workflow"
-# stays available. Restore push/pull_request after reset:
-#   on:
-#     push:
-#       branches: [main]
-#     pull_request:
-#       branches: [main]
 on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
