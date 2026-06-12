@@ -3,7 +3,7 @@ import {
   detectAwsJsonPath,
   detectAwsListCustom,
   detectFilepathsGenerator,
-  enrichKubectlNamespaces,
+  enrichK8sNamespaces,
 } from "./convert";
 
 describe("detectAwsJsonPath", () => {
@@ -248,7 +248,7 @@ describe("detectFilepathsGenerator", () => {
   });
 });
 
-describe("enrichKubectlNamespaces", () => {
+describe("enrichK8sNamespaces", () => {
   const bareArg = () => ({
     name: "namespace",
     description: null,
@@ -285,7 +285,7 @@ describe("enrichKubectlNamespaces", () => {
         },
       ],
     });
-    enrichKubectlNamespaces(s as any);
+    enrichK8sNamespaces(s as any);
     expect(s.options[0].args[0].generators).toEqual([
       {
         type: "template",
@@ -329,7 +329,7 @@ describe("enrichKubectlNamespaces", () => {
         }),
       ],
     });
-    enrichKubectlNamespaces(s as any);
+    enrichK8sNamespaces(s as any);
     const opt = s.subcommands[0].subcommands[0].options[0];
     expect(opt.args[0].generators).toHaveLength(1);
     expect(opt.args[0].generators[0].type).toBe("template");
@@ -354,7 +354,7 @@ describe("enrichKubectlNamespaces", () => {
         },
       ],
     });
-    enrichKubectlNamespaces(s as any);
+    enrichK8sNamespaces(s as any);
     expect(arg.generators).toEqual([{ type: "kubectl_resources" }]);
   });
 
@@ -374,7 +374,7 @@ describe("enrichKubectlNamespaces", () => {
         },
       ],
     });
-    enrichKubectlNamespaces(s as any);
+    enrichK8sNamespaces(s as any);
     expect(arg.generators).toEqual([]);
   });
 });
