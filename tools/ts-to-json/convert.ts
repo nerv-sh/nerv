@@ -962,6 +962,62 @@ const convertSpec = async (
   };
 };
 
+// Well-known gap fill: the k8s-family CLIs declare a root
+// `-n / --namespace` GLOBAL flag whose arg ships with NO generator
+// upstream (e.g. vendor src/kubectl.ts ~3857 — bare
+// `args: { name: "namespace" }`), so faithful conversion leaves it
+// empty and `kubectl get pods -n <Tab>` completes nothing
+// (first-5-min.md step 11). Inject the obvious Tier B template —
+// the engine's existing generator machinery (200ms timeout + LRU
+// cache) handles the rest. Applied to every `-n`/`--namespace`
+// option in the tree whose arg has no generator of its own, so
+// `kubectl config set-context --namespace=` etc. light up too.
+//
+// Specs that get this pass: each verified to use the flag with k8s
+// namespace semantics at the ROOT (global flag) level. `-n` elsewhere
+// (git, aws, sfdx, …) means something else entirely — do NOT add a
+// spec here without checking its root option description.
+const K8S_NAMESPACE_SPEC_STEMS = new Set([
+  "kubectl",
+  "helm",
+  "helmfile",
+  "kubecolor",
+  "argo",
+]);
+
+const KUBECTL_NAMESPACES_SCRIPT = [
+  "kubectl",
+  "get",
+  "namespaces",
+  "--no-headers",
+  "-o",
+  "custom-columns=:metadata.name",
+];
+
+export const enrichK8sNamespaces = (
+  spec: NervSpec,
+  isRoot: boolean = true
+): void => {
+  for (const opt of spec.options) {
+    if (!opt.names.some((n) => n === "-n" || n === "--namespace")) continue;
+    // The root `-n` is a GLOBAL flag (usable after any subcommand —
+    // `kubectl get pods -n staging`), but upstream doesn't mark it
+    // isPersistent, so the parser refuses to bind it mid-chain.
+    // Record the real CLI semantics. Root level only — subcommand-
+    // local `--namespace` (config set-context) stays local.
+    if (isRoot) opt.isPersistent = true;
+    for (const arg of opt.args) {
+      if (arg.generators.length === 0) {
+        arg.generators.push({
+          type: "template",
+          script: KUBECTL_NAMESPACES_SCRIPT,
+        });
+      }
+    }
+  }
+  for (const sub of spec.subcommands) enrichK8sNamespaces(sub, false);
+};
+
 const loadOne = async (file: string): Promise<NervSpec | null> => {
   const abs = resolve(file);
   return loadOneAt(abs, {
@@ -986,7 +1042,9 @@ const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
   const prev = AWS_SERVICE_HINT;
   AWS_SERVICE_HINT = file.includes("/aws/") ? stem : null;
   try {
-    return await convertSpec(exported as FigSpec, ctx, stem);
+    const spec = await convertSpec(exported as FigSpec, ctx, stem);
+    if (K8S_NAMESPACE_SPEC_STEMS.has(stem)) enrichK8sNamespaces(spec);
+    return spec;
   } finally {
     AWS_SERVICE_HINT = prev;
   }

@@ -222,11 +222,18 @@ edit-buffer 인터셉트 방식이 ZLE widget → PTY 가로채기로 바뀐다.
 | 항목 | M0 ZLE | M1 figterm |
 |------|--------|-----------|
 | 입력 라인 위치 추론 | zsh `LBUFFER` | `nerv-term` (← alacritty_terminal) screen state — 정확 |
-| prompt 경계 감지 | 없음 | preexec / precmd OSC 697 hooks (post.zsh) |
-| 셸 지원 | zsh 만 | zsh + bash (post.bash) + fish (M1 + 1, opt-in) |
-| PATH 설치 | `~/.zshrc` source | `~/.local/bin/nerv-pty` + `pre.sh` 의 `exec -a` 교체 |
+| prompt 경계 감지 | 없음 | precmd/preexec OSC 697 markers (`_nerv-pty.{zsh,bash,fish}` 부트스트랩이 emit — `Shell=` 마커가 edit-buffer 게이트) |
+| 셸 지원 | zsh 만 | zsh + bash + fish (셋 다 출하됨 — bash/fish 는 ZLE 부재로 PTY 가 *유일* 경로) |
+| 바이너리 배치 | `~/.zshrc` source | `nerv-pty` 가 release tarball/Formula 동봉 — `nerv init` 이 sibling lookup 으로 `NERV_PTY_BIN` 자동 export, 부트스트랩이 `exec nerv-pty -- "$SHELL"` |
 | 활성화 분기 | 기본 | `NERV_PTY=1` 환경변수 |
 | 코드서명 | 불필요 | **필수** (Apple Developer ID + notarization, M0-8 인프라 재활용) |
+
+PTY path 의 자동 검증: `scripts/e2e-pty-ghost.py` (zsh) +
+`scripts/e2e-pty-bash.py` + `scripts/e2e-pty-fish.py` — 셋 다
+ghost / accept+frecency / popup 박스 / Tab 네비 / PreExec 5종 체크.
+fish 4.x 는 startup 시 터미널 capability 쿼리 (XTGETTCAP / DA / OSC 11)
+응답을 기다리므로 bare-PTY harness 가 응답을 에뮬레이트한다 (실 터미널
+에서는 비문제).
 
 ZLE 와 figterm 은 **상호 배타** — `NERV_PTY=1` 감지 시 ZLE widget
 자동 비활성. CLAUDE.md §4 invariant 행 참조.
@@ -312,3 +319,4 @@ M0 / 매 마이너 릴리즈마다 다음 체크리스트:
 *문서 v1.1 — PLAN.md v0.5 §11 의 정밀 명세. v1.0 → v1.1 변경: §1 매트릭스에서 Warp / VS Code / JetBrains / Hyper 제거 (Triage 정책으로 대체), §5.1 iTcerm2 오타 수정, §5.4 위치 계산 일반 원칙으로 통합. M0-5 에 zsh-autosuggestions 공존 e2e 시나리오 추가 (PLAN v0.5 정합).*
 *v1.2 — PLAN.md v0.6 정합. PRD §5.8 figterm opt-in 도입으로 §6.4 신설 (M1 nerv-pty path 와 ZLE path 의 차이 + 상호 배타 + Apple 서명 요건 + 베스트에포트 격상 검토). §1 매트릭스 자체는 변경 없음 (M0 기준 유지). 변경 트리거: figterm 의 M1 dogfooding 결과로 베스트에포트 → 보장 격상.*
 *v1.3 — §3.1 신설 (icon glyph width contract — `sanitize_icon` 이 unicode-width width==2 강제, ambiguous-width 거부). 위젯의 "non-ASCII = 2 cells" 가정을 엔진이 책임지는 contract 를 명시. 변경 트리거: 5th wire 필드 도입 (per-row width 명시 전송) 시 본 절 deprecate.*
+*v1.4 — §6.4 현행화: bash/fish PTY path 출하 반영 (fish "M1+1" 예정 → M1 출하). 부트스트랩 파일명 (`post.*`/`pre.sh` 구상 → `_nerv-pty.{zsh,bash,fish}` 실명), `NERV_PTY_BIN` sibling lookup, OSC 697 `Shell=` 마커 게이트, PTY e2e 3종 (`e2e-pty-{ghost,bash,fish}.py`) 명시. fish 4.x capability-query 주의 추가.*

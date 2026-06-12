@@ -11,11 +11,11 @@
 | # | 파일 | 역할 |
 |---|------|------|
 | 1 | `PLAN.md` (v0.6) | 제품 정책 / 스코프 / 로드맵 — **모든 결정의 근거**. v0.5.1 = `docs/archive/PLAN.v0.5.1.md` 보존 |
-| 2 | `docs/uninstall-spec.md` (v1.1, v1.3 갱신 예정) | `nerv uninstall` 인수 기준 (출시 차단 요건) |
-| 3 | `docs/error-states.md` (v1.1, v1.3 갱신 예정) | 5종 에러 UX + `nerv doctor` 자동 실행 (`fig_diagnostic` 흡수로 80% 완성) |
-| 4 | `docs/terminal-compat.md` (v1.1, v1.2 갱신 예정) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + figterm opt-in |
-| 5 | `docs/first-5-min.md` (v1.1, v1.2 갱신 예정) | 12+0.5단계 사용자 시나리오 |
-| 6 | `docs/spec-conversion-policy.md` (v1.2, v1.3 갱신 예정) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C opt-in (M1) |
+| 2 | `docs/uninstall-spec.md` (v1.4) | `nerv uninstall` 인수 기준 (출시 차단 요건) |
+| 3 | `docs/error-states.md` (v1.3) | 5종 에러 UX + `nerv doctor` 자동 실행 (E5 schema 게이트 포함 구현 완료) |
+| 4 | `docs/terminal-compat.md` (v1.4) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + §6.4 PTY path (zsh/bash/fish 출하) |
+| 5 | `docs/first-5-min.md` (v1.4) | 12+0.5단계 사용자 시나리오 — 동적 4단계 (4/7/11/12) 전부 실완성 격상 |
+| 6 | `docs/spec-conversion-policy.md` (v1.3) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C (출시 미동봉, opt-in scaffold) |
 | 7 | `docs/dogfood.md` | M1 10주차 내부 dogfooding 플레이북 — exit criteria + 일일 체크리스트 + 피드백 캡처 (운영 문서) |
 
 > **원칙**: *"글이 코드보다 먼저"*. 어떤 동작을 바꾸기 전에 위 문서 중 해당 절을 먼저 갱신하고 PR 에 그 변경을 함께 커밋하세요. 코드와 문서가 어긋난 PR 은 리뷰 거부 사유.
@@ -49,6 +49,7 @@
 - ✅ **SpecRegistry lazy load + 이벤트/mtime hybrid hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. macOS FSEvents (`notify` crate) 가 spec dir 변경 push → pending invalidations 세트에 stem 등록 → lookup() 가 drain + cache evict. mtime check 는 belt-and-suspenders (watcher 실패 / 이벤트 누락 시 fallback). spec 재설치 시 daemon 재시작 불필요 + 이벤트 latency 거의 0.
 - ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
 - ✅ **Tier B generator 실행**: 정적 shell command (예: `git branch --list`) → Rust 가 직접 spawn (200ms timeout) + TTL 5s LRU 64 cache (keystroke 마다 spawn 방지) + ANSI/git-marker line sanitization. Tier C (closure) 는 deno_core 비목표 정책 + closure JSON 직렬화 불가로 영구 defer.
+- ✅ **k8s `-n` namespace 회복 (2026-06-12, 5 spec)**: upstream spec 의 root `-n/--namespace` arg 가 generator 없는 빈 선언 → (1) ts-to-json `enrichK8sNamespaces` 가 namespaces Tier B template 주입 + root `-n` 에 `isPersistent` 부여 (global flag 실의미). 적용 = kubectl/helm/helmfile/kubecolor/argo (`K8S_NAMESPACE_SPEC_STEMS` whitelist — root 옵션 description 으로 k8s 의미 검증 후 추가; git/aws/sfdx 의 `-n` 은 딴 뜻). (2) 엔진 option-arg dispatch 의 latent bug 수정 — `current.options` 만 탐색하던 것을 `find_option_inherited` 로 (persistent ancestor 옵션 arg generator 가 subcommand 뒤에서 무시되던 문제, isPersistent 104 spec 영향). first-5-min 12단계 동적 4건 전부 실완성. 회귀 테스트 `persistent_root_option_arg_generator_runs_mid_chain` + bun 4 test + stub e2e (kubectl/helm mid-chain).
 - ✅ **well-known Tier C → B 회복** (signature-based recognizer 5종):
   - `Generator::PackageJsonScripts` — npm/yarn/pnpm/bun/rushx/nr 6 spec. walk-up + JSON 파싱 + scripts 키.
   - `Generator::Filepaths { folders_only }` — cd/cat/ls/59 spec. `ls -1ApL` closure 시그니처 감지. cwd-aware + dotfile 제외.
@@ -88,7 +89,7 @@
   - **dead 산출물 삭제**: CHAT_BINARY_NAME 와 nerv-log 의 qchat mcp.log dead branch (35 LOC + LogGuard._mcp_file_guard 필드), CLI_BINARY_NAME_MINIMAL, OLD_PRODUCT_NAME / OLD_CLI_BINARY_NAMES / OLD_PTY_BINARY_NAMES (CodeWhisperer legacy), consts::url 모듈 (docs.aws.amazon.com 6 URL, 0 consumer).
   - **bundle 식별자 예약**: APP_BUNDLE_ID `com.amazon.codewhisperer` → `sh.nerv.nerv`, APP_BUNDLE_NAME `Amazon Q.app` → `Nerv.app`. launchd_plist 테스트 + insta snapshot 동기 갱신. Apple Developer 서명 단계 (M0-8) 가 단순 codesign 으로 떨어짐.
   - **settings key 리네이밍 + AI 제거**: `qterm.csi-u.enabled` → `pty.csi-u.enabled`, `qterm.enabled` → `pty.enabled`. CLAUDE.md §4 invariant (no AI) 에 따라 AI translate intercept (`#foo<Enter>` → `q translate 'foo'`) ~23 LOC + `ai.terminal-hash-sub` 설정 + `ai_enabled` 플래그 제거. on-disk migration 없음 — nerv-pty 는 M1 opt-in 으로 live user 없음.
-- ✅ **CI workflow_dispatch gate (2026-06-01 reset 까지)**: 1차 무료 Actions budget 90% (1,806 / 2,000 min) 도달. `ci.yml` 만 `on: workflow_dispatch:` 로 축소 (push/PR 트리거 정지). 다른 workflow 는 그대로 (release/homebrew-bump=tag/release event, upstream-monitor=cron 1·15일). restore 는 inline comment 한 줄 reflow.
+- ✅ **CI push/PR 트리거 복원 (2026-06-12)**: 2026-06-01 billing reset 경과로 `ci.yml` 의 workflow_dispatch-only gate 해제 — push(main)/pull_request(main)/workflow_dispatch 3종 트리거. 5월 gate 사유 = 1차 무료 Actions budget 90% (1,806 / 2,000 min) 도달이었음. budget 재도달 시 같은 방식 (`on:` 블록 축소) 으로 재게이트.
 - ✅ **Tier C executor 배선** (`feature = "quickjs"` opt-in): `nerv-quickjs` 스캐폴드 (rquickjs ~1MB sandbox, `eval_isolated` + `eval_with_budget` 200ms 기본) → `nerv-engine::tier_c::execute_custom_source` 헬퍼 → `complete.rs` 의 `Generator::Custom { source: Some(_), .. }` arm wire-up. ts-to-json 의 `captureClosureSource` 가 closure `toString()` 을 IIFE 형태로 감싸 (`(<fn>)(globalThis.__nerv_tokens, () => Promise.resolve(""))`) 32KB cap 적용해 emit. 715 spec 변환 → **473 closure source 캡처** (74 파일 분산, 100% capture rate). ⚠️ **capture ≠ execution**: 2026-06-06 e2e 검증 결과 473개 전부 sandbox 에서 0 candidate (None) — async 未await 76% + `__awaiter` 미정의 21% + shell stub. **실행률 0%**, quickjs 경로 현재 비작동. 상세 = `docs/findings/tier-c-quickjs-e2e.md`. 기본 빌드는 `nerv-quickjs` dep 0 (`cargo tree -p nerv-cli` / `nerv-daemon` 검증) — opt-in 만 binary 변동. Custom arm 은 well-known 회복 (aws_list 89 / kubectl_resources 86 / package_json_scripts 28 / ssh_hosts 9 / 외) 통과 후 마지막 fallback 으로만 동작. Soft-fail: tier_c None → next generator → smart filepaths fallback. 5 dispatch test + 1 default-build 호환 test.
 - ✅ **figterm PTY shim Phase 1+2 배선**: `NERV_PTY=1` 환경변수 opt-in. `cmd_init(--shell-script)` 가 env 감지 → ZLE 위젯 (`_nerv.zsh`) 대신 PTY 부트스트랩 (`_nerv-pty.zsh`) emit + `NERV_PTY_BIN={absolute path}` 자동 export (sibling lookup). `_nerv.zsh` 자체도 top-level self-skip (벨트+서스펜더). 부트스트랩 = re-entry guard (`NERV_PTY_SESSION_ID`) + TTY check (CI/pipe 무시) + PATH fallback → `exec nerv-pty -- "$SHELL"`. nerv-pty 바이너리 (6.69MB release, nerv-engine dep +0.09MB) release tarball + Homebrew Formula 동봉 (idle until opt-in). 3 dispatch tests (`init_snippet_for_zsh_default_is_zle_widget` / `init_snippet_for_zsh_pty_mode_is_pty_bootstrap` / `resolve_pty_bin_for_init_finds_sibling`).
 - ✅ **figterm PTY shim Phase 3a+3b 완료** (인라인 자동완성 작동): 흡수된 figterm 머신(PTY spawn / shadow term / interceptor)은 이미 LIVE 였고, completion 경로를 ~~desktop app(Hostbound, nerv-sh엔 없음)~~ → **nervd UDS 재배선**.
