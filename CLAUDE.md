@@ -11,11 +11,11 @@
 | # | 파일 | 역할 |
 |---|------|------|
 | 1 | `PLAN.md` (v0.6) | 제품 정책 / 스코프 / 로드맵 — **모든 결정의 근거**. v0.5.1 = `docs/archive/PLAN.v0.5.1.md` 보존 |
-| 2 | `docs/uninstall-spec.md` (v1.1, v1.3 갱신 예정) | `nerv uninstall` 인수 기준 (출시 차단 요건) |
-| 3 | `docs/error-states.md` (v1.1, v1.3 갱신 예정) | 5종 에러 UX + `nerv doctor` 자동 실행 (`fig_diagnostic` 흡수로 80% 완성) |
-| 4 | `docs/terminal-compat.md` (v1.1, v1.2 갱신 예정) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + figterm opt-in |
-| 5 | `docs/first-5-min.md` (v1.1, v1.2 갱신 예정) | 12+0.5단계 사용자 시나리오 |
-| 6 | `docs/spec-conversion-policy.md` (v1.2, v1.3 갱신 예정) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C opt-in (M1) |
+| 2 | `docs/uninstall-spec.md` (v1.4) | `nerv uninstall` 인수 기준 (출시 차단 요건) |
+| 3 | `docs/error-states.md` (v1.3) | 5종 에러 UX + `nerv doctor` 자동 실행 (E5 schema 게이트 포함 구현 완료) |
+| 4 | `docs/terminal-compat.md` (v1.4) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + §6.4 PTY path (zsh/bash/fish 출하) |
+| 5 | `docs/first-5-min.md` (v1.3) | 12+0.5단계 사용자 시나리오 — 동적 4단계 중 4/7/12 실완성 격상, 11 잔존 gap |
+| 6 | `docs/spec-conversion-policy.md` (v1.3) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C (출시 미동봉, opt-in scaffold) |
 | 7 | `docs/dogfood.md` | M1 10주차 내부 dogfooding 플레이북 — exit criteria + 일일 체크리스트 + 피드백 캡처 (운영 문서) |
 
 > **원칙**: *"글이 코드보다 먼저"*. 어떤 동작을 바꾸기 전에 위 문서 중 해당 절을 먼저 갱신하고 PR 에 그 변경을 함께 커밋하세요. 코드와 문서가 어긋난 PR 은 리뷰 거부 사유.
