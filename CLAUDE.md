@@ -16,6 +16,7 @@
 | 4 | `docs/terminal-compat.md` (v1.1, v1.2 갱신 예정) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + figterm opt-in |
 | 5 | `docs/first-5-min.md` (v1.1, v1.2 갱신 예정) | 12+0.5단계 사용자 시나리오 |
 | 6 | `docs/spec-conversion-policy.md` (v1.2, v1.3 갱신 예정) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C opt-in (M1) |
+| 7 | `docs/dogfood.md` | M1 10주차 내부 dogfooding 플레이북 — exit criteria + 일일 체크리스트 + 피드백 캡처 (운영 문서) |
 
 > **원칙**: *"글이 코드보다 먼저"*. 어떤 동작을 바꾸기 전에 위 문서 중 해당 절을 먼저 갱신하고 PR 에 그 변경을 함께 커밋하세요. 코드와 문서가 어긋난 PR 은 리뷰 거부 사유.
 
@@ -219,7 +220,7 @@ crates/
   # 기존 보존
   nerv-cli/        # `nerv` 바이너리 (clap, 5 cmd + hidden _complete IPC bridge)
   nerv-daemon/     # `nervd` (tokio + UDS, SpecRegistry 로드 → nerv-engine::complete 위임)
-  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / ipc_client (nervd UDS 클라 단일소스) / manifest (E5 schema 게이트) / paths / ranker)
+  nerv-engine/     # 자작 + TS 포팅분 (shell_parser / spec_parser / spec_loader (gzip 자동감지) / complete (lazy registry) / ipc / ipc_client (nervd UDS 클라 단일소스) / manifest (E5 schema 게이트) / paths / frecency (per-spec usage ranking))
                    #   + bin/build_specs.rs (M0-6 JSON validator/canonicalizer, --compress 플래그)
                    #   + tests/fixtures/specs/{git,echo,docker,kubectl,npm,cargo,gh,brew,make}.json (9 hand-rolled)
                    #   + tests/fixtures/converted/ (.gitignore; bun 변환 결과 715 spec; depth=1, 176MB plain or 10MB gzipped)
