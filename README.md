@@ -8,21 +8,21 @@ Nerv brings back the original promise: **press a key, see the next token. That's
 
 ## Status
 
-**Pre-alpha** — scaffolding phase. See [`PLAN.md`](./PLAN.md) (v0.5) for the full design and [`docs/`](./docs/) for the acceptance criteria written before the code.
+**Alpha** — the M1 4-week checkpoint passed: a 715-spec completion engine, a ZLE widget for zsh, an opt-in PTY path for bash/fish, inline ghost text + popup, frecency ranking, and trace-zero uninstall all work end to end. Signing/notarization (M0-8) and a 2-week internal dogfooding window remain before v1.0. See [`PLAN.md`](./PLAN.md) (v0.6) for the full design and [`docs/`](./docs/) for the acceptance criteria written before the code.
 
 ## What it is
 
-- **macOS + zsh** only (v1.0). bash, fish, Linux land in v1.x.
-- **Static Fig spec compatibility** — uses the [`withfig/autocomplete`](https://github.com/withfig/autocomplete) repository (MIT) at build time. No runtime JS engine.
+- **macOS** (v1.0). **zsh** uses a native ZLE widget; **bash** and **fish** work through an opt-in PTY shim (`NERV_PTY=1`). Linux and Windows are v1.x.
+- **Static Fig spec compatibility** — uses the [`withfig/autocomplete`](https://github.com/withfig/autocomplete) repository (MIT) at build time. No runtime JS engine in the default build (a sandboxed `rquickjs` Tier C path exists only behind an opt-in feature flag).
 - **Single binary**, installed via Homebrew. No Node, no daemon manager, no cloud.
 - **Apache-2.0 licensed**, no telemetry, no auth.
 
 ## What it isn't (v1.0)
 
-- AI / natural-language to command (this is intentional — see [`PLAN.md`](./PLAN.md) §10)
-- Dynamic completions like `git checkout <branch>` (deferred to v1.1; v1.0 shows a hint pointing to the right shell command)
-- Available on Linux, Windows, or in shells other than zsh
-- Configurable via a `nerv config` command (edit TOML directly)
+- AI / natural-language to command (this is intentional — see [`PLAN.md`](./PLAN.md) §4)
+- Arbitrary dynamic completions backed by JavaScript closures (deferred — these need a JS runtime). Static shell-command generators *do* work: `git checkout <branch>`, `npm run <script>`, `cd <dir>`, `z <history>`, and well-known patterns (kubectl, docker, gh, aws) are recovered natively in Rust without a JS engine.
+- Available on Linux or Windows
+- Configurable via a `nerv config` command (edit `~/.config/nerv/nerv.toml` directly)
 
 ## Install
 
@@ -54,15 +54,20 @@ It removes the `~/.zshrc` block, the daemon, caches, and configs. We treat *trac
 
 ```
 crates/
-  nerv-cli/        # `nerv` binary (clap subcommands)
-  nerv-daemon/     # `nervd` background process (tokio + UDS)
-  nerv-engine/     # parser, ranking, IPC types
-  nerv-shell/      # zsh init script generator
-build/
-  spec-transpile/  # withfig TS specs -> JSON build tool (swc)
-shell-integrations/zsh/_nerv.zsh   # ZLE widget
-specs-prebuilt/                    # build artifacts (release only, not committed)
+  nerv-cli/        # `nerv` binary (clap, 5 subcommands + hidden _complete IPC bridge)
+  nerv-daemon/     # `nervd` background process (tokio + UDS, lazy SpecRegistry)
+  nerv-engine/     # parser, spec loader, ranking, IPC types, schema gate
+  nerv-shell/      # zsh init-script / marker-block generator
+  nerv-pty/        # figterm-derived PTY shim (opt-in, NERV_PTY=1)
+  nerv-term/       # alacritty-derived shadow terminal
+  nerv-{ipc,proto,integrations,os,util,settings,log,diag}/  # absorbed Fig crates (brand-stripped)
+shell-integrations/
+  zsh/_nerv.zsh           # ZLE widget (default zsh path)
+  {zsh,bash,fish}/_nerv-pty.*  # PTY bootstraps (NERV_PTY=1)
+tools/ts-to-json/                  # bun-based withfig TS spec -> JSON converter
+packaging/homebrew/nerv.rb         # Homebrew Formula template (auto-bumped on release)
 vendor/withfig-autocomplete/       # git subtree (MIT, version-pinned)
+vendor/aws-autocomplete/           # git subtree (Apache+MIT, absorbed Fig engine)
 docs/                              # acceptance criteria written before the code
 ```
 
@@ -70,12 +75,13 @@ docs/                              # acceptance criteria written before the code
 
 The acceptance criteria are intentionally written before any production code, so the implementation has a target instead of a vibe:
 
-- [`PLAN.md`](./PLAN.md) — product plan, scope, roadmap (v0.5)
+- [`PLAN.md`](./PLAN.md) — product plan, scope, roadmap (v0.6)
 - [`docs/uninstall-spec.md`](./docs/uninstall-spec.md) — the trace-zero uninstall contract
 - [`docs/error-states.md`](./docs/error-states.md) — five auto-detected error UX cases
 - [`docs/terminal-compat.md`](./docs/terminal-compat.md) — guaranteed and best-effort terminals
 - [`docs/first-5-min.md`](./docs/first-5-min.md) — install + 12-step usage scenario
 - [`docs/spec-conversion-policy.md`](./docs/spec-conversion-policy.md) — TS spec → static JSON policy
+- [`docs/dogfood.md`](./docs/dogfood.md) — the M1 10-week internal dogfooding playbook
 
 ## Try it locally (isolated, reversible)
 
@@ -112,7 +118,7 @@ Exit with `exit` (or close the tab). Your real `~/.zshrc` is untouched. The `/tm
 
 ## Contributing
 
-The project is in M0 spike phase. Issues and discussions are welcome at <https://github.com/nerv-sh/nerv/issues>. Sign-off (DCO) is required on commits.
+The project is in the M1 alpha / dogfooding phase. Issues and discussions are welcome at <https://github.com/nerv-sh/nerv/issues>. Sign-off (DCO) is required on commits.
 
 ## License
 
