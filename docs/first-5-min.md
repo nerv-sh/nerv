@@ -3,7 +3,7 @@
 > **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 M0-7 / §5.3 정합.
 > **목적**: 설치 후 5분간 사용자가 "아, 이게 되네" 를 느끼는 순간을 정의한다. 리텐션의 핵심.
 > **v0.6 정합**: 본 시나리오의 12+0.5 단계는 v0.5 그대로. PRD v0.6 의 엔진 전환 (자작 → Fig Rust crates 흡수 + TS Rust 포팅) 은 *내부 구현 변경*, 사용자 체감 동일.
-> **v1.3 현행화**: M1 의 Tier B generator 실행 + well-known 패턴 회복 (Rust-native) 으로 동적 힌트 4단계 중 **4/7/12 가 실완성으로 격상** (`git checkout` → 실제 branch 목록, `docker run` → 로컬 image 목록, `kubectl describe pod` → 리소스 목록). 11단계 (`-n` namespace) 만 힌트 케이스 잔존. frecency 도 v1.1 예정 → 출하됨. 설명 표시는 `?` 키 구상 → **footer 자동 설명 (Fig style)** 로 변경.
+> **v1.3-v1.4 현행화**: M1 의 Tier B generator 실행 + well-known 패턴 회복 (Rust-native) 으로 동적 힌트 4단계 **전부 (4/7/11/12) 실완성으로 격상** (`git checkout` → 실제 branch 목록, `docker run` → 로컬 image 목록, `kubectl -n` → namespace 목록, `kubectl describe pod` → 리소스 목록). frecency 도 v1.1 예정 → 출하됨. 설명 표시는 `?` 키 구상 → **footer 자동 설명 (Fig style)** 로 변경.
 
 ---
 
@@ -246,25 +246,30 @@ Tier B template generator (`git branch -a --sort=-committerdate`) 를
 - 정적으로 알려진 리소스 종류 만 표시 (CRD 는 동적이라 제외)
 - ≥ 15개
 
-#### 11단계 — `kubectl get pods -n ⎵` (★ 잔존 동적 gap — 유일)
+#### 11단계 — `kubectl get pods -n ⎵` (★ 동적 완성 케이스 — v1.4 격상)
 
 | 입력 | 기대 화면 |
 |------|----------|
-| `kubectl get pods -n ` | (현재) 빈 응답 — namespace arg 의 변환 generator 가 비어 있음 |
+| `kubectl get pods -n ` | 실제 namespace 목록 (`kubectl get namespaces --no-headers -o custom-columns=:metadata.name`) |
 
-12단계 중 동적 회복이 *안 된* 유일한 단계. 원본 Fig spec 의 namespace
-generator 가 closure form 이라 ts-to-json 회복 패턴 (kubectl_resources
-포함) 에 안 잡힘.
+당초 유일한 잔존 gap 이었다. 원본 Fig spec 의 root `-n/--namespace` arg
+가 generator 자체가 없는 빈 선언이라 (recognizer 가 잡을 closure 도
+없음), 2단 회복으로 격상:
 
-**합격 기준** (현행):
+1. **ts-to-json enrichment** (`enrichKubectlNamespaces`): kubectl 변환
+   시 `-n/--namespace` 옵션의 빈 arg 에 namespaces Tier B template 주입
+   + root `-n` 에 `isPersistent` 부여 (kubectl 의 global flag 실의미 —
+   upstream 이 안 박아둔 것).
+2. **엔진 dispatch 수정**: option-arg dispatch 가 current level 옵션만
+   탐색하던 latent bug → `find_option_inherited` 로 ancestor persistent
+   옵션까지 탐색. 이 버그는 isPersistent 를 쓰는 104개 spec 전체에서
+   "subcommand 뒤 persistent 옵션의 arg generator 무시" 로 잠복해 있었다.
 
-- 빈 응답이 입력을 방해하지 않음 (팝업 미표시, 라인 무손상)
-- "고장났다" 오해 소지 최소화 — 다른 11단계가 모두 동작하므로 사용자가 *이 인자만 동적* 임을 학습
+**합격 기준**:
 
-**회복 경로** (둘 중 하나로 격상):
-
-- (a) ts-to-json recognizer 에 namespace-closure 시그니처 추가 → `kubectl get namespaces` Tier B 회복
-- (b) §5.1 회색 힌트 UX 구현 (`Response::DynamicHint` variant 는 ipc.rs 에 정의돼 있으나 현재 emit 0곳)
+- 클러스터 연결 시: 실제 namespace 이름들이 추천으로 표시, prefix 필터 동작
+- 클러스터 미연결 시: generator 후보 0 → 빈 응답, 입력 방해 X
+- `kubectl get ⎵` (positional) 은 여전히 리소스 *타입* 완성 — 옵션-arg 와 positional 슬롯이 섞이지 않음 (회귀 테스트: `persistent_root_option_arg_generator_runs_mid_chain`)
 
 #### 12단계 — `kubectl describe pod ⎵` (★ 동적 완성 케이스 — v1.3 격상)
 
@@ -285,7 +290,7 @@ generator 가 closure form 이라 ts-to-json 회복 패턴 (kubectl_resources
 M0 산출물 7번 (Go/No-Go) 의 차단 요건:
 
 - 12단계 중 **10단계 이상 통과** 시 GO.
-- 단, **0단계 (30초 KPI) + 0.5단계 (실패 path 3건 중 2건) + 4/7/12 동적 완성 3건은 모두 통과** 가 별도 차단 요건. 11단계 (잔존 gap) 는 "빈 응답이 입력 무방해" 만 요구.
+- 단, **0단계 (30초 KPI) + 0.5단계 (실패 path 3건 중 2건) + 4/7/11/12 동적 완성 4건은 모두 통과** 가 별도 차단 요건.
 - 통과 = 위 "기대 화면" 과 "합격 기준" 모두 충족.
 
 세부 합격 기준:
@@ -296,7 +301,7 @@ M0 산출물 7번 (Go/No-Go) 의 차단 요건:
 | latency | 1/2/3/5/6/8/9/10 단계 모두 p95 ≤ 25 ms (generator 단계는 cache hit 기준) |
 | 추천 개수 | 1/5/9 단계 각 ≥ 8 (git), ≥ 10 (docker), ≥ 12 (kubectl) |
 | footer 설명 | 1/3/5/8/9 단계에서 선택 행의 정확한 설명이 footer 표시 |
-| 동적 완성 | 4/7/12 단계 실완성 (각각 branch / image / 리소스 목록), 11단계 빈 응답 무방해 |
+| 동적 완성 | 4/7/11/12 단계 모두 실완성 (branch / image / namespace / 리소스 목록) |
 | ANSI 무손상 | 모든 단계에서 입력 라인 텍스트 손상 X |
 
 ---
@@ -366,8 +371,9 @@ docs/scripts/teardown-first-5-min.sh
   부재). 출시 바이너리 미동봉 결정 — `docs/findings/tier-c-quickjs-e2e.md`
   참조. 재개 조건 = async Promise drain + host-global 주입.
 
-따라서 잔존 gap (11단계 류 closure-form generator) 의 회복 경로는
-rquickjs 재개가 아니라 **recognizer 패턴 추가** 가 1순위.
+따라서 잔존 closure-form generator 의 회복 경로는 rquickjs 재개가
+아니라 **recognizer / enrichment 패턴 추가** 가 1순위 — 11단계가 그
+증명 (generator 가 아예 없던 upstream gap 을 enrichment 로 메움).
 
 M1 figterm opt-in (`NERV_PTY=1`) 도입 시 본 시나리오는 *figterm
 환경에서도 동일하게 통과* 해야 한다 (M1 dogfooding 검증).
@@ -377,7 +383,6 @@ M1 figterm opt-in (`NERV_PTY=1`) 도입 시 본 시나리오는 *figterm
 ## 9. 변경 트리거
 
 - 50개 spec 후보 풀에서 git/docker/kubectl 중 하나가 빠지는 경우 → 시나리오 재작성
-- 11단계 회복 (recognizer 추가 또는 §5.1 힌트 UX 구현) → 11단계 격상 재작성
 - 30초 KPI 변경 (예: 20초로 강화)
 - rquickjs 재개 조건 충족 (findings 문서 §Root causes) → §8 재평가
 
@@ -386,3 +391,4 @@ M1 figterm opt-in (`NERV_PTY=1`) 도입 시 본 시나리오는 *figterm
 *문서 v1.1 — PLAN.md v0.5 §10 M0-7 의 정밀 명세. v1.0 → v1.1 변경: 0.5단계 (설치 실패 path 3건) 신설 — Xcode CLT 미설치 / oh-my-zsh 충돌 / 재설치 멱등 (CEO v0.4 GO 조건 ②). §4 합격 기준에 0.5단계 추가. 본 시나리오 통과가 v1.0 출시의 사용자 검증 차단 요건.*
 *v1.2 — PLAN.md v0.6 정합. 시나리오 본문 무변경 (사용자 체감 동일). §8 만 갱신: v1.1 동적 완성 → rquickjs opt-in 명시, M1 figterm path 에서도 동일 통과 요구 추가. 변경 트리거: v1.1 rquickjs 도입 시 본 문서 deprecate, `first-5-min-v1.1.md` 로 이행.*
 *v1.3 — 출하 현실 동기화. (1) 동적 힌트 4단계 중 4/7/12 를 실완성으로 격상 (Tier B template spawn + kubectl_resources 회복 — JS 엔진 없이). 11단계만 잔존 gap 으로 명시 + 회복 경로 2종 기록. (2) frecency 출하 반영 (1단계 정렬). (3) `?` 키 도움말 구상 → footer 자동 설명 (Fig style) 실구현 반영. (4) §8 재작성: rquickjs 0% e2e → 출시 미동봉 결정, Rust-native recognizer 가 회복 1순위. §7 안티패턴 동기 갱신.*
+*v1.4 — 11단계 회복으로 동적 4단계 전부 격상. ts-to-json `enrichKubectlNamespaces` (빈 namespace arg 에 Tier B template 주입 + root `-n` isPersistent 부여) + 엔진 option-arg dispatch 의 inherited-lookup 수정 (persistent ancestor 옵션의 arg generator 가 subcommand 뒤에서 무시되던 latent bug — isPersistent 104 spec 전체 영향). 회귀 테스트 `persistent_root_option_arg_generator_runs_mid_chain`.*

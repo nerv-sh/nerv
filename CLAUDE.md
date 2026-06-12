@@ -14,7 +14,7 @@
 | 2 | `docs/uninstall-spec.md` (v1.4) | `nerv uninstall` 인수 기준 (출시 차단 요건) |
 | 3 | `docs/error-states.md` (v1.3) | 5종 에러 UX + `nerv doctor` 자동 실행 (E5 schema 게이트 포함 구현 완료) |
 | 4 | `docs/terminal-compat.md` (v1.4) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + §6.4 PTY path (zsh/bash/fish 출하) |
-| 5 | `docs/first-5-min.md` (v1.3) | 12+0.5단계 사용자 시나리오 — 동적 4단계 중 4/7/12 실완성 격상, 11 잔존 gap |
+| 5 | `docs/first-5-min.md` (v1.4) | 12+0.5단계 사용자 시나리오 — 동적 4단계 (4/7/11/12) 전부 실완성 격상 |
 | 6 | `docs/spec-conversion-policy.md` (v1.3) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C (출시 미동봉, opt-in scaffold) |
 | 7 | `docs/dogfood.md` | M1 10주차 내부 dogfooding 플레이북 — exit criteria + 일일 체크리스트 + 피드백 캡처 (운영 문서) |
 
@@ -49,6 +49,7 @@
 - ✅ **SpecRegistry lazy load + 이벤트/mtime hybrid hot-reload**: at_dir → 디스크 접근은 lookup() 시점. 715 spec 캐시 환경에서도 daemon 즉시 기동. macOS FSEvents (`notify` crate) 가 spec dir 변경 push → pending invalidations 세트에 stem 등록 → lookup() 가 drain + cache evict. mtime check 는 belt-and-suspenders (watcher 실패 / 이벤트 누락 시 fallback). spec 재설치 시 daemon 재시작 불필요 + 이벤트 latency 거의 0.
 - ✅ **gzip 압축 cache** (`flate2`): `*.json.gz` 자동 감지 + decompress. 45MB→4.5MB plain, 176MB→10MB at depth=1 (10×). `build-specs --compress` 플래그.
 - ✅ **Tier B generator 실행**: 정적 shell command (예: `git branch --list`) → Rust 가 직접 spawn (200ms timeout) + TTL 5s LRU 64 cache (keystroke 마다 spawn 방지) + ANSI/git-marker line sanitization. Tier C (closure) 는 deno_core 비목표 정책 + closure JSON 직렬화 불가로 영구 defer.
+- ✅ **kubectl `-n` namespace 회복 (2026-06-12)**: upstream spec 의 root `-n/--namespace` arg 가 generator 없는 빈 선언 → (1) ts-to-json `enrichKubectlNamespaces` 가 namespaces Tier B template 주입 + root `-n` 에 `isPersistent` 부여 (kubectl global flag 실의미), (2) 엔진 option-arg dispatch 의 latent bug 수정 — `current.options` 만 탐색하던 것을 `find_option_inherited` 로 (persistent ancestor 옵션 arg generator 가 subcommand 뒤에서 무시되던 문제, isPersistent 104 spec 영향). first-5-min 12단계 동적 4건 전부 실완성. 회귀 테스트 `persistent_root_option_arg_generator_runs_mid_chain` + bun 4 test.
 - ✅ **well-known Tier C → B 회복** (signature-based recognizer 5종):
   - `Generator::PackageJsonScripts` — npm/yarn/pnpm/bun/rushx/nr 6 spec. walk-up + JSON 파싱 + scripts 키.
   - `Generator::Filepaths { folders_only }` — cd/cat/ls/59 spec. `ls -1ApL` closure 시그니처 감지. cwd-aware + dotfile 제외.
