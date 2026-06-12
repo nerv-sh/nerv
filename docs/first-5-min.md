@@ -256,10 +256,10 @@ Tier B template generator (`git branch -a --sort=-committerdate`) 를
 가 generator 자체가 없는 빈 선언이라 (recognizer 가 잡을 closure 도
 없음), 2단 회복으로 격상:
 
-1. **ts-to-json enrichment** (`enrichKubectlNamespaces`): kubectl 변환
-   시 `-n/--namespace` 옵션의 빈 arg 에 namespaces Tier B template 주입
-   + root `-n` 에 `isPersistent` 부여 (kubectl 의 global flag 실의미 —
-   upstream 이 안 박아둔 것).
+1. **ts-to-json enrichment** (`enrichK8sNamespaces`): k8s 계열 5종
+   (kubectl/helm/helmfile/kubecolor/argo) 변환 시 `-n/--namespace`
+   옵션의 빈 arg 에 namespaces Tier B template 주입 + root `-n` 에
+   `isPersistent` 부여 (global flag 실의미 — upstream 이 안 박아둔 것).
 2. **엔진 dispatch 수정**: option-arg dispatch 가 current level 옵션만
    탐색하던 latent bug → `find_option_inherited` 로 ancestor persistent
    옵션까지 탐색. 이 버그는 isPersistent 를 쓰는 104개 spec 전체에서
@@ -391,4 +391,4 @@ M1 figterm opt-in (`NERV_PTY=1`) 도입 시 본 시나리오는 *figterm
 *문서 v1.1 — PLAN.md v0.5 §10 M0-7 의 정밀 명세. v1.0 → v1.1 변경: 0.5단계 (설치 실패 path 3건) 신설 — Xcode CLT 미설치 / oh-my-zsh 충돌 / 재설치 멱등 (CEO v0.4 GO 조건 ②). §4 합격 기준에 0.5단계 추가. 본 시나리오 통과가 v1.0 출시의 사용자 검증 차단 요건.*
 *v1.2 — PLAN.md v0.6 정합. 시나리오 본문 무변경 (사용자 체감 동일). §8 만 갱신: v1.1 동적 완성 → rquickjs opt-in 명시, M1 figterm path 에서도 동일 통과 요구 추가. 변경 트리거: v1.1 rquickjs 도입 시 본 문서 deprecate, `first-5-min-v1.1.md` 로 이행.*
 *v1.3 — 출하 현실 동기화. (1) 동적 힌트 4단계 중 4/7/12 를 실완성으로 격상 (Tier B template spawn + kubectl_resources 회복 — JS 엔진 없이). 11단계만 잔존 gap 으로 명시 + 회복 경로 2종 기록. (2) frecency 출하 반영 (1단계 정렬). (3) `?` 키 도움말 구상 → footer 자동 설명 (Fig style) 실구현 반영. (4) §8 재작성: rquickjs 0% e2e → 출시 미동봉 결정, Rust-native recognizer 가 회복 1순위. §7 안티패턴 동기 갱신.*
-*v1.4 — 11단계 회복으로 동적 4단계 전부 격상. ts-to-json `enrichKubectlNamespaces` (빈 namespace arg 에 Tier B template 주입 + root `-n` isPersistent 부여) + 엔진 option-arg dispatch 의 inherited-lookup 수정 (persistent ancestor 옵션의 arg generator 가 subcommand 뒤에서 무시되던 latent bug — isPersistent 104 spec 전체 영향). 회귀 테스트 `persistent_root_option_arg_generator_runs_mid_chain`.*
+*v1.4 — 11단계 회복으로 동적 4단계 전부 격상. ts-to-json `enrichK8sNamespaces` (k8s 5종 — kubectl/helm/helmfile/kubecolor/argo — 의 빈 namespace arg 에 Tier B template 주입 + root `-n` isPersistent 부여) + 엔진 option-arg dispatch 의 inherited-lookup 수정 (persistent ancestor 옵션의 arg generator 가 subcommand 뒤에서 무시되던 latent bug — isPersistent 104 spec 전체 영향). 회귀 테스트 `persistent_root_option_arg_generator_runs_mid_chain`.*
