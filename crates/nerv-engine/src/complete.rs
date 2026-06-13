@@ -1133,11 +1133,15 @@ fn emit_candidates_for_arg(
                     parent_key,
                     id_field,
                 } => {
-                    // AWS CLI reads ~/.aws, not cwd — keep the cache global.
-                    if let Some(lines) = cached_template_generator(script, None) {
-                        let stdout = lines.join("\n");
+                    // Feed the *raw* stdout to the explicit json-path
+                    // extractor — `cached_template_generator` would have
+                    // already mangled `{`/`[`-leading output via
+                    // `extract_json_candidates`, leaving nothing for
+                    // `parent_key`/`id_field` to navigate. AWS CLI reads
+                    // ~/.aws, not cwd, so the raw cache stays global too.
+                    if let Some(raw) = cached_script_raw(script) {
                         if let Some(names) =
-                            extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
+                            extract_aws_json_names(&raw, parent_key, id_field.as_deref())
                         {
                             out.extend(
                                 names
@@ -1146,7 +1150,7 @@ fn emit_candidates_for_arg(
                                     .map(|name| Suggestion {
                                         insertion: name.clone(),
                                         display: name,
-                                        description: Some("aws".into()),
+                                        description: None,
                                         kind: SuggestionKind::Argument,
                                         priority: None,
                                         icon: None,
@@ -1314,6 +1318,14 @@ static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>>
 const GENERATOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const GENERATOR_CACHE_MAX: usize = 64;
 
+type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
+
+/// Process-wide cache for `ScriptWithJsonPath` raw stdout, keyed by script
+/// argv. Same TTL / size / eviction policy as [`GENERATOR_CACHE`]; separate
+/// because the value is the verbatim blob (not post-processed lines).
+static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
 /// Cached wrapper around [`execute_template_generator`]. Returns
 /// the cached value on TTL-fresh hit, otherwise runs the generator
 /// and inserts the result.
@@ -1468,6 +1480,57 @@ fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<V
         .filter(|s| !s.is_empty())
         .collect();
     Some(lines)
+}
+
+/// Run a generator script and return its **raw** stdout, cached for
+/// [`GENERATOR_CACHE_TTL`]. Unlike [`cached_template_generator`] this does no
+/// post-processing: `Generator::ScriptWithJsonPath` needs the verbatim blob
+/// so its explicit `parent_key`/`id_field` navigation runs. The template path
+/// intercepts any `{`/`[`-leading output with `extract_json_candidates`,
+/// which guesses at the array + label field — for a nested payload like
+/// `cargo metadata` (`{packages:[…], workspace_members:[…], resolve:…}`) it
+/// picks the wrong array and yields nothing, so the json-path generator must
+/// bypass it. 64 KB initial capacity (cargo metadata clears 70 KB on real
+/// workspaces); `read_to_end` grows past it regardless.
+fn cached_script_raw(script: &[String]) -> Option<String> {
+    use std::process::{Command, Stdio};
+    if script.is_empty() {
+        return None;
+    }
+    let key = script.to_vec();
+    if let Ok(cache) = SCRIPT_RAW_CACHE.lock() {
+        if let Some((stamp, blob)) = cache.get(&key) {
+            if stamp.elapsed() < GENERATOR_CACHE_TTL {
+                return Some(blob.clone());
+            }
+        }
+    }
+    let bin = script.first()?;
+    let child = Command::new(bin)
+        .args(&script[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let buf = spawn_with_timeout(child, 65_536)?;
+    if buf.is_empty() {
+        return None;
+    }
+    let blob = String::from_utf8_lossy(&buf).into_owned();
+    if let Ok(mut cache) = SCRIPT_RAW_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), blob.clone()));
+    }
+    Some(blob)
 }
 
 /// Split a multi-column Tier B output line into `(insertion, display)`.
@@ -2682,6 +2745,40 @@ mod tests {
         let r = complete("x ", 2, &registry_with(spec));
         let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(names, ["alpha", "beta", "gamma"]);
+    }
+
+    /// `cargo run -p <Tab>` regression: a `ScriptWithJsonPath` generator
+    /// whose script emits a nested JSON object (`{packages:[…], …}`) must
+    /// navigate `parent_key`/`id_field` over the **raw** stdout. The arm
+    /// used to route through `cached_template_generator`, which intercepts
+    /// `{`-leading output with `extract_json_candidates` and guesses the
+    /// wrong array — leaving the explicit json-path with nothing and the
+    /// completion empty.
+    #[test]
+    fn script_with_json_path_navigates_nested_object() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("pkg".into()),
+                generators: vec![Generator::ScriptWithJsonPath {
+                    script: vec![
+                        "/usr/bin/printf".into(),
+                        // Mirrors `cargo metadata`: the target array is
+                        // nested under `packages`, not at top level.
+                        r#"{"packages":[{"name":"alpha"},{"name":"beta"}],"workspace_members":["x"]}"#
+                            .into(),
+                    ],
+                    parent_key: "packages".into(),
+                    id_field: Some("name".into()),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(names, ["alpha", "beta"]);
     }
 
     /// `kubectl get pods -n <Tab>` regression: a persistent ROOT
