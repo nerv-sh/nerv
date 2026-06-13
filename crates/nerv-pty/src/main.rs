@@ -607,7 +607,7 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
         Err(err) => {
             if !nerv_settings::state::get_bool_or("pty.suppress_log_error", false) {
                 // let id = capture_anyhow(&err);
-                eprintln!("Fig failed to init logger: {err:?}");
+                eprintln!("nerv-pty failed to init logger: {err:?}");
             }
             None
         }
@@ -1152,8 +1152,8 @@ fn main() {
     logger::stdio_debug_log(format!("{NERV_LOG_LEVEL}={}", nerv_log::get_log_level()));
 
     if !state::get_bool_or("pty.enabled", true) {
-        println!("[NOTE] qterm is disabled. Autocomplete will not work.");
-        logger::stdio_debug_log("qterm is disabled. `qterm.enabled` == false");
+        println!("[NOTE] nerv-pty is disabled. Autocomplete will not work.");
+        logger::stdio_debug_log("nerv-pty is disabled. `pty.enabled` == false");
         return;
     }
 
