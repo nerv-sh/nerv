@@ -23,7 +23,9 @@ const completionSpec: Fig.Spec = {
 
 **문제**: `generators` 필드는 *실행 시점* 에 자식 프로세스 (예: `git branch --list`) 를 호출해 후보를 가져오는 코드. 정적 추출 불가.
 
-**v1.0 결정**: 정적으로 추출 가능한 부분만 JSON 으로 직렬화. 동적 generator 부분은 *마킹* 하고 사용자에겐 §5.1 힌트.
+**v1.0 결정**: 정적으로 추출 가능한 부분 (서브커맨드 / 플래그) 은 JSON 으로 직렬화. 동적 generator 는 **런타임에 실행** — Tier B (정적 shell command, 예 `git branch --list`) 는 엔진이 직접 spawn (200ms timeout + TTL 5s LRU 64 cache), well-known Tier C (kubectl/docker/aws/npm scripts/filepaths) 는 signature recognizer 로 Rust-native 회복. closure-only tail 만 `--features quickjs` opt-in (출시 미동봉).
+
+> **갱신 (v1.4)**: 초기 v0.5.1 설계는 동적 인자를 manifest `limited_args` 로 *마킹* 만 하고 사용자에겐 §5.1 "직접 입력하세요" 힌트를 띄울 계획이었다. M1 에서 Tier B 직접 실행 + recognizer 회복이 동적완성을 실제로 작동시키면서 이 마킹/힌트 메커니즘 (`limited_args` / `Response::DynamicHint` / `LimitedArg`) 은 **폐기 + 코드 삭제** 됐다. 아래 본문의 `limited_args` / §5.1 힌트 언급은 역사적 설계 기록 — 현 manifest 스키마 v2 에는 `limited_args` 필드가 없다.
 
 ---
 
@@ -170,19 +172,13 @@ cargo run -p nerv-engine --bin build-specs -- \
   "nerv_version": "1.0.0",
   "withfig_commit": "<pinned sha>",
   "specs": [
-    {
-      "name": "git",
-      "tier": "B",
-      "limited_args": [
-        {"path": "checkout/<arg>", "reason": "dynamic-branch-list", "hint": "git branch --list"},
-        {"path": "merge/<arg>", "reason": "dynamic-branch-list", "hint": "git branch --list"}
-      ],
-      "sha256": "<hex>"
-    },
+    {"name": "git", "tier": "B", "sha256": "<hex>"},
     {"name": "brew", "tier": "A", "sha256": "<hex>"}
   ]
 }
 ```
+
+> 스키마 v2 `SpecMeta` = `{name, tier, sha256}`. (v0.5.1 의 `limited_args` 필드는 폐기 — 위 §1 갱신 참조. 현재 `build-specs` 는 `specs: []` 로 쓰고, per-spec tier/sha256 채우기는 error-states §3.6.2 spec-age 진단과 함께 예약.)
 
 ### 4.2 결정성 (deterministic build)
 
@@ -444,3 +440,4 @@ v0.5 의 M0-9 산출물 5개 중 3개는 v0.5 에서 완료, 2개는 v0.6 폐기
 *v1.0 → v1.1: §5.3 fork 트리거 6개월 → 3개월 단축 + 모니터링 주기 30일 → 2주 (CEO v0.4 리뷰), §7.3 `nerv spec list --changes` v1.1+ 이연.*
 *v1.1 → v1.2: §5.1 실제 pin (`aef52acff8…`) 기록, §5.2 를 5.2.A (자체 PR) + **5.2.B (upstream 커뮤니티 PR 흡수)** 로 분할 — `upstream-prs.yml` + `vendor-patches/{upstream,self}/` + `AUTHORS.md`. M1 0–6주차 산출물 체크리스트 §10.B 신설. 사용자 제안 (upstream issue/PR 활용) 반영.*
 *v1.3 — PLAN.md v0.6 §0.2 / §5.7 정합. v1.2 → v1.3 변경: §0 헤더에 자작 transpile 폐기 + loadSpec.ts 포팅 명시, §4 빌드 파이프라인 전면 재정의 (build/spec-transpile/ → nerv-engine::{shell_parser, spec_parser, spec_loader}), **§4.4 rquickjs opt-in 신설** (M1 Tier C 회복, deno_core 금지), §5.0 신설 (두 upstream 의 역할 + matrix 모니터링), §5.1 라이선스 ISC 정정, §6 라이선스 표 정정 + 흡수 crate 라이선스 처리, §10 체크리스트를 v0.6 M0-1~6 산출물로 재구성. Tier A/B/C 분류 알고리즘 / classifier 자체 / §3 대체 큐 / §5.2 / §5.3 / §7 회귀 정책은 모두 무변경. 변경 트리거: M1 rquickjs 활성, withfig→fork 트리거 발동, aws-autocomplete EOL 신호 발견 시.*
+*v1.4 — `limited_args` / §5.1 힌트 UX 폐기 반영. v1.3 → v1.4 변경: §1 v1.0 결정을 "동적 generator 런타임 실행" (Tier B 직접 spawn + recognizer 회복) 으로 갱신 + v1.4 갱신 박스 추가, §4.1 manifest 예제에서 `limited_args` 제거 (스키마 v2 `SpecMeta = {name, tier, sha256}`). 폐기 근거: M1 에서 Tier B 실행 + well-known recognizer 가 동적완성을 실제로 작동시켜 마킹/힌트 메커니즘 (`Response::DynamicHint` / `LimitedArg`) 이 불필요해짐 → 코드 삭제 (CLAUDE.md §3, first-5-min §8, PLAN §5.1). §2 Tier 분류 / §3~§11 정책 본문은 무변경 (본문의 `limited_args` 언급은 역사적 설계 기록).*

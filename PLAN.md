@@ -145,12 +145,7 @@ M1 = 1,484 전체 자동 Tier 분류.
 - **Matching**:
   - 기본 = prefix (`git co` → `commit` / `config`, 단 `checkout` 은 `git ch` 에서만)
   - 옵션 = fuzzy (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`) — 활성 시 case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드, config 편집은 재시작 필요. spec per-arg `filterStrategy: "substring"` 은 user mode 무관 우선.
-- **Tier C 동적 generator UX** (M0 — rquickjs 도입 전):
-  ```
-  ⤷ 동적 완성은 v1.1에서 지원 예정 — 직접 입력하세요
-     ▸ git branch --list 로 후보 확인
-  ```
-- 같은 라인에서 한 번 표시 후 5초 디바운스.
+- **동적 generator**: Tier B (정적 shell command, 예 `git branch --list`) 는 Rust 가 직접 spawn (200ms timeout + TTL 5s LRU 64 cache). well-known Tier C (kubectl/docker/aws/npm scripts/filepaths 등) 는 signature recognizer 로 Rust-native 회복. 남은 closure-only tail 만 `--features quickjs` opt-in (출시 미동봉, e2e 실행률 0% — `docs/findings/tier-c-quickjs-e2e.md`). M0 의 "동적 완성은 v1.1 지원 예정 — 직접 입력하세요" 힌트 UX (`Response::DynamicHint` / `LimitedArg`) 는 작동하는 동적완성이 대체 → 삭제 (CLAUDE.md §3, first-5-min §8).
 
 ### 5.2 `?` 인라인 도움말
 
@@ -418,7 +413,7 @@ PLAN v0.5 §11 그대로. figterm opt-in 도입 시 `alacritty_terminal` 의 scr
 | **Apache-2.0 + MIT vs 우리 Apache-2.0 정합** | 낮음 | NOTICE 명시, 흡수 crate별 `LICENSE` 파일 보존 |
 | 1인 개발 + 14주 M1 → 번아웃 | 높음 | 4/10주차 체크포인트, 외부 기여 적극 수용 |
 | Developer ID 서명/공증 (M0-8) | 높음 | 선행 검증 (변경 없음) |
-| Tier C 동적 generator 한계 (M0 drop) | 중간 | M1 rquickjs opt-in 회복, M0 = §5.1 힌트 UX |
+| Tier C 동적 generator 한계 (M0 drop) | 중간 | Tier B 직접 spawn + well-known recognizer 회복 (kubectl/docker/aws/npm); closure-only tail 은 rquickjs opt-in (미동봉) |
 | `withfig/autocomplete` archived (1차 spec 소스) | 중간 | spec-conversion-policy §5.3 (2주 모니터, 3개월 부재 시 fork) |
 | **`aws/amazon-q-developer-cli-autocomplete` archived 또는 EOL** (신규) | 중간 | 마지막 커밋 2026-02-03 활성 — `upstream-monitor.yml` 에 추가 (2주 cron, 90일 부재 시 fork) |
 | **figterm 흡수 시 attack surface 증가** (신규) | 중간 | M1 opt-in 으로 격리, ZLE path 와 상호 배타 |

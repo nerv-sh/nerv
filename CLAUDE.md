@@ -15,7 +15,7 @@
 | 3 | `docs/error-states.md` (v1.3) | 5종 에러 UX + `nerv doctor` 자동 실행 (E5 schema 게이트 포함 구현 완료) |
 | 4 | `docs/terminal-compat.md` (v1.4) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + §6.4 PTY path (zsh/bash/fish 출하) |
 | 5 | `docs/first-5-min.md` (v1.4) | 12+0.5단계 사용자 시나리오 — 동적 4단계 (4/7/11/12) 전부 실완성 격상 |
-| 6 | `docs/spec-conversion-policy.md` (v1.3) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C (출시 미동봉, opt-in scaffold) |
+| 6 | `docs/spec-conversion-policy.md` (v1.4) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C (출시 미동봉, opt-in scaffold). v1.4 = `limited_args`/§5.1 힌트 UX 폐기 반영 |
 | 7 | `docs/dogfood.md` | M1 10주차 내부 dogfooding 플레이북 — exit criteria + 일일 체크리스트 + 피드백 캡처 (운영 문서) |
 
 > **원칙**: *"글이 코드보다 먼저"*. 어떤 동작을 바꾸기 전에 위 문서 중 해당 절을 먼저 갱신하고 PR 에 그 변경을 함께 커밋하세요. 코드와 문서가 어긋난 PR 은 리뷰 거부 사유.
