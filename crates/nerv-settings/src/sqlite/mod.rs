@@ -306,7 +306,7 @@ fn has_migration<C: Deref<Target = Connection>>(
     // Checking whether a migration exists would compare id with version, but since id is 1-indexed
     // and version is 0-indexed, we would actually skip the last migration! Therefore, it's
     // possible users are missing a critical migration (namely, auth_kv table creation) when
-    // upgrading to the qchat build (which includes two new migrations). Hence, we have to check
+    // upgrading to a later build (which includes two new migrations). Hence, we have to check
     // all migrations until version 7 to make sure that nothing is missed.
     if version <= 7 {
         let mut stmt = match conn.prepare("SELECT COUNT(*) FROM migrations WHERE version = ?1") {
