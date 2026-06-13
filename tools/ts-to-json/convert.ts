@@ -140,6 +140,36 @@ export const detectAwsListCustom = (
   };
 };
 
+/**
+ * Detect cargo's `packageGenerator` / `dependencyGenerator` shape:
+ *   script: ["cargo", "metadata", "--format-version", "1", ...]
+ *   postProcess: (data) => JSON.parse(data).packages.map((pkg) => pkg.name)
+ *
+ * Both the `-p` / `--package` generator and the dependency generator parse
+ * `cargo metadata` JSON and emit `packages[].name`. That is exactly the
+ * `script_with_json_path` (parent_key `packages`, id_field `name`) shape the
+ * engine already runs — so we route to it instead of letting the generator
+ * fall through to a raw `template`, which would stream the whole one-line
+ * metadata JSON blob as a single useless candidate (the cause of empty
+ * `cargo run -p <Tab>` completion).
+ */
+export const detectCargoMetadataPackages = (
+  script: string[],
+  postProcess: any,
+): { parent_key: string; id_field: string } | null => {
+  if (script[0] !== "cargo" || !script.includes("metadata")) return null;
+  if (typeof postProcess !== "function") return null;
+  let src: string;
+  try {
+    src = postProcess.toString();
+  } catch {
+    return null;
+  }
+  // The postProcess maps over `<json>.packages` and reads each `.name`.
+  if (!src.includes(".packages")) return null;
+  return { parent_key: "packages", id_field: "name" };
+};
+
 type FigArg = {
   name?: string | string[];
   description?: string;
@@ -673,6 +703,18 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
           script: scriptArr,
           parent_key: jsonPath.parent_key,
           id_field: jsonPath.id_field,
+        };
+      }
+      // Well-known: cargo `cargo metadata` + `packages[].name` extraction
+      // (the -p/--package + dependency generators). Reuse the JSON-path
+      // engine path instead of dumping raw metadata JSON as a template.
+      const cargoPath = detectCargoMetadataPackages(scriptArr, g.postProcess);
+      if (cargoPath) {
+        return {
+          type: "script_with_json_path",
+          script: scriptArr,
+          parent_key: cargoPath.parent_key,
+          id_field: cargoPath.id_field,
         };
       }
       // For everything else with a postProcess: still execute the

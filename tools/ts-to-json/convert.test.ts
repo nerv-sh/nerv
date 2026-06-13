@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   detectAwsJsonPath,
   detectAwsListCustom,
+  detectCargoMetadataPackages,
   detectFilepathsGenerator,
   enrichK8sNamespaces,
 } from "./convert";
@@ -245,6 +246,56 @@ describe("detectFilepathsGenerator", () => {
   test("returns null when custom is present but not a function", () => {
     expect(detectFilepathsGenerator({ custom: "ls -1ApL" })).toBeNull();
     expect(detectFilepathsGenerator({ custom: 42 })).toBeNull();
+  });
+});
+
+describe("detectCargoMetadataPackages", () => {
+  const cargoScript = ["cargo", "metadata", "--format-version", "1", "--no-deps"];
+
+  test("captures the packageGenerator shape", () => {
+    const postProcess = (data: string) => {
+      const manifest = JSON.parse(data);
+      return manifest.packages.map((pkg: any) => ({
+        name: pkg.name,
+        description: pkg.version,
+      }));
+    };
+    expect(detectCargoMetadataPackages(cargoScript, postProcess)).toEqual({
+      parent_key: "packages",
+      id_field: "name",
+    });
+  });
+
+  test("captures the dependencyGenerator shape (no --no-deps)", () => {
+    const postProcess = (data: string) => {
+      const metadata = JSON.parse(data);
+      return metadata.packages.map((pkg: any) => ({ name: pkg.name }));
+    };
+    expect(
+      detectCargoMetadataPackages(
+        ["cargo", "metadata", "--format-version", "1"],
+        postProcess,
+      ),
+    ).toEqual({ parent_key: "packages", id_field: "name" });
+  });
+
+  test("returns null when the script is not cargo metadata", () => {
+    const postProcess = (d: string) => JSON.parse(d).packages;
+    expect(detectCargoMetadataPackages(["cargo", "build"], postProcess)).toBeNull();
+    expect(
+      detectCargoMetadataPackages(["rustc", "--print", "cfg"], postProcess),
+    ).toBeNull();
+  });
+
+  test("returns null when the postProcess does not read .packages", () => {
+    const postProcess = (d: string) =>
+      Object.keys(JSON.parse(d).features || {});
+    expect(detectCargoMetadataPackages(cargoScript, postProcess)).toBeNull();
+  });
+
+  test("returns null for non-function postProcess", () => {
+    expect(detectCargoMetadataPackages(cargoScript, null)).toBeNull();
+    expect(detectCargoMetadataPackages(cargoScript, undefined)).toBeNull();
   });
 });
 
