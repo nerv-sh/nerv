@@ -43,15 +43,6 @@ pub enum Request {
 pub enum Response {
     /// Normal completion result.
     Suggestions { items: Vec<Suggestion> },
-    /// Dynamic generator hint — see PLAN.md §5.1 & first-5-min.md.
-    DynamicHint {
-        /// Short reason (e.g., "dynamic-branch-list").
-        reason: String,
-        /// Recommended shell command to discover candidates manually.
-        hint_command: String,
-        /// URL for filing a "want this dynamic" feedback issue.
-        feedback_url: String,
-    },
     /// Daemon is alive (Ping reply).
     Pong { version: String },
     /// Empty result — typically because the spec is disabled (E2).
