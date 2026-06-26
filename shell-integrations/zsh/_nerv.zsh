@@ -94,9 +94,12 @@ __nerv_show_popup() {
   # the bottom of the screen (the printf save/restore dance dies
   # if the terminal scrolls mid-render). Each rendered row uses
   # ~1 terminal row + 4 chrome rows (top + divider + footer +
-  # bottom), so leave 6 lines of headroom.
+  # bottom). Reserve 7 lines so the popup (visible + 4 chrome) leaves
+  # room for a prompt that wrapped to two lines plus the cursor row —
+  # on a short window a 1-line reserve overflows by one and tears the
+  # bottom of the box.
   local term_lines=${LINES:-24}
-  local MAX_VIS=$(( term_lines - 6 ))
+  local MAX_VIS=$(( term_lines - 7 ))
   (( MAX_VIS > 10 )) && MAX_VIS=10
   (( MAX_VIS < 3 )) && MAX_VIS=3
   local visible=$total
@@ -280,9 +283,17 @@ __nerv_show_popup() {
   # Anchor the popup's left edge under the input cursor. Query the
   # cursor column AFTER `zle -R` so it reflects the input line. Clamp
   # so a box near the right edge shifts left to stay on screen.
+  #
+  # Each colored row is prefixed with 2 leading spaces (see the
+  # "  ${BG}…" rows below), so the painted footprint is W + 2 cells, not
+  # W. Reserve one more column on top of that: writing into the very last
+  # cell arms the terminal's pending-wrap flag, and the next row's
+  # cursor-down then scrolls — drifting every following row one line low
+  # and tearing the box into the alternating "│ … │" / margin-"│"
+  # fragments seen with long prompts. So keep start_col + 2 + W ≤ cols.
   local start_col=$(__nerv_cursor_col)
   (( start_col < 1 )) && start_col=1
-  (( start_col + W - 1 > term_cols )) && start_col=$(( term_cols - W + 1 ))
+  (( start_col + W + 2 > term_cols )) && start_col=$(( term_cols - W - 2 ))
   (( start_col < 1 )) && start_col=1
 
   # Step 2-4: save cursor, move down + overwrite with colored
