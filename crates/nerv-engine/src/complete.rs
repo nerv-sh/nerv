@@ -923,7 +923,7 @@ fn emit_candidates_for_arg(
         for g in &arg.generators {
             match g {
                 crate::spec_parser::Generator::Template { script } => {
-                    if let Some(lines) = cached_template_generator(script) {
+                    if let Some(lines) = cached_template_generator(script, cwd) {
                         out.extend(
                             lines
                                 .into_iter()
@@ -1060,7 +1060,8 @@ fn emit_candidates_for_arg(
                         "-o".to_string(),
                         "name".to_string(),
                     ];
-                    if let Some(lines) = cached_template_generator(&key) {
+                    // Cluster-global (~/.kube/config) — cwd-independent.
+                    if let Some(lines) = cached_template_generator(&key, None) {
                         out.extend(
                             lines
                                 .into_iter()
@@ -1105,7 +1106,8 @@ fn emit_candidates_for_arg(
                     id_field,
                 } => {
                     let cmd = build_aws_list_command(service, verb, lookup_flags, tokens);
-                    if let Some(lines) = cached_template_generator(&cmd) {
+                    // AWS CLI reads ~/.aws, not cwd — keep the cache global.
+                    if let Some(lines) = cached_template_generator(&cmd, None) {
                         let stdout = lines.join("\n");
                         if let Some(names) =
                             extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
@@ -1131,7 +1133,8 @@ fn emit_candidates_for_arg(
                     parent_key,
                     id_field,
                 } => {
-                    if let Some(lines) = cached_template_generator(script) {
+                    // AWS CLI reads ~/.aws, not cwd — keep the cache global.
+                    if let Some(lines) = cached_template_generator(script, None) {
                         let stdout = lines.join("\n");
                         if let Some(names) =
                             extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
@@ -1294,13 +1297,17 @@ fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) ->
     None
 }
 
-type GeneratorCacheMap = HashMap<Vec<String>, (std::time::Instant, Vec<String>)>;
+type GeneratorCacheKey = (Vec<String>, Option<PathBuf>);
+type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Vec<String>)>;
 
 /// Process-wide cache for Tier B generator results.
-/// Key: script argv. Value: (insertion-time, captured stdout lines).
-/// TTL: 5s. Max entries: 64 (oldest-evicted on overflow). Keeps
-/// per-keystroke completion calls from re-spawning the same shell
-/// command (e.g. `git branch --list`).
+/// Key: `(script argv, spawn cwd)`. The cwd is part of the key because
+/// cwd-sensitive generators (`git branch -a`, …) produce different
+/// output per directory — keying on argv alone leaked one repo's
+/// branches into another (Fig #2101 / #2026 / #2268). Value:
+/// (insertion-time, captured stdout lines). TTL: 5s. Max entries: 64
+/// (oldest-evicted on overflow). Keeps per-keystroke completion calls
+/// from re-spawning the same shell command (e.g. `git branch --list`).
 static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
@@ -1310,8 +1317,8 @@ const GENERATOR_CACHE_MAX: usize = 64;
 /// Cached wrapper around [`execute_template_generator`]. Returns
 /// the cached value on TTL-fresh hit, otherwise runs the generator
 /// and inserts the result.
-fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
-    let key = script.to_vec();
+fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
+    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
     if let Ok(cache) = GENERATOR_CACHE.lock() {
         if let Some((stamp, lines)) = cache.get(&key) {
             if stamp.elapsed() < GENERATOR_CACHE_TTL {
@@ -1319,7 +1326,7 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
             }
         }
     }
-    let lines = execute_template_generator(script)?;
+    let lines = execute_template_generator(script, cwd)?;
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
@@ -1415,7 +1422,7 @@ fn cap_git_history(script: &[String]) -> Vec<String> {
     capped
 }
 
-fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
     use std::process::{Command, Stdio};
     if script.is_empty() {
         return None;
@@ -1423,13 +1430,19 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
     let capped = cap_git_history(script);
     let bin = capped.first()?;
     let args = &capped[1..];
-    let child = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // Spawn in the client shell's cwd so cwd-sensitive generators (git
+    // branch/log/remote, …) reflect the user's repo, not nervd's process
+    // directory (§4 IPC cwd invariant). None → inherit the daemon cwd.
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let child = command.spawn().ok()?;
     let buf = spawn_with_timeout(child, 8192)?;
     // Don't gate on exit status alone — many Fig generators run
     // `find $i ...` over `$PATH`-derived dirs that may not all exist,
@@ -1949,7 +1962,8 @@ fn zoxide_via_command() -> Option<Vec<(String, String, f64)>> {
         "--list".to_string(),
         "--score".to_string(),
     ];
-    let lines = cached_template_generator(&key)?;
+    // zoxide keeps a single global db — cwd-independent.
+    let lines = cached_template_generator(&key, None)?;
     let mut rows: Vec<(String, String, f64)> = Vec::new();
     for line in lines {
         // Each line: "<spaces><score> <path>".
@@ -2875,6 +2889,27 @@ mod tests {
         assert!(
             elapsed.as_millis() < 5,
             "expected cache hit <5ms, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn template_generator_is_cwd_keyed_and_runs_in_cwd() {
+        // Two distinct real dirs; `pwd -P` reads getcwd() (not the stale
+        // inherited $PWD), so its output reflects the cwd we spawn in. If
+        // the generator ran in nervd's cwd, or the cache keyed on argv
+        // alone (Fig #2101 / #2026 / #2268), both calls would match.
+        let base = std::env::temp_dir();
+        let dir_a = base.join("nerv_cwd_key_a");
+        let dir_b = base.join("nerv_cwd_key_b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let script = vec!["/bin/pwd".to_string(), "-P".to_string()];
+        let a = cached_template_generator(&script, Some(&dir_a));
+        let b = cached_template_generator(&script, Some(&dir_b));
+        assert!(a.is_some() && b.is_some(), "pwd should produce output");
+        assert_ne!(
+            a, b,
+            "same argv in different cwd must not share a cache entry"
         );
     }
 
