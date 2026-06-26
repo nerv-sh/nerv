@@ -2914,6 +2914,32 @@ mod tests {
     }
 
     #[test]
+    fn generator_times_out_instead_of_hanging() {
+        // A generator that would only emit after 2s must be killed at the
+        // GENERATOR_TIMEOUT_MS bound and return None — never freeze the
+        // prompt (the failure mode behind Fig #2102 / #1838). Also assert
+        // we return well before the child's 2s, proving the kill fired.
+        use std::time::Instant;
+        let script = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 2; echo late".to_string(),
+        ];
+        let t0 = Instant::now();
+        let out = execute_template_generator(&script, None);
+        let elapsed = t0.elapsed();
+        assert!(
+            out.is_none(),
+            "slow generator must time out to None, got {out:?}"
+        );
+        assert!(
+            elapsed.as_millis() < 1500,
+            "must return near the {GENERATOR_TIMEOUT_MS}ms timeout, not wait \
+             for the child; got {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn template_generator_filters_by_prefix() {
         use crate::spec_parser::{Arg, Generator, Subcommand};
         let spec = Subcommand {
