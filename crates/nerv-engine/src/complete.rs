@@ -1385,13 +1385,44 @@ fn spawn_with_timeout(mut child: std::process::Child, buf_cap: usize) -> Option<
     }
 }
 
+/// Cap unbounded `git log` / `git rev-list` history walks so they stay
+/// within the generator timeout on large repositories (Fig #2607).
+/// `git rev-list --all --oneline` enumerates *every* commit, which on a
+/// big repo runs past `GENERATOR_TIMEOUT_MS` and the child is killed →
+/// zero candidates. Completion only ever shows a prefix-filtered handful,
+/// so the 1000 most-recent commits are plenty. Left untouched when the
+/// caller already bounds the walk, when a `--` pathspec separator is
+/// present (appending would be read as a path), or for any non-history
+/// git command.
+fn cap_git_history(script: &[String]) -> Vec<String> {
+    let is_git = script.first().map(|b| b == "git").unwrap_or(false);
+    let walks_history = script.iter().any(|a| a == "log" || a == "rev-list");
+    let has_pathspec_sep = script.iter().any(|a| a == "--");
+    if !is_git || !walks_history || has_pathspec_sep {
+        return script.to_vec();
+    }
+    let already_bounded = script.iter().any(|a| {
+        a == "-n"
+            || a == "--max-count"
+            || a.starts_with("--max-count=")
+            || (a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit()))
+    });
+    if already_bounded {
+        return script.to_vec();
+    }
+    let mut capped = script.to_vec();
+    capped.push("--max-count=1000".to_string());
+    capped
+}
+
 fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
     use std::process::{Command, Stdio};
     if script.is_empty() {
         return None;
     }
-    let bin = script.first()?;
-    let args = &script[1..];
+    let capped = cap_git_history(script);
+    let bin = capped.first()?;
+    let args = &capped[1..];
     let child = Command::new(bin)
         .args(args)
         .stdin(Stdio::null())
@@ -1427,24 +1458,37 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
 }
 
 /// Split a multi-column Tier B output line into `(insertion, display)`.
-/// When the first whitespace-separated token looks like a numeric id
-/// (e.g. `1234 /bin/zsh` from `ps axo pid,comm`) the bare id becomes
-/// the insertion and the original line stays as the display label.
-/// Otherwise the full line is used as both — covers single-column
-/// generators (`brew list -1`, `kubectl -o name`, etc.) where the
-/// label IS the insertion.
+/// When the first whitespace-separated token looks like an id — a
+/// numeric pid (`1234 /bin/zsh` from `ps axo pid,comm`) or a git commit
+/// hash (`abc1234 fix(cli): …` from `git log --oneline`, Fig #2606) —
+/// the bare id becomes the insertion and the original line stays as the
+/// display label. Otherwise the full line is used as both — covers
+/// single-column generators (`brew list -1`, `kubectl -o name`, branch
+/// lists, etc.) where the label IS the insertion.
 fn split_id_label(raw: &str) -> (String, String) {
     let trimmed = raw.trim_start();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let first = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim_start();
-    let id_like =
-        !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty();
+    let id_like = !first.is_empty()
+        && !rest.is_empty()
+        && (first.chars().all(|c| c.is_ascii_digit()) || is_commit_hash(first));
     if id_like {
         (first.to_string(), trimmed.to_string())
     } else {
         (raw.to_string(), raw.to_string())
     }
+}
+
+/// A git short/long commit hash as emitted by `git log --oneline`:
+/// 7–40 lowercase hex chars. Used by [`split_id_label`] to make the bare
+/// hash the insertion while the `<hash> <subject>` line stays the display
+/// (Fig #2606). Lowercase-only to avoid matching ALL-CAPS English words.
+fn is_commit_hash(tok: &str) -> bool {
+    (7..=40).contains(&tok.len())
+        && tok
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 /// Convert a JSON payload from a Tier B generator (gh `--json=…`,
@@ -2411,6 +2455,15 @@ fn find_package_json(start: &std::path::Path) -> Option<std::path::PathBuf> {
 /// - leading whitespace
 /// - leading `* ` (git branch's current-branch marker)
 /// - leading `+ ` (git worktree's locked-worktree marker)
+/// - `remotes/` prefix on `git branch -a` remote-tracking refs, so the
+///   usable ref (`origin/main`) is what gets inserted, not the raw
+///   `remotes/origin/main` (Fig #2572 / #2501)
+/// - the symbolic HEAD pointer line (`remotes/origin/HEAD -> origin/main`),
+///   which is not a checkout target — dropped to an empty string so the
+///   caller filters it out
+/// - detached-HEAD / mid-rebase pseudo-entries (`(no branch, rebasing
+///   feature-x)`, `(HEAD detached at abc1234)`), which are not checkout
+///   targets either — also dropped (Fig #2463)
 ///
 /// Keeps the rest of the line untouched — anything more aggressive
 /// belongs in a JS post-process hook (Tier C, deferred).
@@ -2421,6 +2474,14 @@ fn sanitize_generator_line(raw: &str) -> String {
         s = rest.trim_start().to_string();
     } else if let Some(rest) = s.strip_prefix("+ ") {
         s = rest.trim_start().to_string();
+    }
+    // git refnames never start with `(`, so a `(`-leading line is one of
+    // git's parenthesised pseudo-branches (detached HEAD, rebase state).
+    if s.starts_with('(') || s.contains(" -> ") {
+        return String::new();
+    }
+    if let Some(rest) = s.strip_prefix("remotes/") {
+        s = rest.to_string();
     }
     s
 }
@@ -2667,6 +2728,108 @@ mod tests {
         assert_eq!(sanitize_generator_line("+ wt-locked"), "wt-locked");
         assert_eq!(sanitize_generator_line("regular"), "regular");
         assert_eq!(sanitize_generator_line(""), "");
+    }
+
+    #[test]
+    fn sanitize_strips_remotes_prefix_and_head_pointer() {
+        // `git branch -a` lists remote-tracking refs with a `remotes/`
+        // prefix; the usable ref drops it (Fig #2572 / #2501).
+        assert_eq!(
+            sanitize_generator_line("  remotes/origin/main"),
+            "origin/main"
+        );
+        assert_eq!(
+            sanitize_generator_line("remotes/upstream/feature-x"),
+            "upstream/feature-x"
+        );
+        // The symbolic HEAD pointer is not a checkout target — dropped.
+        assert_eq!(
+            sanitize_generator_line("  remotes/origin/HEAD -> origin/main"),
+            ""
+        );
+        // Detached-HEAD / mid-rebase pseudo-branches dropped (Fig #2463).
+        assert_eq!(
+            sanitize_generator_line("* (no branch, rebasing feature-x)"),
+            ""
+        );
+        assert_eq!(sanitize_generator_line("(HEAD detached at abc1234)"), "");
+        // Local branches are untouched.
+        assert_eq!(sanitize_generator_line("* main"), "main");
+        assert_eq!(sanitize_generator_line("feature/foo"), "feature/foo");
+    }
+
+    #[test]
+    fn cap_git_history_bounds_unbounded_walks() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // `rev-list --all` / bare `log` get a max-count appended (#2607).
+        assert_eq!(
+            cap_git_history(&s(&["git", "rev-list", "--all", "--oneline"])),
+            s(&["git", "rev-list", "--all", "--oneline", "--max-count=1000"])
+        );
+        assert_eq!(
+            cap_git_history(&s(&["git", "--no-optional-locks", "log", "--oneline"])).last(),
+            Some(&"--max-count=1000".to_string())
+        );
+        // Already-bounded walks are left alone (-n, --max-count=, -5).
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "-n", "5", "--oneline"])),
+            s(&["git", "log", "-n", "5", "--oneline"])
+        );
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "--max-count=3"])),
+            s(&["git", "log", "--max-count=3"])
+        );
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "-5"])),
+            s(&["git", "log", "-5"])
+        );
+        // A `--` pathspec separator means appending would be read as a
+        // path — leave untouched.
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "--oneline", "--", "src/"])),
+            s(&["git", "log", "--oneline", "--", "src/"])
+        );
+        // Non-history git commands and non-git commands untouched.
+        assert_eq!(
+            cap_git_history(&s(&["git", "branch", "-a"])),
+            s(&["git", "branch", "-a"])
+        );
+        assert_eq!(cap_git_history(&s(&["docker", "ps"])), s(&["docker", "ps"]));
+    }
+
+    #[test]
+    fn split_id_label_extracts_commit_hash() {
+        // `git log --oneline` → bare hash inserted, full line displayed
+        // (Fig #2606).
+        let (ins, disp) = split_id_label("abc1234 fix(cli): handle remotes");
+        assert_eq!(ins, "abc1234");
+        assert_eq!(disp, "abc1234 fix(cli): handle remotes");
+        // Numeric pid id behaviour is preserved.
+        assert_eq!(split_id_label("1234 /bin/zsh").0, "1234");
+        // Single-column candidates (branches, refs) stay whole — no
+        // false-positive splitting on a hash-less first token.
+        assert_eq!(split_id_label("main"), ("main".into(), "main".into()));
+        assert_eq!(
+            split_id_label("origin/feature remote-branch"),
+            (
+                "origin/feature remote-branch".into(),
+                "origin/feature remote-branch".into()
+            )
+        );
+        // A first token with a non-hex letter is not a hash.
+        assert_eq!(
+            split_id_label("zzghijk subject"),
+            ("zzghijk subject".into(), "zzghijk subject".into())
+        );
+    }
+
+    #[test]
+    fn is_commit_hash_bounds() {
+        assert!(is_commit_hash("abc1234")); // 7 chars, min
+        assert!(is_commit_hash("0123456789abcdef0123456789abcdef01234567")); // 40, max
+        assert!(!is_commit_hash("abc123")); // 6 chars, too short
+        assert!(!is_commit_hash("ABC1234")); // uppercase — avoid ALL-CAPS words
+        assert!(!is_commit_hash("ghi1234")); // g/h/i not hex
     }
 
     #[test]
