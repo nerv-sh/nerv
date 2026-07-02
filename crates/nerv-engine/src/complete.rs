@@ -923,7 +923,7 @@ fn emit_candidates_for_arg(
         for g in &arg.generators {
             match g {
                 crate::spec_parser::Generator::Template { script } => {
-                    if let Some(lines) = cached_template_generator(script) {
+                    if let Some(lines) = cached_template_generator(script, cwd) {
                         out.extend(
                             lines
                                 .into_iter()
@@ -1060,7 +1060,8 @@ fn emit_candidates_for_arg(
                         "-o".to_string(),
                         "name".to_string(),
                     ];
-                    if let Some(lines) = cached_template_generator(&key) {
+                    // Cluster-global (~/.kube/config) — cwd-independent.
+                    if let Some(lines) = cached_template_generator(&key, None) {
                         out.extend(
                             lines
                                 .into_iter()
@@ -1105,7 +1106,8 @@ fn emit_candidates_for_arg(
                     id_field,
                 } => {
                     let cmd = build_aws_list_command(service, verb, lookup_flags, tokens);
-                    if let Some(lines) = cached_template_generator(&cmd) {
+                    // AWS CLI reads ~/.aws, not cwd — keep the cache global.
+                    if let Some(lines) = cached_template_generator(&cmd, None) {
                         let stdout = lines.join("\n");
                         if let Some(names) =
                             extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
@@ -1131,7 +1133,8 @@ fn emit_candidates_for_arg(
                     parent_key,
                     id_field,
                 } => {
-                    if let Some(lines) = cached_template_generator(script) {
+                    // AWS CLI reads ~/.aws, not cwd — keep the cache global.
+                    if let Some(lines) = cached_template_generator(script, None) {
                         let stdout = lines.join("\n");
                         if let Some(names) =
                             extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
@@ -1294,13 +1297,17 @@ fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) ->
     None
 }
 
-type GeneratorCacheMap = HashMap<Vec<String>, (std::time::Instant, Vec<String>)>;
+type GeneratorCacheKey = (Vec<String>, Option<PathBuf>);
+type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Vec<String>)>;
 
 /// Process-wide cache for Tier B generator results.
-/// Key: script argv. Value: (insertion-time, captured stdout lines).
-/// TTL: 5s. Max entries: 64 (oldest-evicted on overflow). Keeps
-/// per-keystroke completion calls from re-spawning the same shell
-/// command (e.g. `git branch --list`).
+/// Key: `(script argv, spawn cwd)`. The cwd is part of the key because
+/// cwd-sensitive generators (`git branch -a`, …) produce different
+/// output per directory — keying on argv alone leaked one repo's
+/// branches into another (Fig #2101 / #2026 / #2268). Value:
+/// (insertion-time, captured stdout lines). TTL: 5s. Max entries: 64
+/// (oldest-evicted on overflow). Keeps per-keystroke completion calls
+/// from re-spawning the same shell command (e.g. `git branch --list`).
 static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
@@ -1310,8 +1317,8 @@ const GENERATOR_CACHE_MAX: usize = 64;
 /// Cached wrapper around [`execute_template_generator`]. Returns
 /// the cached value on TTL-fresh hit, otherwise runs the generator
 /// and inserts the result.
-fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
-    let key = script.to_vec();
+fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
+    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
     if let Ok(cache) = GENERATOR_CACHE.lock() {
         if let Some((stamp, lines)) = cache.get(&key) {
             if stamp.elapsed() < GENERATOR_CACHE_TTL {
@@ -1319,7 +1326,7 @@ fn cached_template_generator(script: &[String]) -> Option<Vec<String>> {
             }
         }
     }
-    let lines = execute_template_generator(script)?;
+    let lines = execute_template_generator(script, cwd)?;
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
@@ -1385,20 +1392,57 @@ fn spawn_with_timeout(mut child: std::process::Child, buf_cap: usize) -> Option<
     }
 }
 
-fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
+/// Cap unbounded `git log` / `git rev-list` history walks so they stay
+/// within the generator timeout on large repositories (Fig #2607).
+/// `git rev-list --all --oneline` enumerates *every* commit, which on a
+/// big repo runs past `GENERATOR_TIMEOUT_MS` and the child is killed →
+/// zero candidates. Completion only ever shows a prefix-filtered handful,
+/// so the 1000 most-recent commits are plenty. Left untouched when the
+/// caller already bounds the walk, when a `--` pathspec separator is
+/// present (appending would be read as a path), or for any non-history
+/// git command.
+fn cap_git_history(script: &[String]) -> Vec<String> {
+    let is_git = script.first().map(|b| b == "git").unwrap_or(false);
+    let walks_history = script.iter().any(|a| a == "log" || a == "rev-list");
+    let has_pathspec_sep = script.iter().any(|a| a == "--");
+    if !is_git || !walks_history || has_pathspec_sep {
+        return script.to_vec();
+    }
+    let already_bounded = script.iter().any(|a| {
+        a == "-n"
+            || a == "--max-count"
+            || a.starts_with("--max-count=")
+            || (a.len() > 1 && a.starts_with('-') && a[1..].chars().all(|c| c.is_ascii_digit()))
+    });
+    if already_bounded {
+        return script.to_vec();
+    }
+    let mut capped = script.to_vec();
+    capped.push("--max-count=1000".to_string());
+    capped
+}
+
+fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
     use std::process::{Command, Stdio};
     if script.is_empty() {
         return None;
     }
-    let bin = script.first()?;
-    let args = &script[1..];
-    let child = Command::new(bin)
+    let capped = cap_git_history(script);
+    let bin = capped.first()?;
+    let args = &capped[1..];
+    let mut command = Command::new(bin);
+    command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // Spawn in the client shell's cwd so cwd-sensitive generators (git
+    // branch/log/remote, …) reflect the user's repo, not nervd's process
+    // directory (§4 IPC cwd invariant). None → inherit the daemon cwd.
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let child = command.spawn().ok()?;
     let buf = spawn_with_timeout(child, 8192)?;
     // Don't gate on exit status alone — many Fig generators run
     // `find $i ...` over `$PATH`-derived dirs that may not all exist,
@@ -1427,24 +1471,37 @@ fn execute_template_generator(script: &[String]) -> Option<Vec<String>> {
 }
 
 /// Split a multi-column Tier B output line into `(insertion, display)`.
-/// When the first whitespace-separated token looks like a numeric id
-/// (e.g. `1234 /bin/zsh` from `ps axo pid,comm`) the bare id becomes
-/// the insertion and the original line stays as the display label.
-/// Otherwise the full line is used as both — covers single-column
-/// generators (`brew list -1`, `kubectl -o name`, etc.) where the
-/// label IS the insertion.
+/// When the first whitespace-separated token looks like an id — a
+/// numeric pid (`1234 /bin/zsh` from `ps axo pid,comm`) or a git commit
+/// hash (`abc1234 fix(cli): …` from `git log --oneline`, Fig #2606) —
+/// the bare id becomes the insertion and the original line stays as the
+/// display label. Otherwise the full line is used as both — covers
+/// single-column generators (`brew list -1`, `kubectl -o name`, branch
+/// lists, etc.) where the label IS the insertion.
 fn split_id_label(raw: &str) -> (String, String) {
     let trimmed = raw.trim_start();
     let mut parts = trimmed.splitn(2, char::is_whitespace);
     let first = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim_start();
-    let id_like =
-        !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty();
+    let id_like = !first.is_empty()
+        && !rest.is_empty()
+        && (first.chars().all(|c| c.is_ascii_digit()) || is_commit_hash(first));
     if id_like {
         (first.to_string(), trimmed.to_string())
     } else {
         (raw.to_string(), raw.to_string())
     }
+}
+
+/// A git short/long commit hash as emitted by `git log --oneline`:
+/// 7–40 lowercase hex chars. Used by [`split_id_label`] to make the bare
+/// hash the insertion while the `<hash> <subject>` line stays the display
+/// (Fig #2606). Lowercase-only to avoid matching ALL-CAPS English words.
+fn is_commit_hash(tok: &str) -> bool {
+    (7..=40).contains(&tok.len())
+        && tok
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 /// Convert a JSON payload from a Tier B generator (gh `--json=…`,
@@ -1905,7 +1962,8 @@ fn zoxide_via_command() -> Option<Vec<(String, String, f64)>> {
         "--list".to_string(),
         "--score".to_string(),
     ];
-    let lines = cached_template_generator(&key)?;
+    // zoxide keeps a single global db — cwd-independent.
+    let lines = cached_template_generator(&key, None)?;
     let mut rows: Vec<(String, String, f64)> = Vec::new();
     for line in lines {
         // Each line: "<spaces><score> <path>".
@@ -2411,6 +2469,15 @@ fn find_package_json(start: &std::path::Path) -> Option<std::path::PathBuf> {
 /// - leading whitespace
 /// - leading `* ` (git branch's current-branch marker)
 /// - leading `+ ` (git worktree's locked-worktree marker)
+/// - `remotes/` prefix on `git branch -a` remote-tracking refs, so the
+///   usable ref (`origin/main`) is what gets inserted, not the raw
+///   `remotes/origin/main` (Fig #2572 / #2501)
+/// - the symbolic HEAD pointer line (`remotes/origin/HEAD -> origin/main`),
+///   which is not a checkout target — dropped to an empty string so the
+///   caller filters it out
+/// - detached-HEAD / mid-rebase pseudo-entries (`(no branch, rebasing
+///   feature-x)`, `(HEAD detached at abc1234)`), which are not checkout
+///   targets either — also dropped (Fig #2463)
 ///
 /// Keeps the rest of the line untouched — anything more aggressive
 /// belongs in a JS post-process hook (Tier C, deferred).
@@ -2421,6 +2488,14 @@ fn sanitize_generator_line(raw: &str) -> String {
         s = rest.trim_start().to_string();
     } else if let Some(rest) = s.strip_prefix("+ ") {
         s = rest.trim_start().to_string();
+    }
+    // git refnames never start with `(`, so a `(`-leading line is one of
+    // git's parenthesised pseudo-branches (detached HEAD, rebase state).
+    if s.starts_with('(') || s.contains(" -> ") {
+        return String::new();
+    }
+    if let Some(rest) = s.strip_prefix("remotes/") {
+        s = rest.to_string();
     }
     s
 }
@@ -2670,6 +2745,108 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_strips_remotes_prefix_and_head_pointer() {
+        // `git branch -a` lists remote-tracking refs with a `remotes/`
+        // prefix; the usable ref drops it (Fig #2572 / #2501).
+        assert_eq!(
+            sanitize_generator_line("  remotes/origin/main"),
+            "origin/main"
+        );
+        assert_eq!(
+            sanitize_generator_line("remotes/upstream/feature-x"),
+            "upstream/feature-x"
+        );
+        // The symbolic HEAD pointer is not a checkout target — dropped.
+        assert_eq!(
+            sanitize_generator_line("  remotes/origin/HEAD -> origin/main"),
+            ""
+        );
+        // Detached-HEAD / mid-rebase pseudo-branches dropped (Fig #2463).
+        assert_eq!(
+            sanitize_generator_line("* (no branch, rebasing feature-x)"),
+            ""
+        );
+        assert_eq!(sanitize_generator_line("(HEAD detached at abc1234)"), "");
+        // Local branches are untouched.
+        assert_eq!(sanitize_generator_line("* main"), "main");
+        assert_eq!(sanitize_generator_line("feature/foo"), "feature/foo");
+    }
+
+    #[test]
+    fn cap_git_history_bounds_unbounded_walks() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // `rev-list --all` / bare `log` get a max-count appended (#2607).
+        assert_eq!(
+            cap_git_history(&s(&["git", "rev-list", "--all", "--oneline"])),
+            s(&["git", "rev-list", "--all", "--oneline", "--max-count=1000"])
+        );
+        assert_eq!(
+            cap_git_history(&s(&["git", "--no-optional-locks", "log", "--oneline"])).last(),
+            Some(&"--max-count=1000".to_string())
+        );
+        // Already-bounded walks are left alone (-n, --max-count=, -5).
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "-n", "5", "--oneline"])),
+            s(&["git", "log", "-n", "5", "--oneline"])
+        );
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "--max-count=3"])),
+            s(&["git", "log", "--max-count=3"])
+        );
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "-5"])),
+            s(&["git", "log", "-5"])
+        );
+        // A `--` pathspec separator means appending would be read as a
+        // path — leave untouched.
+        assert_eq!(
+            cap_git_history(&s(&["git", "log", "--oneline", "--", "src/"])),
+            s(&["git", "log", "--oneline", "--", "src/"])
+        );
+        // Non-history git commands and non-git commands untouched.
+        assert_eq!(
+            cap_git_history(&s(&["git", "branch", "-a"])),
+            s(&["git", "branch", "-a"])
+        );
+        assert_eq!(cap_git_history(&s(&["docker", "ps"])), s(&["docker", "ps"]));
+    }
+
+    #[test]
+    fn split_id_label_extracts_commit_hash() {
+        // `git log --oneline` → bare hash inserted, full line displayed
+        // (Fig #2606).
+        let (ins, disp) = split_id_label("abc1234 fix(cli): handle remotes");
+        assert_eq!(ins, "abc1234");
+        assert_eq!(disp, "abc1234 fix(cli): handle remotes");
+        // Numeric pid id behaviour is preserved.
+        assert_eq!(split_id_label("1234 /bin/zsh").0, "1234");
+        // Single-column candidates (branches, refs) stay whole — no
+        // false-positive splitting on a hash-less first token.
+        assert_eq!(split_id_label("main"), ("main".into(), "main".into()));
+        assert_eq!(
+            split_id_label("origin/feature remote-branch"),
+            (
+                "origin/feature remote-branch".into(),
+                "origin/feature remote-branch".into()
+            )
+        );
+        // A first token with a non-hex letter is not a hash.
+        assert_eq!(
+            split_id_label("zzghijk subject"),
+            ("zzghijk subject".into(), "zzghijk subject".into())
+        );
+    }
+
+    #[test]
+    fn is_commit_hash_bounds() {
+        assert!(is_commit_hash("abc1234")); // 7 chars, min
+        assert!(is_commit_hash("0123456789abcdef0123456789abcdef01234567")); // 40, max
+        assert!(!is_commit_hash("abc123")); // 6 chars, too short
+        assert!(!is_commit_hash("ABC1234")); // uppercase — avoid ALL-CAPS words
+        assert!(!is_commit_hash("ghi1234")); // g/h/i not hex
+    }
+
+    #[test]
     fn sanitize_strips_ansi_color_codes() {
         // git -c color.branch=always branch outputs something like:
         let raw = "\x1b[32m* main\x1b[0m";
@@ -2712,6 +2889,53 @@ mod tests {
         assert!(
             elapsed.as_millis() < 5,
             "expected cache hit <5ms, got {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn template_generator_is_cwd_keyed_and_runs_in_cwd() {
+        // Two distinct real dirs; `pwd -P` reads getcwd() (not the stale
+        // inherited $PWD), so its output reflects the cwd we spawn in. If
+        // the generator ran in nervd's cwd, or the cache keyed on argv
+        // alone (Fig #2101 / #2026 / #2268), both calls would match.
+        let base = std::env::temp_dir();
+        let dir_a = base.join("nerv_cwd_key_a");
+        let dir_b = base.join("nerv_cwd_key_b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let script = vec!["/bin/pwd".to_string(), "-P".to_string()];
+        let a = cached_template_generator(&script, Some(&dir_a));
+        let b = cached_template_generator(&script, Some(&dir_b));
+        assert!(a.is_some() && b.is_some(), "pwd should produce output");
+        assert_ne!(
+            a, b,
+            "same argv in different cwd must not share a cache entry"
+        );
+    }
+
+    #[test]
+    fn generator_times_out_instead_of_hanging() {
+        // A generator that would only emit after 2s must be killed at the
+        // GENERATOR_TIMEOUT_MS bound and return None — never freeze the
+        // prompt (the failure mode behind Fig #2102 / #1838). Also assert
+        // we return well before the child's 2s, proving the kill fired.
+        use std::time::Instant;
+        let script = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "sleep 2; echo late".to_string(),
+        ];
+        let t0 = Instant::now();
+        let out = execute_template_generator(&script, None);
+        let elapsed = t0.elapsed();
+        assert!(
+            out.is_none(),
+            "slow generator must time out to None, got {out:?}"
+        );
+        assert!(
+            elapsed.as_millis() < 1500,
+            "must return near the {GENERATOR_TIMEOUT_MS}ms timeout, not wait \
+             for the child; got {elapsed:?}"
         );
     }
 

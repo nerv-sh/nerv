@@ -94,9 +94,12 @@ __nerv_show_popup() {
   # the bottom of the screen (the printf save/restore dance dies
   # if the terminal scrolls mid-render). Each rendered row uses
   # ~1 terminal row + 4 chrome rows (top + divider + footer +
-  # bottom), so leave 6 lines of headroom.
+  # bottom). Reserve 7 lines so the popup (visible + 4 chrome) leaves
+  # room for a prompt that wrapped to two lines plus the cursor row —
+  # on a short window a 1-line reserve overflows by one and tears the
+  # bottom of the box.
   local term_lines=${LINES:-24}
-  local MAX_VIS=$(( term_lines - 6 ))
+  local MAX_VIS=$(( term_lines - 7 ))
   (( MAX_VIS > 10 )) && MAX_VIS=10
   (( MAX_VIS < 3 )) && MAX_VIS=3
   local visible=$total
@@ -130,8 +133,12 @@ __nerv_show_popup() {
     local d="${rest%%	*}"
     local desc_full="${rest#*	}"
     desc_full="${desc_full%%	*}"  # drop icon field
-    (( ${#d} > max_disp )) && max_disp=${#d}
-    (( ${#desc_full} > max_desc )) && max_desc=${#desc_full}
+    # Measure DISPLAY cells, not code points: CJK glyphs are 2 cells,
+    # so ${#d} undercounts and the right border drifts. The `m` flag
+    # makes the length operator count East Asian width.
+    local dw=${(m)#d} ew=${(m)#desc_full}
+    (( dw > max_disp )) && max_disp=$dw
+    (( ew > max_desc )) && max_desc=$ew
   done
 
   # Hard caps so a long description doesn't blow the popup off-screen.
@@ -209,7 +216,14 @@ __nerv_show_popup() {
     local line="${items[$i]}"
     local rest="${line#*	}"
     local display="${rest%%	*}"
-    (( ${#display} > max_disp )) && display="${display:0:$max_disp}"
+    # Width-aware truncate AND right-pad to exactly max_disp display
+    # cells. (mr) counts East Asian width via the m flag, so a CJK name
+    # that overflows is cut on a cell boundary and shorter names fill
+    # the slot — both keep the right border aligned. When a 2-cell glyph
+    # straddles the boundary, (mr) keeps the whole glyph and overshoots
+    # by 1; drop it and re-pad so the slot is exactly max_disp cells.
+    display="${(mr:$max_disp:)display}"
+    (( ${(m)#display} > max_disp )) && display="${(mr:$max_disp:)${display%?}}"
     # Pull icon (4th field). Empty → blank space (slot reserved
     # for alignment). `$` placeholder previously cluttered cd / ls
     # lists where every row would say `$ foo/` with no signal.
@@ -228,7 +242,7 @@ __nerv_show_popup() {
       glyph="$glyph "
       glyph_w=2
     fi
-    local visible_chars=$(( 2 + glyph_w + ${#display} ))  # " G " + display
+    local visible_chars=$(( 2 + glyph_w + max_disp ))  # " G " + padded display
     local pad_n=$(( row_body - visible_chars ))
     (( pad_n < 0 )) && pad_n=0
     local row_pad=""
@@ -248,12 +262,15 @@ __nerv_show_popup() {
   # the whole list fits in one window. Layout inside `│...│` must
   # equal W-2 cells (matches the body rows above):
   # " " + desc + pad + counter + " ".
-  local counter="[${__NERV_SELECTED}/${total}]"
+  local counter="[${__NERV_SELECTED}/${total}]"  # ASCII: cells == chars
   # Reserve cells for: leading " ", trailing " ", counter.
   local sel_avail=$(( W - 4 - ${#counter} ))
   (( sel_avail < 0 )) && sel_avail=0
-  (( ${#sel_desc} > sel_avail )) && sel_desc="${sel_desc:0:$sel_avail}"
-  local fpad=$(( W - 4 - ${#sel_desc} - ${#counter} ))
+  # Width-aware truncate: a CJK description must be cut on a cell
+  # boundary or the counter is pushed past the right border.
+  sel_desc="${(mr:$sel_avail:)sel_desc}"
+  (( ${(m)#sel_desc} > sel_avail )) && sel_desc="${(mr:$sel_avail:)${sel_desc%?}}"
+  local fpad=$(( W - 4 - ${(m)#sel_desc} - ${#counter} ))
   (( fpad < 0 )) && fpad=0
   local fps=""; repeat $fpad; do fps+=" "; done
   colored+=("  ${BG}${BDR}│${DESC} ${sel_desc}${fps}${counter} ${BDR}│${R}")
@@ -266,9 +283,17 @@ __nerv_show_popup() {
   # Anchor the popup's left edge under the input cursor. Query the
   # cursor column AFTER `zle -R` so it reflects the input line. Clamp
   # so a box near the right edge shifts left to stay on screen.
+  #
+  # Each colored row is prefixed with 2 leading spaces (see the
+  # "  ${BG}…" rows below), so the painted footprint is W + 2 cells, not
+  # W. Reserve one more column on top of that: writing into the very last
+  # cell arms the terminal's pending-wrap flag, and the next row's
+  # cursor-down then scrolls — drifting every following row one line low
+  # and tearing the box into the alternating "│ … │" / margin-"│"
+  # fragments seen with long prompts. So keep start_col + 2 + W ≤ cols.
   local start_col=$(__nerv_cursor_col)
   (( start_col < 1 )) && start_col=1
-  (( start_col + W - 1 > term_cols )) && start_col=$(( term_cols - W + 1 ))
+  (( start_col + W + 2 > term_cols )) && start_col=$(( term_cols - W - 2 ))
   (( start_col < 1 )) && start_col=1
 
   # Step 2-4: save cursor, move down + overwrite with colored
