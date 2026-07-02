@@ -830,25 +830,30 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                                 .map(|s| s.cols.max(1))
                                                 .unwrap_or(80);
 
-                                            // Tab / Down → next, Shift-Tab / Up → prev.
+                                            // Tab / Down → next, Shift-Tab / Up → prev,
+                                            // PageDown / PageUp → jump by one window
+                                            // (clamped, no wrap). (down, by_page) pairs.
                                             let nav = match (event.key, event.modifiers) {
-                                                (KeyCode::DownArrow, _) => Some(true),
+                                                (KeyCode::DownArrow, _) => Some((true, false)),
                                                 (KeyCode::Tab, m) if !m.contains(Modifiers::SHIFT) => {
-                                                    Some(true)
+                                                    Some((true, false))
                                                 }
-                                                (KeyCode::UpArrow, _) => Some(false),
+                                                (KeyCode::UpArrow, _) => Some((false, false)),
                                                 (KeyCode::Tab, m) if m.contains(Modifiers::SHIFT) => {
-                                                    Some(false)
+                                                    Some((false, false))
                                                 }
+                                                (KeyCode::PageDown, _) => Some((true, true)),
+                                                (KeyCode::PageUp, _) => Some((false, true)),
                                                 _ => None,
                                             };
-                                            if let (Some(down), Some(p)) =
+                                            if let (Some((down, by_page)), Some(p)) =
                                                 (nav, overlay.popup.as_mut())
                                             {
-                                                if down {
-                                                    p.next();
-                                                } else {
-                                                    p.prev();
+                                                match (down, by_page) {
+                                                    (true, false) => p.next(),
+                                                    (false, false) => p.prev(),
+                                                    (true, true) => p.page_next(),
+                                                    (false, true) => p.page_prev(),
                                                 }
                                                 let ins = p.selected_item().insertion.clone();
                                                 overlay.ghost =

@@ -356,7 +356,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 - **frecency ranking** — per-spec TSV, count>=2 부터 boost, time decay, daemon post-sort
 - **cwd-aware IPC** — `cd` 시 daemon 재시작 불필요
 - **UTF-8 char boundary 클램프** — 한글/CJK/emoji 입력 panic 방지
-- **widget UX** — sliding window (`MAX_VIS=min(LINES-6,10)`), footer `[k/total]` 항상, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow wrap-cycle, precmd 재바인딩 (Q hijack 방지), description 매행 → footer 단일 라인 (Fig style)
+- **widget UX** — sliding window (`MAX_VIS=min(LINES-6,10)`), footer `[k/total]` 항상, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow wrap-cycle, PageUp/PageDown 창 단위 점프 (edge clamp, ZLE+PTY 동일), precmd 재바인딩 (Q hijack 방지), description 매행 → footer 단일 라인 (Fig style)
 - **에러 UX E1-E4 구현**
 - **CI** — rust 1.85 핀 + protoc preinstall + build-specs-smoke + ts-to-json bun job + **ARM64-only** (Intel queue 너무 길어 drop)
 - **release.yml** — `v*.*.*` tag push → macos-14 빌드 + tarball + sha256 + GitHub Release 자동 생성
