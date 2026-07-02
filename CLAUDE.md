@@ -36,7 +36,7 @@
 - ✅ M0-5: `parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅 (chunks 1-5, 174 test) — types + static helpers + state machine + token classifier + matcher
 - ✅ M0-6: `loadSpec.ts` → `nerv-engine::spec_loader` + JSON 직렬화 + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체는 M1 (또는 외부 node 스크립트). hand-rolled fixture (git, echo, docker, kubectl) + 24 integration test 통과
 - ✅ M0-7: ZLE → CLI → UDS → 실엔진 wire-up + latency bench. IPC p95 0.052 ms, CLI cold-start p95 4.07 ms (25 ms 예산 대비 16%). `_nerv.zsh` widget 포맷 호환 확인
-- ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건** — 인프라 의존)
+- ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건**) — `scripts/sign-notarize-e2e.sh` 로 **서명 단계 green** (Lemon Cloud Developer ID cert, hardened runtime + timestamp). 공증만 잔여: notarytool credential (`nerv-notary` keychain profile 또는 `NOTARY_KEY`/`NOTARY_KEY_ID`/`NOTARY_ISSUER` env) 확보 후 스크립트 재실행
 
 **보너스 진척 (M0 산출물 외 — M1 0-10주차 작업 대부분 선행 완료)**:
 - ✅ CLI 5/5 표면 완성: `nerv init` / `start` / `stop` / `spec list` / `doctor` / `uninstall` (uninstall-spec.md §4 8-step atomic 포함)

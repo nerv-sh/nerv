@@ -73,6 +73,10 @@ Log here as you go — one row per paper-cut. Keep it terse; a repro beats prose
 Severity: **P0** blocks daily use / corrupts the prompt · **P1** wrong or
 missing completion on a common command · **P2** cosmetic / rare.
 
+> **Window started 2026-07-03** — branch `feat/popup-page-keys` build
+> (includes git-ref/cwd generator fixes + PageUp/PageDown paging),
+> 715-spec gzipped cache (manifest v2), doctor 5/5 green.
+
 | Date | Sev | Shell+Term | What happened | Repro | Status |
 |------|-----|-----------|---------------|-------|--------|
 | | | | | | |
