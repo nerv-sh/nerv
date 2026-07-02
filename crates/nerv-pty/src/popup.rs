@@ -3,8 +3,9 @@
 //! Draws a rounded box of suggestions on the rows below the prompt, with
 //! the selected row in reverse video and a `[k/total]` footer under a
 //! divider — mirroring the M0 ZLE widget's chrome (CLAUDE.md §3). The
-//! selection wraps (Tab/Down → next, Shift-Tab/Up → prev) and stays
-//! inside a sliding window of at most `max_vis` rows.
+//! selection wraps (Tab/Down → next, Shift-Tab/Up → prev), jumps by a
+//! window (PageDown/PageUp, clamped at the edges), and stays inside a
+//! sliding window of at most `max_vis` rows.
 //!
 //! Two concerns live here, both unit-testable:
 //!   1. Pure selection/window state (`next`/`prev`/`window`).
@@ -85,6 +86,20 @@ impl Popup {
     /// Move the selection back by one, wrapping at the start.
     pub fn prev(&mut self) {
         self.selected = (self.selected + self.items.len() - 1) % self.items.len();
+        self.reframe();
+    }
+
+    /// Jump the selection one visible window down, clamping at the last
+    /// item — page keys page, they don't wrap (pager convention; the
+    /// single-step next/prev keep their wrap behavior).
+    pub fn page_next(&mut self) {
+        self.selected = (self.selected + self.visible()).min(self.items.len() - 1);
+        self.reframe();
+    }
+
+    /// Jump the selection one visible window up, clamping at the first item.
+    pub fn page_prev(&mut self) {
+        self.selected = self.selected.saturating_sub(self.visible());
         self.reframe();
     }
 
@@ -251,6 +266,47 @@ mod tests {
         assert_eq!(p.offset, 2);
         p.next();
         assert_eq!((p.selected, p.offset), (0, 0));
+    }
+
+    #[test]
+    fn page_next_jumps_by_window_and_clamps() {
+        let mut p = Popup::new(items(10), 3).unwrap();
+        p.page_next();
+        assert_eq!((p.selected, p.offset), (3, 1));
+        p.page_next();
+        assert_eq!(p.selected, 6);
+        p.page_next();
+        assert_eq!(p.selected, 9);
+        // At the end: clamp, no wrap.
+        p.page_next();
+        assert_eq!(p.selected, 9);
+    }
+
+    #[test]
+    fn page_prev_jumps_by_window_and_clamps() {
+        let mut p = Popup::new(items(10), 3).unwrap();
+        for _ in 0..9 {
+            p.next();
+        }
+        assert_eq!(p.selected, 9);
+        p.page_prev();
+        assert_eq!(p.selected, 6);
+        p.page_prev();
+        p.page_prev();
+        assert_eq!(p.selected, 0);
+        // At the start: clamp, no wrap.
+        p.page_prev();
+        assert_eq!((p.selected, p.offset), (0, 0));
+    }
+
+    #[test]
+    fn page_on_short_list_clamps_within_bounds() {
+        // List shorter than the window: page is a jump to the edge.
+        let mut p = Popup::new(items(3), 10).unwrap();
+        p.page_next();
+        assert_eq!(p.selected, 2);
+        p.page_prev();
+        assert_eq!(p.selected, 0);
     }
 
     #[test]

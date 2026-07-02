@@ -87,21 +87,28 @@ __nerv_cursor_col() {
   print -r -- $col
 }
 
+# Max visible rows — tight enough that the popup never runs past
+# the bottom of the screen (the printf save/restore dance dies
+# if the terminal scrolls mid-render). Each rendered row uses
+# ~1 terminal row + 4 chrome rows (top + divider + footer +
+# bottom). Reserve 7 lines so the popup (visible + 4 chrome) leaves
+# room for a prompt that wrapped to two lines plus the cursor row —
+# on a short window a 1-line reserve overflows by one and tears the
+# bottom of the box. Sets REPLY (no subshell — this runs on the
+# keystroke path). Shared by the renderer and the PageUp/PageDown
+# jump so a "page" always equals what's on screen.
+__nerv_max_vis() {
+  local term_lines=${LINES:-24}
+  REPLY=$(( term_lines - 7 ))
+  (( REPLY > 10 )) && REPLY=10
+  (( REPLY < 3 )) && REPLY=3
+}
+
 __nerv_show_popup() {
   local -a items=("$@")
   local total=${#items}
-  # Max visible rows — tight enough that the popup never runs past
-  # the bottom of the screen (the printf save/restore dance dies
-  # if the terminal scrolls mid-render). Each rendered row uses
-  # ~1 terminal row + 4 chrome rows (top + divider + footer +
-  # bottom). Reserve 7 lines so the popup (visible + 4 chrome) leaves
-  # room for a prompt that wrapped to two lines plus the cursor row —
-  # on a short window a 1-line reserve overflows by one and tears the
-  # bottom of the box.
-  local term_lines=${LINES:-24}
-  local MAX_VIS=$(( term_lines - 7 ))
-  (( MAX_VIS > 10 )) && MAX_VIS=10
-  (( MAX_VIS < 3 )) && MAX_VIS=3
+  local REPLY; __nerv_max_vis
+  local MAX_VIS=$REPLY
   local visible=$total
   (( visible > MAX_VIS )) && visible=$MAX_VIS
 
@@ -566,6 +573,39 @@ bindkey $'\e[B' __nerv_select_down
 bindkey $'\eOB' __nerv_select_down
 bindkey $'\e[A' __nerv_select_up
 bindkey $'\eOA' __nerv_select_up
+
+# PageDown / PageUp: jump the selection by one visible window (the
+# same MAX_VIS the renderer uses) and clamp at the edges — page keys
+# page, they don't wrap (single-step Tab/arrow keep their wrap).
+# Outside the popup they fall back to history movement, mirroring
+# the arrow-key fallback above.
+__nerv_page_down() {
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+    local REPLY; __nerv_max_vis
+    local max=${#__NERV_ITEMS}
+    (( __NERV_SELECTED += REPLY ))
+    (( __NERV_SELECTED > max )) && __NERV_SELECTED=$max
+    __nerv_show_popup "${__NERV_ITEMS[@]}"
+  else
+    zle down-line-or-history
+  fi
+}
+zle -N __nerv_page_down
+
+__nerv_page_up() {
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+    local REPLY; __nerv_max_vis
+    (( __NERV_SELECTED -= REPLY ))
+    (( __NERV_SELECTED < 1 )) && __NERV_SELECTED=1
+    __nerv_show_popup "${__NERV_ITEMS[@]}"
+  else
+    zle up-line-or-history
+  fi
+}
+zle -N __nerv_page_up
+
+bindkey $'\e[5~' __nerv_page_up
+bindkey $'\e[6~' __nerv_page_down
 
 # Right-Arrow: accept ghost text (POSTDISPLAY) when at end of line.
 # Falls back to plain forward-char in the middle of the buffer or
