@@ -31,6 +31,10 @@ typeset -gi __NERV_E5_SHOWN=0
 typeset -gi __NERV_SELECTED=0
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
+# Rows currently reserved via `zle -R`. Lets show_popup skip re-issuing
+# the reservation (and its flicker-inducing blank frame) when a redraw
+# keeps the same row count.
+typeset -gi __NERV_RESERVED=0
 
 # Tighten KEYTIMEOUT so single-press Esc dismisses the popup
 # without zsh's default 0.4s wait for longer escape sequences.
@@ -45,6 +49,7 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 __nerv_reset_state() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=0
+  __NERV_RESERVED=0
   __NERV_ITEMS=()
   zle -R ""
 }
@@ -351,8 +356,16 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
 
-  # Step 1: ZLE creates space (plain blanks) and positions cursor.
-  zle -R "" "${plain[@]}"
+  # Step 1: reserve the space with ZLE — but only on first show or when
+  # the row count changes. Re-issuing `zle -R` on every keystroke blanks
+  # the whole region right before the printf repaints it; that one blank
+  # frame per render is the flicker seen while arrowing through a long
+  # list. When the reservation already matches, skip to the printf, which
+  # overwrites the box in place (each row clears to EOL) — no blank frame.
+  if (( ! __NERV_ACTIVE || __NERV_RESERVED != ${#plain} )); then
+    zle -R "" "${plain[@]}"
+    __NERV_RESERVED=${#plain}
+  fi
 
   # Anchor the popup's left edge under the input cursor. Query the
   # cursor column AFTER `zle -R` so it reflects the input line. Clamp
