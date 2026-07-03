@@ -341,7 +341,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 5. ✅ **`parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅** — chunks 1-5 완료 (types + static helpers + state machine + token shape classifier + matcher). 174 단위 + 11 fixture integration test.
 6. ✅ **`loadSpec.ts` → `nerv-engine::spec_loader` 포팅** + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체 (1,484 spec) 는 M1 (외부 node 스크립트 또는 rquickjs Tier C 시간 후). 현재 hand-rolled fixture (git, echo) 로 end-to-end 검증.
 7. ✅ **ZLE → UDS → `nerv-engine::complete()` → 인라인 ANSI** — latency 측정 결과: IPC p95 **0.052 ms**, CLI cold-start p95 **4.07 ms** (25 ms 예산 16%). ZLE widget `_nerv.zsh` 의 `insertion\tdisplay\tdesc` 포맷 호환 확인. (인라인 ANSI 자체는 widget 이 이미 구현 — engine + widget 통합 완료.)
-8. ⏳ **Developer ID 서명/공증 선행 검증** (v0.5.1 의 M0-8 그대로) — `fn main(){}` 빌드 + sign + notarize + Homebrew tap 설치 e2e. **No-Go 차단 요건** — Apple Developer 계정 / 인프라 의존.
+8. ⏳ **Developer ID 서명/공증 선행 검증** (v0.5.1 의 M0-8 그대로) — `fn main(){}` 빌드 + sign + notarize + Homebrew tap 설치 e2e. **No-Go 차단 요건**. 진행 (2026-07-03): `scripts/sign-notarize-e2e.sh` 추가, **서명 단계 green** ("Developer ID Application: Lemon Cloud Co., Ltd. (CH8U9VM6SR)", hardened runtime + timestamp, strict verify 통과). 공증 제출은 App Store Connect API key 의 Issuer ID 대기 — `xcrun notarytool store-credentials nerv-notary --key <AuthKey.p8> --key-id <ID> --issuer <UUID>` 후 스크립트 재실행으로 완주.
 
 **M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
 
@@ -356,7 +356,7 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 - **frecency ranking** — per-spec TSV, count>=2 부터 boost, time decay, daemon post-sort
 - **cwd-aware IPC** — `cd` 시 daemon 재시작 불필요
 - **UTF-8 char boundary 클램프** — 한글/CJK/emoji 입력 panic 방지
-- **widget UX** — sliding window (`MAX_VIS=min(LINES-6,10)`), footer `[k/total]` 항상, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow wrap-cycle, precmd 재바인딩 (Q hijack 방지), description 매행 → footer 단일 라인 (Fig style)
+- **widget UX** — sliding window (`MAX_VIS=min(LINES-6,10)`), footer `[k/total]` 항상, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow wrap-cycle, PageUp/PageDown 창 단위 점프 (edge clamp, ZLE+PTY 동일), precmd 재바인딩 (Q hijack 방지), description 매행 → footer 단일 라인 (Fig style)
 - **에러 UX E1-E4 구현**
 - **CI** — rust 1.85 핀 + protoc preinstall + build-specs-smoke + ts-to-json bun job + **ARM64-only** (Intel queue 너무 길어 drop)
 - **release.yml** — `v*.*.*` tag push → macos-14 빌드 + tarball + sha256 + GitHub Release 자동 생성
