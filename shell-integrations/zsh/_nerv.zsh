@@ -84,6 +84,21 @@ __nerv_cursor_col() {
   # for the rest of the visual offset).
   local col=$(( ${#p} + ${#LBUFFER} - 1 ))
   (( col < 1 )) && col=1
+  # Guard against prompts whose %-expansion doesn't yield a clean
+  # last-line width. powerlevel10k (and similar) draw a full-width
+  # filler bar (`···· 16:41`) whose padding inflates ${#p} to ≈COLUMNS,
+  # which slams the box against the right edge (observed: cursor at
+  # col 6, box at col ~190). When the estimate lands implausibly far
+  # right — beyond what the typed text alone could justify — the
+  # heuristic is defeated; fall back to anchoring from the left under
+  # the typed text (assumes a short input-line prompt, true for the
+  # multiline themes that trigger this). A left box is always usable;
+  # a right-clamped one is not.
+  local cols=${COLUMNS:-80}
+  if (( col > cols - 20 )); then
+    col=$(( 1 + ${#LBUFFER} ))
+    (( col > cols - 20 )) && col=1
+  fi
   print -r -- $col
 }
 
