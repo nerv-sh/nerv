@@ -697,19 +697,54 @@ fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
     chain
 }
 
+/// Fig-style positional-argument hint for a subcommand, e.g.
+/// `[remote] [branch]` (git push) or `<file>`. Optional args are
+/// bracketed `[name]`, required args angle-bracketed `<name>`, variadic
+/// args get a trailing `...`. Args with no name carry nothing to show
+/// and are skipped. Returns "" when there is no named positional arg.
+///
+/// The hint is appended to the popup `display` only — never to
+/// `insertion` (accepting `push` must not type the template) nor to the
+/// ghost (which mirrors insertion). The widget renders the trailing
+/// hint dimmer than the command name.
+fn arg_hint(args: &[crate::spec_parser::Arg]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for a in args {
+        let Some(name) = a.name.as_deref() else { continue };
+        if name.is_empty() {
+            continue;
+        }
+        let ellipsis = if a.is_variadic { "..." } else { "" };
+        parts.push(if a.is_optional {
+            format!("[{name}{ellipsis}]")
+        } else {
+            format!("<{name}{ellipsis}>")
+        });
+    }
+    parts.join(" ")
+}
+
 fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = node
         .subcommands
         .iter()
         .filter(|sc| !sc.hidden)
         .filter(|sc| name_or_aliases_match(&sc.name, &sc.aliases, prefix, mode))
-        .map(|sc| Suggestion {
-            insertion: sc.name.clone(),
-            display: sc.name.clone(),
-            description: sc.description.clone(),
-            kind: SuggestionKind::Subcommand,
-            priority: sc.priority,
-            icon: sanitize_icon(sc.icon.as_deref()),
+        .map(|sc| {
+            let hint = arg_hint(&sc.args);
+            let display = if hint.is_empty() {
+                sc.name.clone()
+            } else {
+                format!("{} {hint}", sc.name)
+            };
+            Suggestion {
+                insertion: sc.name.clone(),
+                display,
+                description: sc.description.clone(),
+                kind: SuggestionKind::Subcommand,
+                priority: sc.priority,
+                icon: sanitize_icon(sc.icon.as_deref()),
+            }
         })
         .collect();
     out.sort_by(sort_by_priority_then_alpha);
@@ -2676,7 +2711,9 @@ mod tests {
     #[test]
     fn git_space_emits_all_subcommands() {
         let r = complete("git ", 4, &registry_with(git_min()));
-        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        // Assert on `insertion` (the bare name), not `display`: display
+        // may carry a Fig-style arg hint ("checkout <branch>").
+        let names: Vec<_> = r.items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(names, ["checkout", "commit", "status"]);
     }
 
@@ -2684,8 +2721,47 @@ mod tests {
     fn git_co_filters_by_prefix_in_subcommand_names() {
         let r = complete("git co", 6, &registry_with(git_min()));
         // `co` matches checkout (via alias starts_with) and commit (primary).
-        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        let names: Vec<_> = r.items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(names, ["checkout", "commit"]);
+    }
+
+    #[test]
+    fn arg_hint_formats_optional_required_variadic() {
+        use crate::spec_parser::Arg;
+        let mk = |name: &str, opt: bool, var: bool| Arg {
+            name: Some(name.into()),
+            is_optional: opt,
+            is_variadic: var,
+            ..Default::default()
+        };
+        // git push: two optional args → "[remote] [branch]".
+        assert_eq!(
+            arg_hint(&[mk("remote", true, false), mk("branch", true, false)]),
+            "[remote] [branch]"
+        );
+        // required → angle brackets; variadic → trailing "...".
+        assert_eq!(arg_hint(&[mk("file", false, false)]), "<file>");
+        assert_eq!(arg_hint(&[mk("path", false, true)]), "<path...>");
+        assert_eq!(arg_hint(&[mk("arg", true, true)]), "[arg...]");
+        // no named args → empty; unnamed args skipped.
+        assert_eq!(arg_hint(&[]), "");
+        assert_eq!(arg_hint(&[Arg { name: None, ..Default::default() }]), "");
+    }
+
+    #[test]
+    fn subcommand_display_carries_arg_hint_insertion_stays_bare() {
+        // git_min's `checkout` has a (required, in-fixture) `branch` arg.
+        let r = complete("git ", 4, &registry_with(git_min()));
+        let checkout = r
+            .items
+            .iter()
+            .find(|s| s.insertion == "checkout")
+            .expect("checkout emitted");
+        assert_eq!(checkout.insertion, "checkout");
+        assert_eq!(checkout.display, "checkout <branch>");
+        // A no-arg subcommand keeps a bare display.
+        let status = r.items.iter().find(|s| s.insertion == "status").unwrap();
+        assert_eq!(status.display, "status");
     }
 
     #[test]

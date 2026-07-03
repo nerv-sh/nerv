@@ -225,6 +225,10 @@ __nerv_show_popup() {
   local ITEM=$'\e[38;5;252m' DESC=$'\e[38;5;244m'
   local SELBG=$'\e[48;5;62m' SELFG=$'\e[38;5;255m\e[1m'
   local ICON=$'\e[38;5;141m'
+  # Fig-style arg hint (`cmd [remote] [branch]`): dimmer than the
+  # command name. HINT for normal rows, HINTSEL drops bold + uses light
+  # grey so it stays legible on the selected-row accent background.
+  local HINT=$'\e[38;5;244m' HINTSEL=$'\e[22m\e[38;5;250m'
 
   local -a colored=()
 
@@ -270,10 +274,25 @@ __nerv_show_popup() {
     local row_pad=""
     repeat $pad_n; do row_pad+=" "; done
 
+    # Split off a trailing Fig-style arg hint so it renders dimmer than
+    # the command name. The hint begins at the first " [" or " <" (from
+    # the engine's arg_hint); subcommand names never contain those, so
+    # the split is unambiguous. dpre = name, dpost = hint (+ any pad the
+    # width truncation folded in). No hint → dpost empty → unchanged.
+    local dpre="$display" dpost=""
+    local b1="${display%%' ['*}" b2="${display%%' <'*}"
+    local boundary="$display"
+    [[ "$b1" != "$display" && ${#b1} -lt ${#boundary} ]] && boundary="$b1"
+    [[ "$b2" != "$display" && ${#b2} -lt ${#boundary} ]] && boundary="$b2"
+    if [[ "$boundary" != "$display" ]]; then
+      dpre="$boundary"
+      dpost="${display[${#boundary}+1,-1]}"
+    fi
+
     if (( i == __NERV_SELECTED )); then
-      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}${glyph}${SELFG} ${display}${row_pad}${BDR}│${R}")
+      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}${glyph}${SELFG} ${dpre}${HINTSEL}${dpost}${row_pad}${BDR}│${R}")
     else
-      colored+=("  ${BG}${BDR}│${BG} ${ICON}${glyph}${ITEM} ${display}${row_pad}${BDR}│${R}")
+      colored+=("  ${BG}${BDR}│${BG} ${ICON}${glyph}${ITEM} ${dpre}${HINT}${dpost}${row_pad}${BDR}│${R}")
     fi
   done
 
