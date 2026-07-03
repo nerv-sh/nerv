@@ -607,8 +607,14 @@ bindkey '^[[Z' __nerv_accept_back
 # Arrow keys: cycle through items (down at last → first, up at
 # first → last). Matches user expectation; differs from old Fig
 # behavior (which stopped at edges) per direct user feedback.
+# Arrows navigate the popup only when there's actually a line being
+# completed. On an empty buffer they must reach zsh's history search —
+# stale popup state (a `cd ` list left active after the previous command)
+# would otherwise re-draw the old popup on a blank prompt when the user
+# just wanted history. The `[[ -n "$BUFFER" ]]` guard is the belt; the
+# precmd reset below is the suspenders.
 __nerv_select_down() {
-  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )) && [[ -n "$BUFFER" ]]; then
     __nerv_cycle_next
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
@@ -618,7 +624,7 @@ __nerv_select_down() {
 zle -N __nerv_select_down
 
 __nerv_select_up() {
-  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )) && [[ -n "$BUFFER" ]]; then
     __nerv_cycle_prev
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
@@ -638,7 +644,7 @@ bindkey $'\eOA' __nerv_select_up
 # Outside the popup they fall back to history movement, mirroring
 # the arrow-key fallback above.
 __nerv_page_down() {
-  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )) && [[ -n "$BUFFER" ]]; then
     __NERV_NAVIGATED=1
     local REPLY; __nerv_max_vis
     local max=${#__NERV_ITEMS}
@@ -652,7 +658,7 @@ __nerv_page_down() {
 zle -N __nerv_page_down
 
 __nerv_page_up() {
-  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )) && [[ -n "$BUFFER" ]]; then
     __NERV_NAVIGATED=1
     local REPLY; __nerv_max_vis
     (( __NERV_SELECTED -= REPLY ))
@@ -761,6 +767,19 @@ zle -N bracketed-paste __nerv_bracketed_paste
 # AFTER us (fzf-tab, zsh-autocomplete, oh-my-zsh complete-on-tab).
 # Runs every prompt; cheap idempotent reassert.
 # ---------------------------------------------------------------------------
+# Clear popup state at the start of every new prompt. Without this the
+# globals survive a command / Ctrl-C, so a `cd ` list left active stays
+# "active" on the next, blank prompt — and an arrow / Page key would
+# re-draw that stale popup instead of reaching history. (Plain var
+# reset only — no `zle -R`, which is invalid outside a widget.)
+__nerv_precmd_reset() {
+  __NERV_ACTIVE=0
+  __NERV_ITEMS=()
+  __NERV_SELECTED=1
+  __NERV_NAVIGATED=0
+  __NERV_PREV_LBUFFER=""
+}
+
 __nerv_rebind() {
   # Tab / Shift-Tab / Ctrl-G — last writer wins; reassert ours.
   bindkey -M main '^I'    __nerv_accept       2>/dev/null
@@ -776,4 +795,7 @@ __nerv_rebind() {
   zle -N backward-delete-char __nerv_backward_delete  2>/dev/null
   zle -N accept-line          __nerv_line_finish      2>/dev/null
 }
-autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __nerv_rebind
+autoload -Uz add-zsh-hook 2>/dev/null && {
+  add-zsh-hook precmd __nerv_precmd_reset
+  add-zsh-hook precmd __nerv_rebind
+}
