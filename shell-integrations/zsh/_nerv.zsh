@@ -26,6 +26,12 @@ typeset -gi __NERV_E5_SHOWN=0
 typeset -gi __NERV_SELECTED=1
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
+# 1 once the user has moved the selection (Tab / arrows / Page keys).
+# Gates Enter: while still 0 and the current token is empty, Enter runs
+# the line as typed instead of injecting the auto-highlighted first row
+# (Fig's "Immediately execute" default — `cd ` + Enter must run `cd`,
+# not insert `-`).
+typeset -gi __NERV_NAVIGATED=0
 
 # Tighten KEYTIMEOUT so single-press Esc dismisses the popup
 # without zsh's default 0.4s wait for longer escape sequences.
@@ -40,11 +46,13 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 __nerv_reset_state() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=1
+  __NERV_NAVIGATED=0
   __NERV_ITEMS=()
   zle -R ""
 }
 
 __nerv_cycle_next() {
+  __NERV_NAVIGATED=1
   local max=${#__NERV_ITEMS}
   if (( __NERV_SELECTED < max )); then
     (( __NERV_SELECTED++ ))
@@ -54,6 +62,7 @@ __nerv_cycle_next() {
 }
 
 __nerv_cycle_prev() {
+  __NERV_NAVIGATED=1
   local max=${#__NERV_ITEMS}
   if (( __NERV_SELECTED > 1 )); then
     (( __NERV_SELECTED-- ))
@@ -448,6 +457,7 @@ __nerv_complete() {
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=1
+  __NERV_NAVIGATED=0
 
   [[ -z "${LBUFFER// /}" ]] && { __nerv_hide_popup; return; }
   [[ "$LBUFFER" != *" "* ]] && { __nerv_hide_popup; return; }
@@ -533,12 +543,26 @@ zle -N backward-delete-char __nerv_backward_delete
 
 # Enter: select if popup, else execute
 __nerv_line_finish() {
-  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+  # Insert the highlighted item on Enter EXCEPT when the cursor sits at a
+  # completed segment boundary (LBUFFER ends in whitespace or `/`) and
+  # the user hasn't navigated the list. There, Enter runs the line as
+  # typed instead of injecting the auto-highlighted first row:
+  #   `cd ` + Enter      → run `cd`,        not insert `-`/last-dir
+  #   `cd apps/` + Enter → run `cd apps/`,  not descend into a subfolder
+  # Mirrors Fig's "Immediately execute" default row. A partial token
+  # (`cd ap`), or any Tab/arrow/Page navigation, opts back into
+  # insert-on-Enter so progressive completion still works.
+  local at_boundary=0
+  [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' || "$LBUFFER" == */ ]] \
+    && at_boundary=1
+  if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 \
+        && (__NERV_NAVIGATED || ! at_boundary) )); then
     __nerv_insert_selected
   else
     (( __NERV_ACTIVE )) && { __NERV_ACTIVE=0; zle -R ""; }
     __NERV_PREV_LBUFFER=""
     __NERV_SELECTED=1
+    __NERV_NAVIGATED=0
     __NERV_ITEMS=()
     zle .accept-line
   fi
@@ -615,6 +639,7 @@ bindkey $'\eOA' __nerv_select_up
 # the arrow-key fallback above.
 __nerv_page_down() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+    __NERV_NAVIGATED=1
     local REPLY; __nerv_max_vis
     local max=${#__NERV_ITEMS}
     (( __NERV_SELECTED += REPLY ))
@@ -628,6 +653,7 @@ zle -N __nerv_page_down
 
 __nerv_page_up() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )); then
+    __NERV_NAVIGATED=1
     local REPLY; __nerv_max_vis
     (( __NERV_SELECTED -= REPLY ))
     (( __NERV_SELECTED < 1 )) && __NERV_SELECTED=1
