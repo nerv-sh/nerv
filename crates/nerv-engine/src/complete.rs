@@ -477,7 +477,7 @@ pub fn complete_in(
         }
     }
 
-    let items = if prefix_is_option {
+    let mut items = if prefix_is_option {
         emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
     } else if prefer_subcommands {
         // yarn-style shorthand: `yarn web` should match both yarn
@@ -503,6 +503,16 @@ pub fn complete_in(
             CursorContext::Done => vec![],
         }
     };
+
+    // Drop no-op completions: a suggestion whose insertion is exactly
+    // the token already typed adds nothing. The user who typed
+    // `git status` in full shouldn't see `status` re-offered — only the
+    // "Immediately execute" sentinel (widget-side) plus any longer
+    // matches (`status-v2`) remain. Empty prefix means the user is
+    // browsing a fresh token (`git `), so keep everything.
+    if !prefix.is_empty() {
+        items.retain(|s| s.insertion != prefix);
+    }
 
     CompleteResult {
         items,
@@ -2828,6 +2838,21 @@ mod tests {
         // A no-arg subcommand keeps a bare display.
         let status = r.items.iter().find(|s| s.insertion == "status").unwrap();
         assert_eq!(status.display, "status");
+    }
+
+    #[test]
+    fn exact_token_match_is_dropped_as_noop() {
+        // `git status` fully typed: the `status` subcommand is a no-op
+        // completion (insertion == typed token) and must not appear.
+        let r = complete("git status", 10, &registry_with(git_min()));
+        assert!(
+            !r.items.iter().any(|s| s.insertion == "status"),
+            "exact match should be dropped, got: {:?}",
+            r.items.iter().map(|s| &s.insertion).collect::<Vec<_>>()
+        );
+        // A partial token still completes: `git stat` keeps `status`.
+        let r2 = complete("git stat", 8, &registry_with(git_min()));
+        assert!(r2.items.iter().any(|s| s.insertion == "status"));
     }
 
     #[test]
