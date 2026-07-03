@@ -94,7 +94,11 @@ These are by design (PLAN §4 비목표 / current scope). Logging them is noise:
   opt-in `--features quickjs`, and even then 0% e2e recovery today — see
   `docs/findings/tier-c-quickjs-e2e.md`). Static generators *do* work.
 - bash/fish need `NERV_PTY=1`; there is no ZLE-equivalent for them.
-- macOS Gatekeeper warns on first launch until M0-8 signing lands.
+- macOS Gatekeeper: no warning via `brew install` (Homebrew doesn't
+  quarantine; ad-hoc signature satisfies arm64). Only a **direct tarball
+  download** warns on first launch → `xattr -dr com.apple.quarantine
+  <path>`. Developer ID notarization is deferred (PLAN §10 M0-8, dropped
+  2026-07-04) — add it later only if raw-download distribution grows.
 - No Linux / Windows. No `nerv config` command (edit the TOML directly).
 
 ## 6. Wrap-up

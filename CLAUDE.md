@@ -36,7 +36,7 @@
 - ✅ M0-5: `parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅 (chunks 1-5, 174 test) — types + static helpers + state machine + token classifier + matcher
 - ✅ M0-6: `loadSpec.ts` → `nerv-engine::spec_loader` + JSON 직렬화 + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체는 M1 (또는 외부 node 스크립트). hand-rolled fixture (git, echo, docker, kubectl) + 24 integration test 통과
 - ✅ M0-7: ZLE → CLI → UDS → 실엔진 wire-up + latency bench. IPC p95 0.052 ms, CLI cold-start p95 4.07 ms (25 ms 예산 대비 16%). `_nerv.zsh` widget 포맷 호환 확인
-- ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건**) — `scripts/sign-notarize-e2e.sh` 로 **서명 단계 green** (Lemon Cloud Developer ID cert, hardened runtime + timestamp). 공증만 잔여: notarytool credential (`nerv-notary` keychain profile 또는 `NOTARY_KEY`/`NOTARY_KEY_ID`/`NOTARY_ISSUER` env) 확보 후 스크립트 재실행
+- ✅ M0-8: **배포 서명 정책 = Homebrew-only (공증 요건 폐기, 2026-07-04)** — `brew install` 은 quarantine xattr 미부착 → Gatekeeper 경고 없음 → Developer ID 공증 불필요. arm64 실행 서명은 Rust/linker 의 **ad-hoc**(`adhoc,linker-signed`) 로 충족, 유료 Apple 계정 불필요. `scripts/sign-notarize-e2e.sh` 는 직접-tarball + 공증을 나중에 추가할 때 쓸 opt-in 스캐폴드로 보존. 직접-다운로드 사용자만 `xattr -dr com.apple.quarantine` 안내
 
 **보너스 진척 (M0 산출물 외 — M1 0-10주차 작업 대부분 선행 완료)**:
 - ✅ CLI 5/5 표면 완성: `nerv init` / `start` / `stop` / `spec list` / `doctor` / `uninstall` (uninstall-spec.md §4 8-step atomic 포함)
@@ -120,7 +120,7 @@
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
-- M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
+- ~~M0-8: 서명/공증~~ → **폐기 (2026-07-04)**: Homebrew-only 배포로 공증 불필요. Developer ID 공증은 직접-tarball 배포 추가 시 opt-in
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지). **2026-06-13 정밀 분석**: aws 1844 gen 중 1095 (60%) 이미 작동 (template 415 / script_with_json_path 591 / aws_list 89), 남은 624 = ~17개 distinct bespoke 클로저 (filesystem/조건분기) 의 다중 참조 — clean recognizer 불가, rquickjs-bound 확정. 상세 = `docs/findings/aws-closure-recovery-ceiling.md`
 - ✅ **bash + fish 지원 (PTY 경로 MVP)**: `nerv init {bash,fish}` → `shell-integrations/{bash/_nerv-pty.bash,fish/_nerv-pty.fish}`. 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. inner 가 OSC 697 (`Shell={bash,fish}` 필수 — `can_send_edit_buffer` 게이트, bash 첫 e2e 실패의 root cause) + StartPrompt/EndPrompt/NewCmd prompt wrap. bash=PROMPT_COMMAND, fish=`--on-event fish_prompt` 이벤트 + fish_prompt 함수 wrap. **PreExec 구현**: fish=`--on-event fish_preexec` (clean event), bash=gated DEBUG trap (2-guard: `_NERV_PTY_PROMPT_SHOWN` 가 첫 precmd 까지 empty → startup 발화 차단; `_NERV_PTY_PREEXEC_DONE` 가 커맨드당 1회 보장, precmd 가 reset). ghost+preexec e2e PASS (`scripts/e2e-pty-{bash,fish}.py`). `init_block` shell 파라미터화 + fish `| source` 문법 (POSIX `eval` 아님). cli `PtyShell` enum (export 문법 native: bash `export` / fish `set -gx`). **fish 주의**: fish 4.x 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 (실 터미널 OK, e2e harness 는 emulate) + fish 자체 grey autosuggestion 과 공존
 - Linux / Windows 지원 (큼)

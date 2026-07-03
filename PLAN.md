@@ -2,7 +2,7 @@
 
 > **한 줄 요약**: 사라진 Fig의 인라인 자동완성을 **AWS가 보존한 Fig Rust 코드 (amazon-q-developer-cli-autocomplete)** 위에 macOS + zsh 단일 정적 바이너리로 다시 살린다. 자작 엔진 폐기, Fig 엔진 흡수 + TS → Rust 포팅. AI / 로그인 / 텔레메트리 / Electron 없음.
 
-> **상태 (2026-05-29)**: M0 종료 (8개 산출물 중 7개 완료, M0-8 서명/공증만 인프라 차단). M1 진입 — alpha.7~alpha.10 후보 누적: fuzzy matching opt-in, FSEvents push hot-reload, aws Phase 1+2 (680 generator 회복: ScriptWithJsonPath 591 + AwsList 89), Homebrew tap 자동화, icon glyph width 보정. 흡수 crate 브랜드 strip 단계: env_var 모듈 (Q_*→NERV_*) + dead 메서드 14개 삭제 + CLI binary "q"→"nerv" / PRODUCT_NAME "Amazon Q"→"Nerv" / bundle id sh.nerv.nerv / "# Q pre block" 마커 / qterm.* 설정 키 → pty.* / AI translate hook 제거. Q/Amazon 사용자 표면 잔존 0. 1,484 spec 자동 변환 (715 loaded, depth=1, gzip 10×). 558+ workspace test, CI 1차 budget 90% 도달 시 workflow_dispatch 게이트.
+> **상태 (2026-05-29 / M0-8 정책 갱신 2026-07-04)**: M0 종료 (**8/8 완료** — M0-8 = Homebrew-only 배포 정책 확정, 공증 요건 폐기). M1 진입 — alpha.7~alpha.10 후보 누적: fuzzy matching opt-in, FSEvents push hot-reload, aws Phase 1+2 (680 generator 회복: ScriptWithJsonPath 591 + AwsList 89), Homebrew tap 자동화, icon glyph width 보정. 흡수 crate 브랜드 strip 단계: env_var 모듈 (Q_*→NERV_*) + dead 메서드 14개 삭제 + CLI binary "q"→"nerv" / PRODUCT_NAME "Amazon Q"→"Nerv" / bundle id sh.nerv.nerv / "# Q pre block" 마커 / qterm.* 설정 키 → pty.* / AI translate hook 제거. Q/Amazon 사용자 표면 잔존 0. 1,484 spec 자동 변환 (715 loaded, depth=1, gzip 10×). 558+ workspace test, CI 1차 budget 90% 도달 시 workflow_dispatch 게이트.
 
 ---
 
@@ -48,7 +48,7 @@ PRD 승인 이후의 핵심 마일스톤. PLAN.md 정책은 변경 없음 — *�
 
 | 묶음 | 상태 | 비고 |
 |------|------|------|
-| M0 흡수 (8개 산출물) | 7/8 완료 | M0-8 (Apple Developer ID 서명/공증) 만 인프라 차단 |
+| M0 흡수 (8개 산출물) | **8/8 완료** | M0-8 = Homebrew-only 배포 정책 확정 (공증 요건 폐기, 2026-07-04). ad-hoc 서명 (Rust/linker 자동) + brew quarantine 미부착으로 Gatekeeper 경고 없음. Developer ID 공증은 직접-tarball 배포 추가 시 opt-in |
 | TS→JSON 변환 파이프라인 | ✅ `tools/ts-to-json/` | bun 기반, 715 spec, Tier A 440 / B 6 / C 246 분류, depth=1 (`aws ec2 <verb>` 등) |
 | Spec store | ✅ lazy load + FSEvents hot-reload + gzip 10× 압축 | `~/Library/Caches/nerv/specs/*.json.gz` |
 | aws closure 회복 (Phase 1) | ✅ `Generator::ScriptWithJsonPath` | 591 generator (iam list-users / ec2 describe-instances) — rquickjs 우회 |
@@ -62,7 +62,7 @@ PRD 승인 이후의 핵심 마일스톤. PLAN.md 정책은 변경 없음 — *�
 | CI 정책 | ⚠️ workflow_dispatch only (2026-06-01 reset 까지) | 1차 무료 budget 90% 도달, restore 한 줄 패치 |
 
 **아직 인 진척 (M1 이후)**:
-- M0-8 서명/공증 (Apple Developer 계정 + 인프라 의존)
+- ~~M0-8 서명/공증~~ → **폐기 (2026-07-04)**: Homebrew-only 배포로 공증 불필요. Developer ID 공증은 직접-tarball 배포 추가 시 opt-in (`scripts/sign-notarize-e2e.sh` 스캐폴드 보존)
 - aws Phase 3 (closure 가 token 에 의존하는 624 케이스 — rquickjs opt-in 필요)
 - ✅ **bash + fish 지원 (PTY 경로, MVP)**: `nerv init {bash,fish}` → `_nerv-pty.{bash,fish}` (OSC 697 markers, `Shell={bash,fish}` 필수). 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. ghost 작동 (`scripts/e2e-pty-{bash,fish}.py` PASS). bash=PROMPT_COMMAND, fish=`--on-event fish_prompt`+prompt wrap. **PreExec 구현**: fish=`--on-event fish_preexec` (clean), bash=gated DEBUG trap (2-guard: `PROMPT_SHOWN` 으로 startup 발화 차단 + `PREEXEC_DONE` 으로 커맨드당 1회). submit 시 발화 e2e 검증. **fish 주의**: (1) fish 4.x 는 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 — 실 터미널은 응답하나 e2e harness 는 emulate 필요. (2) fish 자체 grey autosuggestion 과 nerv ghost 공존 (사용자가 한쪽 비활성 선택 가능). `init_block` 이 fish 용 `| source` 문법 emit (POSIX `eval` 아님)
 - Linux / Windows 지원 (큼)
@@ -179,7 +179,7 @@ M0 ZLE widget 으로 latency 검증 완료 후, M1 에서 `figterm` (rebrand →
 
 - 설치: `nerv init zsh --pty` 옵션 시 `~/.local/bin/nerv-pty` 배포 + `pre.sh` 에 `exec -a "<shell> (nerv-pty)" nerv-pty` 추가
 - 효과: bash/fish 도달 + prompt boundary 정확 + alacritty terminal state 로 cursor 정확
-- 비용: PTY shim Apple Developer ID 서명 + notarization 필수 (M0-8 인프라 재활용), ~20 MB binary, universal (arm64 + x86_64)
+- 비용: ~20 MB binary, universal (arm64 + x86_64). 배포는 Homebrew (ad-hoc 서명 + quarantine 미부착으로 공증 불필요 — M0-8 정책). 직접-tarball 추가 시에만 Developer ID 공증 opt-in
 - ZLE 와 상호 배타: `NERV_PTY=1` 환경변수 감지 시 ZLE widget 자동 비활성
 
 ---
@@ -246,7 +246,7 @@ M0 ZLE widget 으로 latency 검증 완료 후, M1 에서 `figterm` (rebrand →
 - **설정**: TOML 직접 편집 (`~/.config/nerv/nerv.toml`)
 - **테스트**: `cargo nextest`, `expectrl` (zsh + tmux), `fig_integrations` 의 snapshot tests 흡수
 - **배포**: Homebrew tap (`nerv-sh/homebrew-tap`)
-- **서명/공증**: macOS Developer ID + notarization (universal binary)
+- **서명/배포**: ad-hoc 서명 (Rust/linker 자동) + Homebrew tap (brew quarantine 미부착 → Gatekeeper 경고 없음). Developer ID 공증은 직접-tarball 배포 추가 시 opt-in (M0-8 정책, 2026-07-04)
 
 ---
 
@@ -325,7 +325,7 @@ nerv uninstall          # 깔끔한 제거
 
 ## 10. 로드맵
 
-### M0 — 흡수 스파이크 (6주, +2주 Developer ID 선행 검증)
+### M0 — 흡수 스파이크 (6주) — ✅ 완료 (8/8)
 
 v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 
@@ -336,11 +336,11 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 5. ✅ **`parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅** — chunks 1-5 완료 (types + static helpers + state machine + token shape classifier + matcher). 174 단위 + 11 fixture integration test.
 6. ✅ **`loadSpec.ts` → `nerv-engine::spec_loader` 포팅** + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체 (1,484 spec) 는 M1 (외부 node 스크립트 또는 rquickjs Tier C 시간 후). 현재 hand-rolled fixture (git, echo) 로 end-to-end 검증.
 7. ✅ **ZLE → UDS → `nerv-engine::complete()` → 인라인 ANSI** — latency 측정 결과: IPC p95 **0.052 ms**, CLI cold-start p95 **4.07 ms** (25 ms 예산 16%). ZLE widget `_nerv.zsh` 의 `insertion\tdisplay\tdesc` 포맷 호환 확인. (인라인 ANSI 자체는 widget 이 이미 구현 — engine + widget 통합 완료.)
-8. ⏳ **Developer ID 서명/공증 선행 검증** (v0.5.1 의 M0-8 그대로) — `fn main(){}` 빌드 + sign + notarize + Homebrew tap 설치 e2e. **No-Go 차단 요건**. 진행 (2026-07-03): `scripts/sign-notarize-e2e.sh` 추가, **서명 단계 green** ("Developer ID Application: Lemon Cloud Co., Ltd. (CH8U9VM6SR)", hardened runtime + timestamp, strict verify 통과). 공증 제출은 App Store Connect API key 의 Issuer ID 대기 — `xcrun notarytool store-credentials nerv-notary --key <AuthKey.p8> --key-id <ID> --issuer <UUID>` 후 스크립트 재실행으로 완주.
+8. ✅ **배포 서명 정책 = Homebrew-only (공증 요건 폐기, 2026-07-04)** — **결정**: v1.0 배포는 Homebrew tap 단독. `brew install` 은 다운로드에 `com.apple.quarantine` xattr 를 붙이지 않으므로 **Gatekeeper "미확인 개발자" 경고 자체가 발생 X** → Developer ID 공증 불필요. arm64 실행에 필요한 서명은 Rust/linker 가 자동으로 붙이는 **ad-hoc 서명**(`adhoc,linker-signed`, 검증: `codesign -dv target/release/nerv`)으로 충족. 유료 Apple Developer 계정 ($99/년) 및 개인/회사 인증서 불필요. `scripts/sign-notarize-e2e.sh` 는 미래에 직접-tarball 배포 + 공증을 추가할 때를 위한 opt-in 스캐폴드로 보존 (Apple Developer 계정 확보 시 재활성). **직접 tarball 다운로드 사용자** (Homebrew 미경유) 만 첫 실행 시 경고 → README/Formula 에 `xattr -dr com.apple.quarantine <path>` 안내. **공증은 v1.0 후 필요 시 추가** (No-Go 아님).
 
-**M0 Go/No-Go**: 1+2+3+7+8 동시 충족. 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO.
+**M0 Go/No-Go**: 1+2+3+7+8 동시 충족 (8 = Homebrew-only 배포 정책 확정). 4+5+6 에서 상위 50 spec 의 `git status / log / checkout` + `docker ps / build / run` + `kubectl get / describe / logs` 시나리오 통과 시 GO. → **전 항목 충족, M0 GO**.
 
-**현재 상태 (2026-05-26 evening / `v0.1.0-alpha.2` tag)**: M0 1-7 완료, 8 만 남음 (서명/공증 인프라). Go/No-Go 시나리오 4종 통과, hand-rolled fixture 9종 + 43 integration test + 453 workspace test. CLI 5/5 완성.
+**현재 상태 (2026-05-26 → M0-8 정책 확정 2026-07-04)**: **M0 1-8 전부 완료** (8 = Homebrew-only 배포 정책, 공증 요건 폐기). Go/No-Go 시나리오 4종 통과, hand-rolled fixture 9종 + 43 integration test + 453 workspace test. CLI 5/5 완성.
 
 - **TS→JSON 변환 + loadSpec depth=1** (715 spec, `aws ec2 <verb>` 등 nested 커버)
 - **SpecRegistry lazy + mtime hot-reload + gzip 압축 (10×)** — daemon 즉시 기동, 10MB 풀세트
@@ -413,7 +413,7 @@ PLAN v0.5 §11 그대로. figterm opt-in 도입 시 `alacritty_terminal` 의 scr
 | **edition 2024 호환 깨짐** (clap, tokio, prost 등 일부 미지원) | **높음 ↑ (신규)** | M0-3 직후 즉시 `cargo check --workspace` — 충돌 발견 시 격리 |
 | **Apache-2.0 + MIT vs 우리 Apache-2.0 정합** | 낮음 | NOTICE 명시, 흡수 crate별 `LICENSE` 파일 보존 |
 | 1인 개발 + 14주 M1 → 번아웃 | 높음 | 4/10주차 체크포인트, 외부 기여 적극 수용 |
-| Developer ID 서명/공증 (M0-8) | 높음 | 선행 검증 (변경 없음) |
+| ~~Developer ID 서명/공증 (M0-8)~~ | ~~높음~~ → 해소 | Homebrew-only 배포로 공증 불필요 (2026-07-04). ad-hoc 서명 자동 + brew quarantine 미부착 |
 | Tier C 동적 generator 한계 (M0 drop) | 중간 | Tier B 직접 spawn + well-known recognizer 회복 (kubectl/docker/aws/npm); closure-only tail 은 rquickjs opt-in (미동봉) |
 | `withfig/autocomplete` archived (1차 spec 소스) | 중간 | spec-conversion-policy §5.3 (2주 모니터, 3개월 부재 시 fork) |
 | **`aws/amazon-q-developer-cli-autocomplete` archived 또는 EOL** (신규) | 중간 | 마지막 커밋 2026-02-03 활성 — `upstream-monitor.yml` 에 추가 (2주 cron, 90일 부재 시 fork) |
