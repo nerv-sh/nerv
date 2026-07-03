@@ -56,6 +56,13 @@ def footers(raw):
     return [(int(a), int(b)) for a, b in re.findall(rb"\[(\d+)/(\d+)\]", raw)]
 
 
+def sentinel_counters(raw):
+    """Sentinel-selected footers render as a bare `[N]` (item count, no
+    slash). `\\[(\\d+)\\]` only matches that form — `[k/total]` has a
+    slash before the `]`, so it's excluded."""
+    return [int(m) for m in re.findall(rb"\[(\d+)\]", raw)]
+
+
 def main():
     if not os.path.exists(NERV):
         log(f"missing binary: {NERV} — run `cargo build -p nerv-cli`")
@@ -98,13 +105,15 @@ def main():
 
         os.write(master, b"brew ")
         out = pump(master, 2.0)
-        initial = footers(out)
-        log(f"after 'brew ': footers={initial[-3:]}")
-        if not initial or initial[-1][0] != 1 or initial[-1][1] < 12:
-            log("FAIL — popup did not open at [1/N] with N >= 12")
+        # Popup opens on the "Immediately execute" sentinel (index 0), so
+        # the footer is a bare `[N]` item count, not `[k/total]`.
+        initial = sentinel_counters(out)
+        log(f"after 'brew ': sentinel counters={initial[-3:]}")
+        if not initial or initial[-1] < 12:
+            log("FAIL — popup did not open on the sentinel with N >= 12")
             log(f"  tail repr: {out[-400:]!r}")
             return 1
-        total = initial[-1][1]
+        total = initial[-1]
 
         os.write(master, PAGE_DOWN)
         out = pump(master, 1.5)
@@ -113,13 +122,15 @@ def main():
 
         os.write(master, PAGE_UP)
         out = pump(master, 1.5)
-        after_up = footers(out)
-        log(f"after PageUp: footers={after_up[-3:]}")
+        after_up = sentinel_counters(out)
+        log(f"after PageUp: sentinel counters={after_up[-3:]}")
 
-        down_ok = bool(after_down) and after_down[-1] == (11, total)
-        up_ok = bool(after_up) and after_up[-1] == (1, total)
+        # PageDown from the sentinel jumps one window (10) → item 10;
+        # PageUp returns to the sentinel (bare [N]).
+        down_ok = bool(after_down) and after_down[-1] == (10, total)
+        up_ok = bool(after_up) and after_up[-1] == total
         if down_ok and up_ok:
-            log(f"PASS — PageDown 1->11, PageUp 11->1 (window=10, total={total})")
+            log(f"PASS — sentinel → PageDown [10/{total}] → PageUp [{total}]")
             rc = 0
         else:
             log(f"FAIL — down_ok={down_ok} up_ok={up_ok}")
