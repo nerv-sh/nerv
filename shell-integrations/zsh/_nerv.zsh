@@ -35,6 +35,10 @@ typeset -gi __NERV_ACTIVE=0
 # the reservation (and its flicker-inducing blank frame) when a redraw
 # keeps the same row count.
 typeset -gi __NERV_RESERVED=0
+# Cached box dimensions (widest display cells / widest desc cells / any
+# wide icon), measured once per item set by __nerv_measure_items so
+# show_popup doesn't re-scan all N items on every navigation keystroke.
+typeset -gi __NERV_MAXDISP=0 __NERV_MAXDESC=0 __NERV_HASWIDE=0
 
 # Tighten KEYTIMEOUT so single-press Esc dismisses the popup
 # without zsh's default 0.4s wait for longer escape sequences.
@@ -57,6 +61,32 @@ __nerv_reset_state() {
 # Cycle across [sentinel(0), item1, …, itemN], wrapping. next:
 # 0→1→…→N→0; prev: 0→N→…→1→0. The sentinel is one of the stops, so
 # tabbing past the last item lands back on "Immediately execute".
+# Scan the item set ONCE to size the box: widest display name (display
+# cells, `(m)` flag for CJK width), widest description, and whether any
+# row carries a wide (emoji) icon. Cached into globals so show_popup —
+# which fires on every navigation keystroke — reads O(1) instead of
+# re-scanning all N items (the ~400-subcommand `aws ` lag).
+__nerv_measure_items() {
+  local i n=${#__NERV_ITEMS} md=0 me=0 hw=0
+  for (( i=1; i<=n; i++ )); do
+    local rest="${__NERV_ITEMS[$i]#*	}"   # display \t desc \t icon
+    local d="${rest%%	*}"                  # display
+    local after="${rest#*	}"               # desc \t icon
+    local desc_full="${after%%	*}"         # desc
+    local dw=${(m)#d} ew=${(m)#desc_full}
+    (( dw > md )) && md=$dw
+    (( ew > me )) && me=$ew
+    if (( ! hw )); then
+      local ic="${after#*	}"; [[ "$ic" == "$after" ]] && ic=""
+      [[ "$ic" == *[^[:ascii:]]* ]] && hw=1
+    fi
+  done
+  (( md > 32 )) && md=32   # hard cap so a long name can't blow the box out
+  __NERV_MAXDISP=$md
+  __NERV_MAXDESC=$me
+  __NERV_HASWIDE=$hw
+}
+
 __nerv_cycle_next() {
   local n=${#__NERV_ITEMS}
   (( __NERV_SELECTED = (__NERV_SELECTED + 1) % (n + 1) ))
@@ -159,26 +189,14 @@ __nerv_show_popup() {
     sel_desc="${sel_desc%%	*}"  # drop trailing icon field
   fi
 
-  # Auto-size: measure max display + max desc across ALL items
-  # (not just the window), so window-sliding doesn't reshape the
-  # popup width every tick.
-  local i max_disp=0 max_desc=0
-  for (( i=1; i<=total; i++ )); do
-    local line="${items[$i]}"
-    local rest="${line#*	}"
-    local d="${rest%%	*}"
-    local desc_full="${rest#*	}"
-    desc_full="${desc_full%%	*}"  # drop icon field
-    # Measure DISPLAY cells, not code points: CJK glyphs are 2 cells,
-    # so ${#d} undercounts and the right border drifts. The `m` flag
-    # makes the length operator count East Asian width.
-    local dw=${(m)#d} ew=${(m)#desc_full}
-    (( dw > max_disp )) && max_disp=$dw
-    (( ew > max_desc )) && max_desc=$ew
-  done
+  # Box dimensions come from __nerv_measure_items (called once when the
+  # item set changed) — NOT re-scanned here. show_popup fires on every
+  # navigation keystroke; re-measuring all N items each time made a ~400-
+  # subcommand `aws ` list lag badly on every arrow press.
+  local max_disp=$__NERV_MAXDISP
+  local max_desc=$__NERV_MAXDESC
+  local has_wide_icon=$__NERV_HASWIDE
 
-  # Hard caps so a long description doesn't blow the popup off-screen.
-  (( max_disp > 32 )) && max_disp=32
   local term_cols=${COLUMNS:-80}
   local cap=$(( term_cols * 8 / 10 ))
   (( cap < 30 )) && cap=30
@@ -189,16 +207,6 @@ __nerv_show_popup() {
   local foot_hint=$max_desc
   (( foot_hint > 60 )) && foot_hint=60
 
-  # Pre-scan items: if any row carries an emoji icon (4th field
-  # contains a non-ASCII byte), the glyph occupies 2 cells. Reserve
-  # an extra column in body so the right border doesn't clip.
-  local has_wide_icon=0
-  for (( i=1; i<=total; i++ )); do
-    local _l="${items[$i]}"
-    local _t="${_l#*	}"; _t="${_t#*	}"
-    local _ic="${_t#*	}"; [[ "$_ic" == "$_t" ]] && _ic=""
-    [[ "$_ic" == *[^[:ascii:]]* ]] && { has_wide_icon=1; break; }
-  done
   # Layout: " G " + display + " " — slot is 3 cols (ASCII glyph) or
   # 4 cols (emoji) depending on whether ANY row uses an emoji.
   local body
@@ -548,6 +556,7 @@ __nerv_complete() {
   fi
 
   __NERV_ITEMS=("${rlines[@]}")
+  __nerv_measure_items   # size the box once; show_popup reads the cache
   # Default selection depends on whether a token is being filtered:
   #   `z ` (trailing space, empty token) → sentinel (Immediately
   #        execute) is the sensible default, so Enter runs the command.
