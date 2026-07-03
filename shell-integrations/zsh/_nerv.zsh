@@ -516,6 +516,17 @@ __nerv_complete() {
   (( ${#rlines} == 0 )) && { __nerv_hide_popup; return; }
 
   __NERV_ITEMS=("${rlines[@]}")
+  # Default selection depends on whether a token is being filtered:
+  #   `z ` (trailing space, empty token) → sentinel (Immediately
+  #        execute) is the sensible default, so Enter runs the command.
+  #   `z ad` (partial token)             → the user is homing in on a
+  #        match, so highlight the first real item (`ade-front`), not
+  #        the sentinel. Mirrors the ghost's mid-token gate.
+  if [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' ]]; then
+    __NERV_SELECTED=0
+  else
+    __NERV_SELECTED=1
+  fi
   __nerv_set_ghost
   __nerv_show_popup "${rlines[@]}"
 }

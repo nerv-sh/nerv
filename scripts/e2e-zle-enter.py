@@ -17,6 +17,7 @@ Requires: cargo-built debug binaries, zsh + git on PATH.
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -139,13 +140,26 @@ def main():
         nav_inserted = any(f"git {s}" in text2 for s in subs) and "usage: git" not in text2
         log(f"case2 nav_inserted_subcommand={nav_inserted}")
 
-        if exec_bare and not inserted_checkout and nav_inserted:
-            log("PASS — Enter at boundary executes; Tab+Enter inserts")
+        # --- Case 3: partial token highlights the first item, not the
+        # sentinel. `git c` → popup selects item 1 → footer `[1/N]`
+        # (an item), never a bare `[N]` (the sentinel).
+        master, proc = new_shell(env)
+        pump(master, 2.0)
+        os.write(master, b"git c")
+        out3 = pump(master, 1.5)
+        kill(master, proc)
+        item_footer = re.findall(rb"\[(\d+)/(\d+)\]", out3)
+        partial_selects_item = bool(item_footer) and item_footer[-1][0] == b"1"
+        log(f"case3 partial_selects_item={partial_selects_item} footer={item_footer[-1:]}")
+
+        if exec_bare and not inserted_checkout and nav_inserted and partial_selects_item:
+            log("PASS — sentinel executes; Tab+Enter inserts; partial selects item 1")
             rc = 0
         else:
             log("FAIL")
             log(f"  case1 tail: {out1[-300:]!r}")
             log(f"  case2 tail: {out2[-300:]!r}")
+            log(f"  case3 tail: {out3[-300:]!r}")
     finally:
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
 
