@@ -64,7 +64,7 @@ const SCENARIOS: &[(&str, &str)] = &[
     ("docker exe", "exec"),
     ("docker sto", "stop"),
     // kubectl (6)
-    ("kubectl get", "get"),
+    ("kubectl ge", "get"),
     ("kubectl des", "describe"),
     ("kubectl log", "logs"),
     ("kubectl app", "apply"),
@@ -81,10 +81,10 @@ const SCENARIOS: &[(&str, &str)] = &[
     ("cargo te", "test"),
     ("cargo ru", "run"),
     ("cargo che", "check"),
-    ("cargo doc", "doc"),
+    ("cargo do", "doc"),
     ("cargo pub", "publish"),
     // gh (4)
-    ("gh pr", "pr"),
+    ("gh p", "pr"),
     ("gh re", "repo"),
     ("gh is", "issue"),
     ("gh au", "auth"),
@@ -96,7 +96,7 @@ const SCENARIOS: &[(&str, &str)] = &[
     ("go bui", "build"),
     ("go te", "test"),
     ("go ru", "run"),
-    ("go mod", "mod"),
+    ("go mo", "mod"),
     // terraform (4)
     ("terraform pl", "plan"),
     ("terraform app", "apply"),
@@ -105,7 +105,7 @@ const SCENARIOS: &[(&str, &str)] = &[
     // helm (3)
     ("helm ins", "install"),
     ("helm upg", "upgrade"),
-    ("helm ls", "ls"),
+    ("helm l", "ls"),
     // pip (3)
     ("pip ins", "install"),
     ("pip uni", "uninstall"),

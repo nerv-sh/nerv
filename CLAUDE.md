@@ -15,7 +15,7 @@
 | 3 | `docs/error-states.md` (v1.3) | 5종 에러 UX + `nerv doctor` 자동 실행 (E5 schema 게이트 포함 구현 완료) |
 | 4 | `docs/terminal-compat.md` (v1.4) | 보장/베스트에포트 매트릭스 + ANSI whitelist/blacklist + §6.4 PTY path (zsh/bash/fish 출하) |
 | 5 | `docs/first-5-min.md` (v1.4) | 12+0.5단계 사용자 시나리오 — 동적 4단계 (4/7/11/12) 전부 실완성 격상 |
-| 6 | `docs/spec-conversion-policy.md` (v1.3) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C (출시 미동봉, opt-in scaffold) |
+| 6 | `docs/spec-conversion-policy.md` (v1.4) | TS spec → JSON Tier A/B/C 정책 + Fig `loadSpec.ts` 포팅 + rquickjs Tier C (출시 미동봉, opt-in scaffold). v1.4 = `limited_args`/§5.1 힌트 UX 폐기 반영 |
 | 7 | `docs/dogfood.md` | M1 10주차 내부 dogfooding 플레이북 — exit criteria + 일일 체크리스트 + 피드백 캡처 (운영 문서) |
 
 > **원칙**: *"글이 코드보다 먼저"*. 어떤 동작을 바꾸기 전에 위 문서 중 해당 절을 먼저 갱신하고 PR 에 그 변경을 함께 커밋하세요. 코드와 문서가 어긋난 PR 은 리뷰 거부 사유.
@@ -57,6 +57,7 @@
   - **aggressive script-fn 회복** — function-form script 를 stub context 로 호출 → returns string[] 면 Template 으로 강제. **kubectl 27 / docker 117 / docker-compose 23 / gh 23 / aws 1006 generator** 회복.
   - **JSON output 자동 추출** — `gh --json=…` / `kubectl get -o json` 등 JSON 결과를 array-of-objects 로 읽고 `name/number/id/title/key/metadata.name` 우선 필드 추출.
   - **`Generator::ScriptWithJsonPath`** — aws `postPrecessGenerator(out, parentKey, idField)` 패턴 인식. ts-to-json 이 postProcess source 에서 정규식으로 (parent_key, id_field) 캡처 → Rust 가 script spawn + JSON.parse + path 추출. 591 aws generator 회복 (iam list-users / ec2 describe-instances 등). closure body 자체 실행 없이 데이터로 우회.
+  - **cargo `-p`/`--package` 회복 + ScriptWithJsonPath raw-stdout 버그 수정 (2026-06-13)**: ts-to-json `detectCargoMetadataPackages` 가 `cargo metadata` + `packages[].name` postProcess (packageGenerator/dependencyGenerator) 를 `script_with_json_path` (parent_key=`packages`, id_field=`name`) 로 라우팅. **잠복 엔진 버그 동시 수정**: ScriptWithJsonPath arm 이 `cached_template_generator` 를 거쳐서 `{`/`[`-leading 출력이 `extract_json_candidates` 에 가로채여 explicit parent_key/id_field 가 죽어있었음 (591 aws 전부 generic 추측에 의존). `cached_script_raw` (raw stdout, 64KB 초기 cap) 신설 → explicit path 가 실제 동작. `cargo run -p <Tab>` → 워크스페이스 멤버 회복. 회귀 `script_with_json_path_navigates_nested_object` (printf nested JSON) + bun 5 test.
   - **`Generator::AwsList`** — aws `listCustomGenerator(tokens, exec, verb, options, parentKey, childKey)` 패턴 인식. token-aware. ts-to-json 이 파일경로에서 service 추출 + custom: closure source 에서 (verb, lookup_flags, parent_key, id_field) 캡처. Rust 가 런타임에 tokens 에서 flag 값 찾아 `aws <service> <verb> [<flag> <val>]*` 실행 + JSON 추출. 89 generator 회복 (cloudwatch list-metrics / lambda list-layer-versions 등). string-form / array-form 양쪽 지원.
 - ✅ **yarn-shorthand**: root args generator 를 subcommand emit 에 머지. `yarn web<Tab>` → `web:start/web:build:dev/...` (package.json scripts) + `yarn add` 같은 실제 subcommand 도 유지. additive merge + dedupe.
 - ✅ **cwd-aware IPC**: `Request::Complete.cwd: Option<String>` 추가. CLI bridge 가 `std::env::current_dir()` 채움. 데몬은 자기 cwd 대신 클라이언트 cwd 사용. `cd` 마다 daemon 재시작 불필요.
@@ -109,7 +110,7 @@
 
 **진행중 옵션**:
 - M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
-- aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지)
+- aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지). **2026-06-13 정밀 분석**: aws 1844 gen 중 1095 (60%) 이미 작동 (template 415 / script_with_json_path 591 / aws_list 89), 남은 624 = ~17개 distinct bespoke 클로저 (filesystem/조건분기) 의 다중 참조 — clean recognizer 불가, rquickjs-bound 확정. 상세 = `docs/findings/aws-closure-recovery-ceiling.md`
 - ✅ **bash + fish 지원 (PTY 경로 MVP)**: `nerv init {bash,fish}` → `shell-integrations/{bash/_nerv-pty.bash,fish/_nerv-pty.fish}`. 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. inner 가 OSC 697 (`Shell={bash,fish}` 필수 — `can_send_edit_buffer` 게이트, bash 첫 e2e 실패의 root cause) + StartPrompt/EndPrompt/NewCmd prompt wrap. bash=PROMPT_COMMAND, fish=`--on-event fish_prompt` 이벤트 + fish_prompt 함수 wrap. **PreExec 구현**: fish=`--on-event fish_preexec` (clean event), bash=gated DEBUG trap (2-guard: `_NERV_PTY_PROMPT_SHOWN` 가 첫 precmd 까지 empty → startup 발화 차단; `_NERV_PTY_PREEXEC_DONE` 가 커맨드당 1회 보장, precmd 가 reset). ghost+preexec e2e PASS (`scripts/e2e-pty-{bash,fish}.py`). `init_block` shell 파라미터화 + fish `| source` 문법 (POSIX `eval` 아님). cli `PtyShell` enum (export 문법 native: bash `export` / fish `set -gx`). **fish 주의**: fish 4.x 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 (실 터미널 OK, e2e harness 는 emulate) + fish 자체 grey autosuggestion 과 공존
 - Linux / Windows 지원 (큼)
 - figterm PTY shim opt-in (`NERV_PTY=1`) — **Phase 1+2+3a+3b 완료** (위 §3 참조). 인라인 ghost + popup(박스 chrome) + 네비 + frecency 작동, nervd UDS 재배선, 0-row 클램프, ZLE 팝업 컬럼 정렬, e2e PASS. Phase 3 follow-up 전부 완료.

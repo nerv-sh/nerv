@@ -79,7 +79,7 @@ missing completion on a common command · **P2** cosmetic / rare.
 
 | Date | Sev | Shell+Term | What happened | Repro | Status |
 |------|-----|-----------|---------------|-------|--------|
-| | | | | | |
+| 2026-07-03 | P1 | zsh+p10k / iTerm | ZLE popup box renders at far-right edge, not under the cursor. `__nerv_cursor_col` computes col from `${(%)PS1}` last-line width; p10k's full-width filler bar (`····· time`) inflates `${#p}` to ≈COLUMNS → box clamped right. Cursor at col ~6, box at col ~190. | `git <space>` under a multiline p10k prompt | **fixed** — implausible-width guard in `__nerv_cursor_col`: when the estimate lands within 20 cols of the right edge the heuristic is treated as defeated and the box anchors from the left under the typed text. zsh unit cases + both ZLE e2e green. |
 
 When a row is real and reproducible, file it at
 <https://github.com/nerv-sh/nerv/issues> and link the issue in *Status*.

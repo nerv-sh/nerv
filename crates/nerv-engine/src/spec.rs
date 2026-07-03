@@ -23,9 +23,6 @@ pub struct Manifest {
 pub struct SpecMeta {
     pub name: String,
     pub tier: Tier,
-    /// Set on Tier B specs only — the static-extraction-impossible argument paths.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub limited_args: Vec<LimitedArg>,
     pub sha256: String,
 }
 
@@ -38,14 +35,4 @@ pub enum Tier {
     /// Excluded — unparseable or oversized. Not present in manifest;
     /// listed only in build logs.
     C,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LimitedArg {
-    /// `subcommand/<arg>` style path, e.g., `checkout/<arg>`.
-    pub path: String,
-    /// Short reason like `dynamic-branch-list`.
-    pub reason: String,
-    /// Suggested shell command for the §5.1 hint UX.
-    pub hint: String,
 }

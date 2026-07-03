@@ -704,9 +704,9 @@ mod tests {
         const MAX_SOCKET_LEN: usize = 100;
 
         let uuid = uuid::Uuid::new_v4().simple().to_string();
-        let qterm_socket = figterm_socket_path(uuid.clone()).unwrap();
-        let qterm_socket_bytes = qterm_socket.as_os_str().as_bytes().len();
-        assert!(qterm_socket_bytes <= MAX_SOCKET_LEN);
+        let pty_socket = figterm_socket_path(uuid.clone()).unwrap();
+        let pty_socket_bytes = pty_socket.as_os_str().as_bytes().len();
+        assert!(pty_socket_bytes <= MAX_SOCKET_LEN);
 
         let fig_socket = desktop_socket_path().unwrap();
         let fig_socket_bytes = fig_socket.as_os_str().as_bytes().len();
