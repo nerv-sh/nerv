@@ -1243,11 +1243,18 @@ fn emit_candidates_for_arg(
                         // sort_by_priority_then_alpha preserves it
                         // instead of re-alphabetising (which buried the
                         // literal `encl` match under `app`/`apps`).
+                        //
+                        // Insert the FULL PATH, not the folder name:
+                        // accepting `zeph` and running `z zeph` re-runs
+                        // zoxide's own fuzzy match, which may land on a
+                        // higher-scored sibling (`zeph-to`) instead of the
+                        // dir the user picked. `z <absolute-existing-dir>`
+                        // cd's there exactly. Display stays the short name.
                         for (rank, (name, path, score)) in
                             rank_zoxide_matches(rows, prefix).into_iter().enumerate()
                         {
                             out.push(Suggestion {
-                                insertion: name.clone(),
+                                insertion: shell_quote_arg(&path),
                                 display: name,
                                 description: Some(format!("{path} (score {score:.1})")),
                                 kind: SuggestionKind::Argument,
@@ -2047,6 +2054,21 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
 // Well-known generator: zoxide directory history (z, zoxide)
 // ---------------------------------------------------------------------------
 
+/// Shell-quote a path for insertion when it holds characters the shell
+/// would split or interpret. A plain path (ASCII alnum + a small safe
+/// set) inserts raw; anything else is single-quoted with embedded single
+/// quotes escaped, so `z /My Docs/x` becomes `z '/My Docs/x'`.
+fn shell_quote_arg(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-~+=:@,".contains(c));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
 /// Rank zoxide rows against the typed query. `rows` arrive score-desc
 /// (frecency). Groups, in order of intent: folder-name prefix hits, then
 /// folder-name substring hits, then path-only hits (the name doesn't
@@ -2785,6 +2807,14 @@ mod tests {
         // Name prefix (encl) beats name substring (evidence) beats
         // path-only (app before ios by score), regardless of raw score.
         assert_eq!(names, ["encl", "evidence", "app", "ios"]);
+    }
+
+    #[test]
+    fn shell_quote_arg_quotes_only_when_needed() {
+        assert_eq!(shell_quote_arg("/Users/tak/zeph-to/zeph"), "/Users/tak/zeph-to/zeph");
+        assert_eq!(shell_quote_arg("/tmp/a.b_c"), "/tmp/a.b_c");
+        assert_eq!(shell_quote_arg("/My Docs/x"), "'/My Docs/x'");
+        assert_eq!(shell_quote_arg("/a'b"), r"'/a'\''b'");
     }
 
     #[test]
