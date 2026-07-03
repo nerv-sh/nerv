@@ -1525,10 +1525,13 @@ fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<V
             return extract_json_candidates(&text);
         }
     }
+    // Dedupe while preserving order: `git remote -v` yields each remote
+    // twice (fetch + push) → one `origin` after the first-column extract.
+    let mut seen = std::collections::HashSet::new();
     let lines: Vec<String> = text
         .lines()
         .map(sanitize_generator_line)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
         .collect();
     Some(lines)
 }
@@ -2643,6 +2646,13 @@ fn find_package_json(start: &std::path::Path) -> Option<std::path::PathBuf> {
 /// belongs in a JS post-process hook (Tier C, deferred).
 fn sanitize_generator_line(raw: &str) -> String {
     let mut s = strip_ansi(raw);
+    // A tab means a multi-column row — `git remote -v` emits
+    // `origin\t<url> (fetch)`. The first column is the completion value;
+    // keep only it. (A raw tab would also corrupt the tab-separated wire
+    // format and tear the popup box.)
+    if let Some((first, _)) = s.split_once('\t') {
+        s = first.to_string();
+    }
     s = s.trim().to_string();
     if let Some(rest) = s.strip_prefix("* ") {
         s = rest.trim_start().to_string();
@@ -2807,6 +2817,18 @@ mod tests {
         // Name prefix (encl) beats name substring (evidence) beats
         // path-only (app before ios by score), regardless of raw score.
         assert_eq!(names, ["encl", "evidence", "app", "ios"]);
+    }
+
+    #[test]
+    fn sanitize_generator_line_keeps_first_tab_column() {
+        // `git remote -v` → `origin\t<url> (fetch)`: keep only `origin`,
+        // never the tab (which would tear the tab-separated wire format).
+        assert_eq!(
+            sanitize_generator_line("origin\tgit@github.com:x/y.git (fetch)"),
+            "origin"
+        );
+        assert_eq!(sanitize_generator_line("plain-branch"), "plain-branch");
+        assert_eq!(sanitize_generator_line("* current"), "current");
     }
 
     #[test]
