@@ -477,7 +477,7 @@ pub fn complete_in(
         }
     }
 
-    let items = if prefix_is_option {
+    let mut items = if prefix_is_option {
         emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
     } else if prefer_subcommands {
         // yarn-style shorthand: `yarn web` should match both yarn
@@ -503,6 +503,16 @@ pub fn complete_in(
             CursorContext::Done => vec![],
         }
     };
+
+    // Drop no-op completions: a suggestion whose insertion is exactly
+    // the token already typed adds nothing. The user who typed
+    // `git status` in full shouldn't see `status` re-offered — only the
+    // "Immediately execute" sentinel (widget-side) plus any longer
+    // matches (`status-v2`) remain. Empty prefix means the user is
+    // browsing a fresh token (`git `), so keep everything.
+    if !prefix.is_empty() {
+        items.retain(|s| s.insertion != prefix);
+    }
 
     CompleteResult {
         items,
@@ -697,19 +707,54 @@ fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
     chain
 }
 
+/// Fig-style positional-argument hint for a subcommand, e.g.
+/// `[remote] [branch]` (git push) or `<file>`. Optional args are
+/// bracketed `[name]`, required args angle-bracketed `<name>`, variadic
+/// args get a trailing `...`. Args with no name carry nothing to show
+/// and are skipped. Returns "" when there is no named positional arg.
+///
+/// The hint is appended to the popup `display` only — never to
+/// `insertion` (accepting `push` must not type the template) nor to the
+/// ghost (which mirrors insertion). The widget renders the trailing
+/// hint dimmer than the command name.
+fn arg_hint(args: &[crate::spec_parser::Arg]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for a in args {
+        let Some(name) = a.name.as_deref() else { continue };
+        if name.is_empty() {
+            continue;
+        }
+        let ellipsis = if a.is_variadic { "..." } else { "" };
+        parts.push(if a.is_optional {
+            format!("[{name}{ellipsis}]")
+        } else {
+            format!("<{name}{ellipsis}>")
+        });
+    }
+    parts.join(" ")
+}
+
 fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Suggestion> {
     let mut out: Vec<Suggestion> = node
         .subcommands
         .iter()
         .filter(|sc| !sc.hidden)
         .filter(|sc| name_or_aliases_match(&sc.name, &sc.aliases, prefix, mode))
-        .map(|sc| Suggestion {
-            insertion: sc.name.clone(),
-            display: sc.name.clone(),
-            description: sc.description.clone(),
-            kind: SuggestionKind::Subcommand,
-            priority: sc.priority,
-            icon: sanitize_icon(sc.icon.as_deref()),
+        .map(|sc| {
+            let hint = arg_hint(&sc.args);
+            let display = if hint.is_empty() {
+                sc.name.clone()
+            } else {
+                format!("{} {hint}", sc.name)
+            };
+            Suggestion {
+                insertion: sc.name.clone(),
+                display,
+                description: sc.description.clone(),
+                kind: SuggestionKind::Subcommand,
+                priority: sc.priority,
+                icon: sanitize_icon(sc.icon.as_deref()),
+            }
         })
         .collect();
     out.sort_by(sort_by_priority_then_alpha);
@@ -1133,11 +1178,15 @@ fn emit_candidates_for_arg(
                     parent_key,
                     id_field,
                 } => {
-                    // AWS CLI reads ~/.aws, not cwd — keep the cache global.
-                    if let Some(lines) = cached_template_generator(script, None) {
-                        let stdout = lines.join("\n");
+                    // Feed the *raw* stdout to the explicit json-path
+                    // extractor — `cached_template_generator` would have
+                    // already mangled `{`/`[`-leading output via
+                    // `extract_json_candidates`, leaving nothing for
+                    // `parent_key`/`id_field` to navigate. AWS CLI reads
+                    // ~/.aws, not cwd, so the raw cache stays global too.
+                    if let Some(raw) = cached_script_raw(script) {
                         if let Some(names) =
-                            extract_aws_json_names(&stdout, parent_key, id_field.as_deref())
+                            extract_aws_json_names(&raw, parent_key, id_field.as_deref())
                         {
                             out.extend(
                                 names
@@ -1146,7 +1195,7 @@ fn emit_candidates_for_arg(
                                     .map(|name| Suggestion {
                                         insertion: name.clone(),
                                         display: name,
-                                        description: Some("aws".into()),
+                                        description: None,
                                         kind: SuggestionKind::Argument,
                                         priority: None,
                                         icon: None,
@@ -1187,26 +1236,25 @@ fn emit_candidates_for_arg(
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
                         // should match `~/.claude` even though the
-                        // folder name is `.claude`. Filter by
-                        // substring (case-insensitive) on either the
-                        // folder name OR the full path.
-                        let needle = prefix.to_lowercase();
-                        out.extend(
-                            rows.into_iter()
-                                .filter(|(name, path, _)| {
-                                    needle.is_empty()
-                                        || name.to_lowercase().contains(&needle)
-                                        || path.to_lowercase().contains(&needle)
-                                })
-                                .map(|(name, path, score)| Suggestion {
-                                    insertion: name.clone(),
-                                    display: name,
-                                    description: Some(format!("{path} (score {score:.1})")),
-                                    kind: SuggestionKind::Argument,
-                                    priority: None,
-                                    icon: None,
-                                }),
-                        );
+                        // folder name is `.claude`. rank_zoxide_matches
+                        // keeps name hits ahead of path-only hits and
+                        // frecency order within each; encode the rank as
+                        // a descending priority so the emit-wide
+                        // sort_by_priority_then_alpha preserves it
+                        // instead of re-alphabetising (which buried the
+                        // literal `encl` match under `app`/`apps`).
+                        for (rank, (name, path, score)) in
+                            rank_zoxide_matches(rows, prefix).into_iter().enumerate()
+                        {
+                            out.push(Suggestion {
+                                insertion: name.clone(),
+                                display: name,
+                                description: Some(format!("{path} (score {score:.1})")),
+                                kind: SuggestionKind::Argument,
+                                priority: Some(10_000u32.saturating_sub(rank as u32)),
+                                icon: None,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -1313,6 +1361,14 @@ static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>>
 
 const GENERATOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const GENERATOR_CACHE_MAX: usize = 64;
+
+type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
+
+/// Process-wide cache for `ScriptWithJsonPath` raw stdout, keyed by script
+/// argv. Same TTL / size / eviction policy as [`GENERATOR_CACHE`]; separate
+/// because the value is the verbatim blob (not post-processed lines).
+static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Cached wrapper around [`execute_template_generator`]. Returns
 /// the cached value on TTL-fresh hit, otherwise runs the generator
@@ -1468,6 +1524,57 @@ fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<V
         .filter(|s| !s.is_empty())
         .collect();
     Some(lines)
+}
+
+/// Run a generator script and return its **raw** stdout, cached for
+/// [`GENERATOR_CACHE_TTL`]. Unlike [`cached_template_generator`] this does no
+/// post-processing: `Generator::ScriptWithJsonPath` needs the verbatim blob
+/// so its explicit `parent_key`/`id_field` navigation runs. The template path
+/// intercepts any `{`/`[`-leading output with `extract_json_candidates`,
+/// which guesses at the array + label field — for a nested payload like
+/// `cargo metadata` (`{packages:[…], workspace_members:[…], resolve:…}`) it
+/// picks the wrong array and yields nothing, so the json-path generator must
+/// bypass it. 64 KB initial capacity (cargo metadata clears 70 KB on real
+/// workspaces); `read_to_end` grows past it regardless.
+fn cached_script_raw(script: &[String]) -> Option<String> {
+    use std::process::{Command, Stdio};
+    if script.is_empty() {
+        return None;
+    }
+    let key = script.to_vec();
+    if let Ok(cache) = SCRIPT_RAW_CACHE.lock() {
+        if let Some((stamp, blob)) = cache.get(&key) {
+            if stamp.elapsed() < GENERATOR_CACHE_TTL {
+                return Some(blob.clone());
+            }
+        }
+    }
+    let bin = script.first()?;
+    let child = Command::new(bin)
+        .args(&script[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let buf = spawn_with_timeout(child, 65_536)?;
+    if buf.is_empty() {
+        return None;
+    }
+    let blob = String::from_utf8_lossy(&buf).into_owned();
+    if let Ok(mut cache) = SCRIPT_RAW_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), blob.clone()));
+    }
+    Some(blob)
 }
 
 /// Split a multi-column Tier B output line into `(insertion, display)`.
@@ -1939,6 +2046,37 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
 // ---------------------------------------------------------------------------
 // Well-known generator: zoxide directory history (z, zoxide)
 // ---------------------------------------------------------------------------
+
+/// Rank zoxide rows against the typed query. `rows` arrive score-desc
+/// (frecency). Groups, in order of intent: folder-name prefix hits, then
+/// folder-name substring hits, then path-only hits (the name doesn't
+/// match but a parent directory does). Frecency order is preserved
+/// within each group, and non-matching rows drop out. This is what makes
+/// `z enc` surface `encl` (a name-prefix hit) above `app`/`apps`, whose
+/// only match is the shared `.../encl/...` parent path.
+fn rank_zoxide_matches(
+    rows: Vec<(String, String, f64)>,
+    query: &str,
+) -> Vec<(String, String, f64)> {
+    let needle = query.to_lowercase();
+    let (mut name_prefix, mut name_substr, mut path_only) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for row in rows {
+        let name_lc = row.0.to_lowercase();
+        if needle.is_empty() || name_lc.starts_with(&needle) {
+            name_prefix.push(row);
+        } else if name_lc.contains(&needle) {
+            name_substr.push(row);
+        } else if row.1.to_lowercase().contains(&needle) {
+            path_only.push(row);
+        }
+    }
+    name_prefix
+        .into_iter()
+        .chain(name_substr)
+        .chain(path_only)
+        .collect()
+}
 
 /// Resolve the zoxide / zsh-z directory history. Tries `zoxide query
 /// --list --score` first (200ms cap, cached); on failure falls back
@@ -2613,7 +2751,9 @@ mod tests {
     #[test]
     fn git_space_emits_all_subcommands() {
         let r = complete("git ", 4, &registry_with(git_min()));
-        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        // Assert on `insertion` (the bare name), not `display`: display
+        // may carry a Fig-style arg hint ("checkout <branch>").
+        let names: Vec<_> = r.items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(names, ["checkout", "commit", "status"]);
     }
 
@@ -2621,8 +2761,98 @@ mod tests {
     fn git_co_filters_by_prefix_in_subcommand_names() {
         let r = complete("git co", 6, &registry_with(git_min()));
         // `co` matches checkout (via alias starts_with) and commit (primary).
-        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        let names: Vec<_> = r.items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(names, ["checkout", "commit"]);
+    }
+
+    #[test]
+    fn zoxide_ranks_name_prefix_then_substring_then_path() {
+        // Rows come score-desc (frecency). The `enc` query:
+        //   app       — name has no `enc`, path does (parent `encl`)
+        //   evidence  — name substring `evidENCe`
+        //   encl      — name prefix, lower raw score than the others
+        //   ios       — path-only
+        let rows = vec![
+            ("app".to_string(), "/w/encl/apps/app".to_string(), 100.0),
+            ("evidence".to_string(), "/w/encl/evidence".to_string(), 90.0),
+            ("encl".to_string(), "/w/encl".to_string(), 80.0),
+            ("ios".to_string(), "/w/encl/ios".to_string(), 70.0),
+        ];
+        let names: Vec<_> = rank_zoxide_matches(rows, "enc")
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        // Name prefix (encl) beats name substring (evidence) beats
+        // path-only (app before ios by score), regardless of raw score.
+        assert_eq!(names, ["encl", "evidence", "app", "ios"]);
+    }
+
+    #[test]
+    fn zoxide_empty_query_preserves_frecency_order() {
+        let rows = vec![
+            ("b".to_string(), "/b".to_string(), 30.0),
+            ("a".to_string(), "/a".to_string(), 20.0),
+        ];
+        let names: Vec<_> = rank_zoxide_matches(rows, "")
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        // No re-alphabetising — score order (b before a) is kept.
+        assert_eq!(names, ["b", "a"]);
+    }
+
+    #[test]
+    fn arg_hint_formats_optional_required_variadic() {
+        use crate::spec_parser::Arg;
+        let mk = |name: &str, opt: bool, var: bool| Arg {
+            name: Some(name.into()),
+            is_optional: opt,
+            is_variadic: var,
+            ..Default::default()
+        };
+        // git push: two optional args → "[remote] [branch]".
+        assert_eq!(
+            arg_hint(&[mk("remote", true, false), mk("branch", true, false)]),
+            "[remote] [branch]"
+        );
+        // required → angle brackets; variadic → trailing "...".
+        assert_eq!(arg_hint(&[mk("file", false, false)]), "<file>");
+        assert_eq!(arg_hint(&[mk("path", false, true)]), "<path...>");
+        assert_eq!(arg_hint(&[mk("arg", true, true)]), "[arg...]");
+        // no named args → empty; unnamed args skipped.
+        assert_eq!(arg_hint(&[]), "");
+        assert_eq!(arg_hint(&[Arg { name: None, ..Default::default() }]), "");
+    }
+
+    #[test]
+    fn subcommand_display_carries_arg_hint_insertion_stays_bare() {
+        // git_min's `checkout` has a (required, in-fixture) `branch` arg.
+        let r = complete("git ", 4, &registry_with(git_min()));
+        let checkout = r
+            .items
+            .iter()
+            .find(|s| s.insertion == "checkout")
+            .expect("checkout emitted");
+        assert_eq!(checkout.insertion, "checkout");
+        assert_eq!(checkout.display, "checkout <branch>");
+        // A no-arg subcommand keeps a bare display.
+        let status = r.items.iter().find(|s| s.insertion == "status").unwrap();
+        assert_eq!(status.display, "status");
+    }
+
+    #[test]
+    fn exact_token_match_is_dropped_as_noop() {
+        // `git status` fully typed: the `status` subcommand is a no-op
+        // completion (insertion == typed token) and must not appear.
+        let r = complete("git status", 10, &registry_with(git_min()));
+        assert!(
+            !r.items.iter().any(|s| s.insertion == "status"),
+            "exact match should be dropped, got: {:?}",
+            r.items.iter().map(|s| &s.insertion).collect::<Vec<_>>()
+        );
+        // A partial token still completes: `git stat` keeps `status`.
+        let r2 = complete("git stat", 8, &registry_with(git_min()));
+        assert!(r2.items.iter().any(|s| s.insertion == "status"));
     }
 
     #[test]
@@ -2682,6 +2912,40 @@ mod tests {
         let r = complete("x ", 2, &registry_with(spec));
         let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(names, ["alpha", "beta", "gamma"]);
+    }
+
+    /// `cargo run -p <Tab>` regression: a `ScriptWithJsonPath` generator
+    /// whose script emits a nested JSON object (`{packages:[…], …}`) must
+    /// navigate `parent_key`/`id_field` over the **raw** stdout. The arm
+    /// used to route through `cached_template_generator`, which intercepts
+    /// `{`-leading output with `extract_json_candidates` and guesses the
+    /// wrong array — leaving the explicit json-path with nothing and the
+    /// completion empty.
+    #[test]
+    fn script_with_json_path_navigates_nested_object() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("pkg".into()),
+                generators: vec![Generator::ScriptWithJsonPath {
+                    script: vec![
+                        "/usr/bin/printf".into(),
+                        // Mirrors `cargo metadata`: the target array is
+                        // nested under `packages`, not at top level.
+                        r#"{"packages":[{"name":"alpha"},{"name":"beta"}],"workspace_members":["x"]}"#
+                            .into(),
+                    ],
+                    parent_key: "packages".into(),
+                    id_field: Some("name".into()),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(names, ["alpha", "beta"]);
     }
 
     /// `kubectl get pods -n <Tab>` regression: a persistent ROOT

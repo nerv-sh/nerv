@@ -465,11 +465,9 @@ pub struct ParserResult {
 }
 
 // ---------------------------------------------------------------------------
-// Static helpers (chunk 2) — pure spec-tree queries used by the state
-// machine in chunks 3-5. No state, no allocations beyond the obvious.
-//
-// `#[allow(dead_code)]` until chunks 3-5 wire the matching state machine
-// that consumes these helpers. Unit tests in `mod tests` exercise each.
+// Static helpers — pure spec-tree queries consumed by the matching state
+// machine below (`step` / `get_initial_state`) and by `complete`. No state,
+// no allocations beyond the obvious. Unit tests in `mod tests` exercise each.
 // ---------------------------------------------------------------------------
 
 /// Find a child subcommand by name or alias. `None` if no match.
