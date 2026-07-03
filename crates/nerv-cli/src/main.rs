@@ -1244,7 +1244,7 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
 /// to the box width anyway.
 fn wire_desc(desc: &str) -> String {
     const MAX: usize = 200;
-    let cleaned = desc.replace(['\t', '\n', '\r'], " ");
+    let cleaned = wire_field(desc);
     if cleaned.chars().count() <= MAX {
         cleaned
     } else {
@@ -1254,13 +1254,25 @@ fn wire_desc(desc: &str) -> String {
     }
 }
 
+/// Collapse tab/newline/CR to a space. The wire format is tab-separated
+/// with one suggestion per line, so a stray tab or newline in ANY field
+/// (a generator that echoes `git remote -v`'s `origin\t<url>`, a spec
+/// with a multi-line description, …) shifts every field after it and
+/// tears the popup box. Sanitising every field at the wire boundary makes
+/// the format robust no matter what a generator returns.
+fn wire_field(s: &str) -> String {
+    s.replace(['\t', '\n', '\r'], " ")
+}
+
 fn print_suggestion(s: &Suggestion) {
     // Wire format: insertion \t display \t description \t icon
     // Icon is empty string when None. Widget renders icon as a
     // prefix glyph to the display column.
+    let insertion = wire_field(&s.insertion);
+    let display = wire_field(&s.display);
     let desc = wire_desc(s.description.as_deref().unwrap_or(""));
-    let icon = s.icon.as_deref().unwrap_or("");
-    println!("{}\t{}\t{}\t{}", s.insertion, s.display, desc, icon);
+    let icon = wire_field(s.icon.as_deref().unwrap_or(""));
+    println!("{insertion}\t{display}\t{desc}\t{icon}");
 }
 
 fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
