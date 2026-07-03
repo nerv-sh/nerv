@@ -8,7 +8,7 @@ Nerv brings back the original promise: **press a key, see the next token. That's
 
 ## Status
 
-**Alpha** — the M1 4-week checkpoint passed: a 715-spec completion engine, a ZLE widget for zsh, an opt-in PTY path for bash/fish, inline ghost text + popup, frecency ranking, and trace-zero uninstall all work end to end. Signing/notarization (M0-8) and a 2-week internal dogfooding window remain before v1.0. See [`PLAN.md`](./PLAN.md) (v0.6) for the full design and [`docs/`](./docs/) for the acceptance criteria written before the code.
+**Alpha** — the M1 4-week checkpoint passed: a 715-spec completion engine, a ZLE widget for zsh, an opt-in PTY path for bash/fish, inline ghost text + popup, frecency ranking, and trace-zero uninstall all work end to end. All eight M0 deliverables are done (M0-8 settled as Homebrew-only distribution — no Developer ID notarization needed); a 2-week internal dogfooding window remains before v1.0. See [`PLAN.md`](./PLAN.md) (v0.6) for the full design and [`docs/`](./docs/) for the acceptance criteria written before the code.
 
 ## What it is
 
@@ -26,7 +26,7 @@ Nerv brings back the original promise: **press a key, see the next token. That's
 
 ## Install
 
-Alpha releases ship as signed-pending ARM-only tarballs via Homebrew tap:
+Alpha releases ship as ARM-only tarballs via Homebrew tap:
 
 ```sh
 brew tap nerv-sh/tap
@@ -38,9 +38,13 @@ nerv start
 `brew services start nerv` keeps `nervd` alive across restarts (optional).
 Run `nerv doctor` to verify the install.
 
-> macOS Gatekeeper will warn on first launch — Apple Developer ID signing
-> arrives in a later alpha (M0-8). Until then, allow the binary in
-> System Settings → Privacy & Security.
+> Installing through Homebrew does **not** trip macOS Gatekeeper — `brew`
+> doesn't quarantine what it downloads, and the ad-hoc signature the Rust
+> toolchain applies is enough to run on Apple Silicon. Developer ID
+> notarization is intentionally out of scope for v1.0 (PLAN §10 M0-8).
+> If you instead download a release tarball directly in a browser,
+> Gatekeeper will warn once — clear the quarantine flag with
+> `xattr -dr com.apple.quarantine <path-to-nerv>`.
 
 To leave:
 
