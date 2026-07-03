@@ -665,6 +665,19 @@ __nerv_pre_redraw() {
       __nerv_complete
     fi
   fi
+
+  # Paint the inline ghost (POSTDISPLAY) a muted grey — like fish /
+  # zsh-autosuggestions — so the not-yet-typed completion reads as a
+  # dim hint, not live input. Without this the ghost inherits the
+  # terminal's default foreground and looks identical to what the user
+  # typed. Re-synced every redraw off the current POSTDISPLAY: strip
+  # our previous entry (matched by the memo tag so we never clobber a
+  # highlight another plugin added), then re-add if a ghost is showing.
+  # POSTDISPLAY chars occupy buffer positions ${#BUFFER}..+len.
+  region_highlight=(${region_highlight:#*memo=nerv_ghost*})
+  if [[ -n "$POSTDISPLAY" ]]; then
+    region_highlight+=("${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) fg=242, memo=nerv_ghost")
+  fi
 }
 zle -N zle-line-pre-redraw __nerv_pre_redraw
 
