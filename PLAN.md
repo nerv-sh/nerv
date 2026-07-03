@@ -347,11 +347,12 @@ v0.5.1 의 M0 (자작 4주) 폐기. 새 M0 산출물 8개:
 - **Tier B 실행** — script spawn + TTL 5s LRU 64 cache + ANSI/git-marker sanitization
 - **well-known Tier C 회복 5종** — PackageJsonScripts (npm/yarn/pnpm/bun/rushx/nr) + Filepaths (cd/cat/ls/59 spec, folders_only 감지) + ZoxideQuery (z/zoxide, `~/.z` 폴백 + fuzzy substring) + aggressive script-fn 회복 (function-form script stub call → **aws 1006 / docker 117 / docker-compose 23 / kubectl 27 / gh 23 generator** 회복) + JSON output 자동 추출 (`gh --json`, `kubectl -o json` 등)
 - **yarn-shorthand** — root args generator subcommand emit 머지 (additive + dedupe)
-- **inline ghost text** — `POSTDISPLAY` dim grey, Right-arrow accept (line 끝일 때), 토큰 타이핑 중일 때만 표시
+- **inline ghost text** — `POSTDISPLAY` dim grey, Right-arrow accept (line 끝일 때). **히스토리 우선** (zsh-autosuggestions 방식, `${history[(r)…]}` 최신 매치) → 없으면 spec 토큰 ghost. bare command (`pwd`) 도 표시
 - **frecency ranking** — per-spec TSV, count>=2 부터 boost, time decay, daemon post-sort
 - **cwd-aware IPC** — `cd` 시 daemon 재시작 불필요
 - **UTF-8 char boundary 클램프** — 한글/CJK/emoji 입력 panic 방지
 - **widget UX** — sliding window (`MAX_VIS=min(LINES-6,10)`), footer `[k/total]` 항상, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow wrap-cycle, PageUp/PageDown 창 단위 점프 (edge clamp, ZLE+PTY 동일), precmd 재바인딩 (Q hijack 방지), description 매행 → footer 단일 라인 (Fig style)
+- **dogfood UX 배치 (2026-07, PR #13)** — `↩ Immediately execute` 센티넬 (기본 선택; 빈 토큰=Enter 실행, 부분 입력=첫 매치 하이라이트), 히스토리 인라인 ghost, Fig arg hints (`push [remote] [branch]`), no-op 완성 제거 (`git status` 재추천 X), zoxide 이름-매치 우선 랭킹, p10k 앵커 가드, ghost grey (region_highlight), 빈 버퍼 화살표→history, 팝업 flicker 제거. 엔진: cargo `-p` + aws 591 ScriptWithJsonPath fix. e2e 5종 + 유닛. 상세 = CLAUDE.md §3
 - **에러 UX E1-E4 구현**
 - **CI** — rust 1.85 핀 + protoc preinstall + build-specs-smoke + ts-to-json bun job + **ARM64-only** (Intel queue 너무 길어 drop)
 - **release.yml** — `v*.*.*` tag push → macos-14 빌드 + tarball + sha256 + GitHub Release 자동 생성
