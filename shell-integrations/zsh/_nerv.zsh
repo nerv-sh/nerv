@@ -483,7 +483,20 @@ __nerv_complete() {
   __NERV_SELECTED=0
 
   [[ -z "${LBUFFER// /}" ]] && { __nerv_hide_popup; return; }
-  [[ "$LBUFFER" != *" "* ]] && { __nerv_hide_popup; return; }
+
+  # History inline suggestion (autosuggestions / Fig) applies whether or
+  # not the spec engine has anything, so compute it once up front.
+  local REPLY; __nerv_history_ghost
+  local hist_ghost="$REPLY"
+
+  # Bare command name (no space yet): nerv has no command-name
+  # completion, but history can still recall a previous invocation
+  # (`pwd` → ` pbcopy`). Show the ghost, no popup.
+  if [[ "$LBUFFER" != *" "* ]]; then
+    __nerv_hide_popup
+    [[ -n "$hist_ghost" ]] && POSTDISPLAY="$hist_ghost"
+    return
+  fi
 
   local resp
   resp=$("$__NERV_BIN" _complete "$LBUFFER" $CURSOR 2>/dev/null)
@@ -513,7 +526,13 @@ __nerv_complete() {
 
   local -a rlines=("${(@f)resp}")
   rlines=("${(@)rlines:#}")
-  (( ${#rlines} == 0 )) && { __nerv_hide_popup; return; }
+
+  if (( ${#rlines} == 0 )); then
+    # No spec completions, but a history suggestion may still apply.
+    __nerv_hide_popup
+    [[ -n "$hist_ghost" ]] && POSTDISPLAY="$hist_ghost"
+    return
+  fi
 
   __NERV_ITEMS=("${rlines[@]}")
   # Default selection depends on whether a token is being filtered:
@@ -527,8 +546,29 @@ __nerv_complete() {
   else
     __NERV_SELECTED=1
   fi
-  __nerv_set_ghost
+  if [[ -n "$hist_ghost" ]]; then
+    POSTDISPLAY="$hist_ghost"
+  else
+    __nerv_set_ghost
+  fi
   __nerv_show_popup "${rlines[@]}"
+}
+
+# Most recent history command that strictly extends the current buffer,
+# set in REPLY as the not-yet-typed remainder — the zsh-autosuggestions
+# / Fig grey inline. `(r)` reverse-subscripts $history (iterated newest
+# first) by a literal-prefix pattern; `(b)` escapes glob metacharacters
+# so a buffer containing `[`, `*`, etc. still matches literally. The
+# remainder is sliced by length (not `#`) so those metacharacters can't
+# over-strip. REPLY (no `$(...)` subshell) keeps this off the fork path
+# — it runs on every keystroke.
+__nerv_history_ghost() {
+  emulate -L zsh
+  REPLY=''
+  [[ -z "$LBUFFER" ]] && return
+  local match="${history[(r)${(b)LBUFFER}*]}"
+  [[ -z "$match" || "$match" == "$LBUFFER" ]] && return
+  REPLY="${match[${#LBUFFER}+1,-1]}"
 }
 
 # Set POSTDISPLAY to the trailing portion of the top suggestion that
