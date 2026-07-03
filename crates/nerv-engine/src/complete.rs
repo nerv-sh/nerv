@@ -1226,26 +1226,25 @@ fn emit_candidates_for_arg(
                     if let Some(rows) = zoxide_query() {
                         // z / zoxide are fuzzy by design — `z claud`
                         // should match `~/.claude` even though the
-                        // folder name is `.claude`. Filter by
-                        // substring (case-insensitive) on either the
-                        // folder name OR the full path.
-                        let needle = prefix.to_lowercase();
-                        out.extend(
-                            rows.into_iter()
-                                .filter(|(name, path, _)| {
-                                    needle.is_empty()
-                                        || name.to_lowercase().contains(&needle)
-                                        || path.to_lowercase().contains(&needle)
-                                })
-                                .map(|(name, path, score)| Suggestion {
-                                    insertion: name.clone(),
-                                    display: name,
-                                    description: Some(format!("{path} (score {score:.1})")),
-                                    kind: SuggestionKind::Argument,
-                                    priority: None,
-                                    icon: None,
-                                }),
-                        );
+                        // folder name is `.claude`. rank_zoxide_matches
+                        // keeps name hits ahead of path-only hits and
+                        // frecency order within each; encode the rank as
+                        // a descending priority so the emit-wide
+                        // sort_by_priority_then_alpha preserves it
+                        // instead of re-alphabetising (which buried the
+                        // literal `encl` match under `app`/`apps`).
+                        for (rank, (name, path, score)) in
+                            rank_zoxide_matches(rows, prefix).into_iter().enumerate()
+                        {
+                            out.push(Suggestion {
+                                insertion: name.clone(),
+                                display: name,
+                                description: Some(format!("{path} (score {score:.1})")),
+                                kind: SuggestionKind::Argument,
+                                priority: Some(10_000u32.saturating_sub(rank as u32)),
+                                icon: None,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -2038,6 +2037,37 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
 // Well-known generator: zoxide directory history (z, zoxide)
 // ---------------------------------------------------------------------------
 
+/// Rank zoxide rows against the typed query. `rows` arrive score-desc
+/// (frecency). Groups, in order of intent: folder-name prefix hits, then
+/// folder-name substring hits, then path-only hits (the name doesn't
+/// match but a parent directory does). Frecency order is preserved
+/// within each group, and non-matching rows drop out. This is what makes
+/// `z enc` surface `encl` (a name-prefix hit) above `app`/`apps`, whose
+/// only match is the shared `.../encl/...` parent path.
+fn rank_zoxide_matches(
+    rows: Vec<(String, String, f64)>,
+    query: &str,
+) -> Vec<(String, String, f64)> {
+    let needle = query.to_lowercase();
+    let (mut name_prefix, mut name_substr, mut path_only) =
+        (Vec::new(), Vec::new(), Vec::new());
+    for row in rows {
+        let name_lc = row.0.to_lowercase();
+        if needle.is_empty() || name_lc.starts_with(&needle) {
+            name_prefix.push(row);
+        } else if name_lc.contains(&needle) {
+            name_substr.push(row);
+        } else if row.1.to_lowercase().contains(&needle) {
+            path_only.push(row);
+        }
+    }
+    name_prefix
+        .into_iter()
+        .chain(name_substr)
+        .chain(path_only)
+        .collect()
+}
+
 /// Resolve the zoxide / zsh-z directory history. Tries `zoxide query
 /// --list --score` first (200ms cap, cached); on failure falls back
 /// to the zsh-z `~/.z` flat file (or `$_Z_DATA` / `$ZSHZ_DATA` env
@@ -2723,6 +2753,42 @@ mod tests {
         // `co` matches checkout (via alias starts_with) and commit (primary).
         let names: Vec<_> = r.items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(names, ["checkout", "commit"]);
+    }
+
+    #[test]
+    fn zoxide_ranks_name_prefix_then_substring_then_path() {
+        // Rows come score-desc (frecency). The `enc` query:
+        //   app       — name has no `enc`, path does (parent `encl`)
+        //   evidence  — name substring `evidENCe`
+        //   encl      — name prefix, lower raw score than the others
+        //   ios       — path-only
+        let rows = vec![
+            ("app".to_string(), "/w/encl/apps/app".to_string(), 100.0),
+            ("evidence".to_string(), "/w/encl/evidence".to_string(), 90.0),
+            ("encl".to_string(), "/w/encl".to_string(), 80.0),
+            ("ios".to_string(), "/w/encl/ios".to_string(), 70.0),
+        ];
+        let names: Vec<_> = rank_zoxide_matches(rows, "enc")
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        // Name prefix (encl) beats name substring (evidence) beats
+        // path-only (app before ios by score), regardless of raw score.
+        assert_eq!(names, ["encl", "evidence", "app", "ios"]);
+    }
+
+    #[test]
+    fn zoxide_empty_query_preserves_frecency_order() {
+        let rows = vec![
+            ("b".to_string(), "/b".to_string(), 30.0),
+            ("a".to_string(), "/a".to_string(), 20.0),
+        ];
+        let names: Vec<_> = rank_zoxide_matches(rows, "")
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        // No re-alphabetising — score order (b before a) is kept.
+        assert_eq!(names, ["b", "a"]);
     }
 
     #[test]
