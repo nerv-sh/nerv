@@ -29,6 +29,10 @@ typeset -gi __NERV_E5_SHOWN=0
 # This is why `cd ` / `z ` + Enter execute the command rather than
 # injecting the first folder — the user navigates down to pick one.
 typeset -gi __NERV_SELECTED=0
+# 1 when the popup carries the "Immediately execute" sentinel as row 0
+# (segment boundary — browsing). 0 when the user is mid-token filtering,
+# where the sentinel is hidden and SELECTED indexes items 1..N directly.
+typeset -gi __NERV_HAS_SENTINEL=0
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
 # Rows currently reserved via `zle -R`. Lets show_popup skip re-issuing
@@ -53,14 +57,12 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 __nerv_reset_state() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=0
+  __NERV_HAS_SENTINEL=0
   __NERV_RESERVED=0
   __NERV_ITEMS=()
   zle -R ""
 }
 
-# Cycle across [sentinel(0), item1, …, itemN], wrapping. next:
-# 0→1→…→N→0; prev: 0→N→…→1→0. The sentinel is one of the stops, so
-# tabbing past the last item lands back on "Immediately execute".
 # Scan the item set ONCE to size the box: widest display name (display
 # cells, `(m)` flag for CJK width), widest description, and whether any
 # row carries a wide (emoji) icon. Cached into globals so show_popup —
@@ -87,14 +89,26 @@ __nerv_measure_items() {
   __NERV_HASWIDE=$hw
 }
 
+# Cycle across the selectable rows, wrapping. With the sentinel present
+# the range is [0(sentinel), 1..N] (0→1→…→N→0); without it, items only
+# [1..N] (1→2→…→N→1). Tabbing past the last item lands on the sentinel
+# when there is one, else back on the first item.
 __nerv_cycle_next() {
   local n=${#__NERV_ITEMS}
-  (( __NERV_SELECTED = (__NERV_SELECTED + 1) % (n + 1) ))
+  if (( __NERV_HAS_SENTINEL )); then
+    (( __NERV_SELECTED = (__NERV_SELECTED + 1) % (n + 1) ))
+  else
+    (( __NERV_SELECTED = __NERV_SELECTED % n + 1 ))
+  fi
 }
 
 __nerv_cycle_prev() {
   local n=${#__NERV_ITEMS}
-  (( __NERV_SELECTED = (__NERV_SELECTED + n) % (n + 1) ))
+  if (( __NERV_HAS_SENTINEL )); then
+    (( __NERV_SELECTED = (__NERV_SELECTED + n) % (n + 1) ))
+  else
+    (( __NERV_SELECTED = (__NERV_SELECTED + n - 2) % n + 1 ))
+  fi
 }
 
 # Best-effort on-screen column (1-based) of the input cursor, so the
@@ -238,9 +252,9 @@ __nerv_show_popup() {
   local -a plain=()
   local blank=""
   repeat $(( W + 4 )); do blank+=" "; done
-  # visible items + sentinel row + 4 chrome (top / divider / footer /
-  # bottom).
-  local plain_rows=$(( visible + 5 ))
+  # visible items + 4 chrome (top / divider / footer / bottom), + 1 for
+  # the sentinel row when present.
+  local plain_rows=$(( visible + 4 + __NERV_HAS_SENTINEL ))
   repeat $plain_rows; do plain+=("$blank"); done
 
   # --- Build colored lines ---
@@ -262,19 +276,22 @@ __nerv_show_popup() {
   # " │" on the left and " │" on the right. Equals W - 2.
   local row_body=$(( W - 2 ))
 
-  # "Immediately execute" sentinel row (Fig parity), always drawn first
-  # and highlighted by default (SELECTED==0). Content = `↩` + label,
-  # width-measured so the right border stays aligned even if the glyph
-  # renders as 2 cells. Enter here runs the line as typed.
-  local sent_txt="↩ Immediately execute"
-  local sent_w=${(m)#sent_txt}
-  local sent_pad_n=$(( row_body - 1 - sent_w ))
-  (( sent_pad_n < 0 )) && sent_pad_n=0
-  local sent_pad=""; repeat $sent_pad_n; do sent_pad+=" "; done
-  if (( __NERV_SELECTED == 0 )); then
-    colored+=("  ${SELBG}${BDR}│${SELBG} ${SELFG}${sent_txt}${sent_pad}${BDR}│${R}")
-  else
-    colored+=("  ${BG}${BDR}│${DESC} ${sent_txt}${sent_pad}${BDR}│${R}")
+  # "Immediately execute" sentinel row (Fig parity) — drawn ONLY at a
+  # segment boundary (browsing), where it's row 0 and highlighted by
+  # default (SELECTED==0). Hidden while the user filters a token. Content
+  # = `↩` + label, width-measured so the right border stays aligned even
+  # if the glyph renders as 2 cells. Enter here runs the line as typed.
+  if (( __NERV_HAS_SENTINEL )); then
+    local sent_txt="↩ Immediately execute"
+    local sent_w=${(m)#sent_txt}
+    local sent_pad_n=$(( row_body - 1 - sent_w ))
+    (( sent_pad_n < 0 )) && sent_pad_n=0
+    local sent_pad=""; repeat $sent_pad_n; do sent_pad+=" "; done
+    if (( __NERV_SELECTED == 0 )); then
+      colored+=("  ${SELBG}${BDR}│${SELBG} ${SELFG}${sent_txt}${sent_pad}${BDR}│${R}")
+    else
+      colored+=("  ${BG}${BDR}│${DESC} ${sent_txt}${sent_pad}${BDR}│${R}")
+    fi
   fi
 
   for (( i=start; i<=end; i++ )); do
@@ -557,15 +574,17 @@ __nerv_complete() {
 
   __NERV_ITEMS=("${rlines[@]}")
   __nerv_measure_items   # size the box once; show_popup reads the cache
-  # Default selection depends on whether a token is being filtered:
-  #   `z ` (trailing space, empty token) → sentinel (Immediately
-  #        execute) is the sensible default, so Enter runs the command.
-  #   `z ad` (partial token)             → the user is homing in on a
-  #        match, so highlight the first real item (`ade-front`), not
-  #        the sentinel. Mirrors the ghost's mid-token gate.
-  if [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' ]]; then
+  # The "Immediately execute" sentinel shows ONLY at a segment boundary —
+  # LBUFFER ends in whitespace or `/` (`z `, `cd apps/`), i.e. the user is
+  # browsing, not filtering. There it's the default selection so Enter
+  # runs the command. Once the user types into a token (`z ad`), the
+  # sentinel disappears entirely and the first real match is highlighted,
+  # so Tab/Enter picks it. Mirrors the ghost's mid-token gate.
+  if [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' || "$LBUFFER" == */ ]]; then
+    __NERV_HAS_SENTINEL=1
     __NERV_SELECTED=0
   else
+    __NERV_HAS_SENTINEL=0
     __NERV_SELECTED=1
   fi
   if [[ -n "$hist_ghost" ]]; then
@@ -656,18 +675,23 @@ __nerv_line_finish() {
 }
 zle -N accept-line __nerv_line_finish
 
-# Tab: cycle DOWN through popup items (Fig-style). Enter accepts.
-# Single-item popup short-circuits — cycling 1→1 is useless, so we
-# insert immediately (the user clearly wants that one suggestion).
-# Outside popup: defer to zsh's expand-or-complete.
+# Tab: accept the highlighted item — insert it. When the sentinel is
+# selected (browsing, SELECTED==0), Tab instead dives into the list
+# (moves to the first item) so a second Tab accepts it. Use arrows /
+# Shift-Tab to move the highlight without accepting. Outside a popup:
+# defer to zsh's expand-or-complete.
 #
-# Only checks __NERV_ITEMS, NOT __NERV_ACTIVE: cursor-movement
-# keys don't clear ITEMS but may leave ACTIVE stale, and we'd
-# rather accept than appear no-op.
+# Only checks __NERV_ITEMS, NOT __NERV_ACTIVE: cursor-movement keys
+# don't clear ITEMS but may leave ACTIVE stale, and we'd rather accept
+# than appear no-op.
 __nerv_accept() {
   if (( ${#__NERV_ITEMS} > 0 )); then
-    __nerv_cycle_next
-    __nerv_show_popup "${__NERV_ITEMS[@]}"
+    if (( __NERV_SELECTED >= 1 )); then
+      __nerv_insert_selected
+    else
+      __nerv_cycle_next
+      __nerv_show_popup "${__NERV_ITEMS[@]}"
+    fi
   else
     zle expand-or-complete
   fi
@@ -743,9 +767,10 @@ __nerv_page_up() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )) && [[ -n "$BUFFER" ]]; then
     local REPLY; __nerv_max_vis
     (( __NERV_SELECTED -= REPLY ))
-    # Floor at the sentinel (0), not the first item — Page-Up should be
-    # able to return to "Immediately execute".
-    (( __NERV_SELECTED < 0 )) && __NERV_SELECTED=0
+    # Floor at the sentinel (0) when present so Page-Up can return to
+    # "Immediately execute"; otherwise floor at the first item (1).
+    local floor=$(( __NERV_HAS_SENTINEL ? 0 : 1 ))
+    (( __NERV_SELECTED < floor )) && __NERV_SELECTED=$floor
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle up-line-or-history
