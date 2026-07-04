@@ -588,6 +588,9 @@ fn matches_filter(name: &str, query: &str, strategy: Option<&str>, mode: MatchMo
     if let Some("substring") = strategy {
         return name.contains(query);
     }
+    if is_dot_literal(query) {
+        return name.starts_with(query);
+    }
     match mode {
         MatchMode::Fuzzy => fuzzy_subsequence_match(name, query),
         MatchMode::Prefix => name.starts_with(query),
@@ -597,10 +600,21 @@ fn matches_filter(name: &str, query: &str, strategy: Option<&str>, mode: MatchMo
 /// Mode-aware name gate for subcommand / option / generator outputs
 /// that don't carry a `filterStrategy` of their own.
 fn matches_name(name: &str, prefix: &str, mode: MatchMode) -> bool {
+    if is_dot_literal(prefix) {
+        return name.starts_with(prefix);
+    }
     match mode {
         MatchMode::Fuzzy => fuzzy_subsequence_match(name, prefix),
         MatchMode::Prefix => name.starts_with(prefix),
     }
+}
+
+/// `.` / `..` are literal path tokens (this dir / parent), never
+/// abbreviations. Under fuzzy a bare `.` would subsequence-match every
+/// path containing a dot (`git add .` → every `*.tsx`), so a dots-only
+/// query always falls back to prefix semantics.
+fn is_dot_literal(query: &str) -> bool {
+    !query.is_empty() && query.chars().all(|c| c == '.')
 }
 
 /// Case-insensitive subsequence match — every char of `query` appears
@@ -2669,13 +2683,33 @@ fn sanitize_generator_line(raw: &str) -> String {
     }
     // git refnames never start with `(`, so a `(`-leading line is one of
     // git's parenthesised pseudo-branches (detached HEAD, rebase state).
+    // ` -> ` also covers `git status --short` renames (`R old -> new`),
+    // which have no single clean insertion.
     if s.starts_with('(') || s.contains(" -> ") {
         return String::new();
     }
+    // `git add` runs `git status --short`, emitting `XY path` where XY is
+    // a 1–2 char status code (`M`, `??`, `MM`, …). Keep only the path so
+    // the insertion is `apps/x`, not `M apps/x` (which `git add` rejects).
+    s = strip_git_status_marker(s);
     if let Some(rest) = s.strip_prefix("remotes/") {
         s = rest.to_string();
     }
     s
+}
+
+/// Strip a leading `git status --short` status code (`XY `) so the file
+/// path alone is the completion value. A status code is 1–2 chars, all
+/// from git's porcelain alphabet, followed by a space and a non-empty
+/// path. Anything else (branch names, single tokens) is returned as-is.
+fn strip_git_status_marker(s: String) -> String {
+    let mut it = s.splitn(2, ' ');
+    let code = it.next().unwrap_or("");
+    let rest = it.next().unwrap_or("").trim_start();
+    let is_status = (1..=2).contains(&code.len())
+        && code.chars().all(|c| "MADRCU?!".contains(c))
+        && !rest.is_empty();
+    if is_status { rest.to_string() } else { s }
 }
 
 /// Remove ANSI CSI escape sequences (`\x1b[...m` etc.) without
@@ -2837,6 +2871,35 @@ mod tests {
         );
         assert_eq!(sanitize_generator_line("plain-branch"), "plain-branch");
         assert_eq!(sanitize_generator_line("* current"), "current");
+    }
+
+    #[test]
+    fn sanitize_strips_git_status_short_marker() {
+        // `git add` file generator (`git status --short`): keep the path.
+        assert_eq!(
+            sanitize_generator_line("M apps/admin/chapter.tsx"),
+            "apps/admin/chapter.tsx"
+        );
+        assert_eq!(sanitize_generator_line("?? new.rs"), "new.rs");
+        assert_eq!(
+            sanitize_generator_line("MM staged-then-edited"),
+            "staged-then-edited"
+        );
+        // Renames have no single insertion → dropped.
+        assert_eq!(sanitize_generator_line("R old.txt -> new.txt"), "");
+        // Not a status line: real single tokens survive untouched.
+        assert_eq!(sanitize_generator_line("main"), "main");
+        assert_eq!(sanitize_generator_line("Makefile"), "Makefile");
+    }
+
+    #[test]
+    fn dot_literal_query_never_fuzzy_explodes() {
+        // `git add .` must not subsequence-match every dotted path.
+        assert!(!matches_name("apps/chapter.tsx", ".", MatchMode::Fuzzy));
+        assert!(matches_name(".gitignore", ".", MatchMode::Fuzzy));
+        assert!(matches_name("..", "..", MatchMode::Fuzzy));
+        // Non-dots query still fuzzy-matches under Fuzzy.
+        assert!(matches_name("chapter.tsx", "ch", MatchMode::Fuzzy));
     }
 
     #[test]
