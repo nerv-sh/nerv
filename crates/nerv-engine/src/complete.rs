@@ -720,7 +720,9 @@ fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
 fn arg_hint(args: &[crate::spec_parser::Arg]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for a in args {
-        let Some(name) = a.name.as_deref() else { continue };
+        let Some(name) = a.name.as_deref() else {
+            continue;
+        };
         if name.is_empty() {
             continue;
         }
@@ -1250,8 +1252,9 @@ fn emit_candidates_for_arg(
                         // higher-scored sibling (`zeph-to`) instead of the
                         // dir the user picked. `z <absolute-existing-dir>`
                         // cd's there exactly. Display stays the short name.
-                        for (rank, (name, path, score)) in
-                            rank_zoxide_matches(rows, prefix).into_iter().enumerate()
+                        for (rank, (name, path, score)) in rank_zoxide_matches(rows, prefix, mode)
+                            .into_iter()
+                            .enumerate()
                         {
                             out.push(Suggestion {
                                 insertion: shell_quote_arg(&path),
@@ -2082,15 +2085,20 @@ fn shell_quote_arg(s: &str) -> String {
 fn rank_zoxide_matches(
     rows: Vec<(String, String, f64)>,
     query: &str,
+    mode: MatchMode,
 ) -> Vec<(String, String, f64)> {
     let needle = query.to_lowercase();
-    let (mut name_prefix, mut name_substr, mut path_only) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let (mut name_prefix, mut name_substr, mut path_only) = (Vec::new(), Vec::new(), Vec::new());
     for row in rows {
         let name_lc = row.0.to_lowercase();
+        // Name bucket 2: substring always, plus subsequence when the
+        // user opted into fuzzy — so `z mz` finds `muzly` by abbreviation
+        // while name hits still rank ahead of path-only ones.
+        let name_secondary = name_lc.contains(&needle)
+            || (mode == MatchMode::Fuzzy && fuzzy_subsequence_match(&name_lc, &needle));
         if needle.is_empty() || name_lc.starts_with(&needle) {
             name_prefix.push(row);
-        } else if name_lc.contains(&needle) {
+        } else if name_secondary {
             name_substr.push(row);
         } else if row.1.to_lowercase().contains(&needle) {
             path_only.push(row);
@@ -2810,7 +2818,7 @@ mod tests {
             ("encl".to_string(), "/w/encl".to_string(), 80.0),
             ("ios".to_string(), "/w/encl/ios".to_string(), 70.0),
         ];
-        let names: Vec<_> = rank_zoxide_matches(rows, "enc")
+        let names: Vec<_> = rank_zoxide_matches(rows, "enc", MatchMode::Prefix)
             .into_iter()
             .map(|r| r.0)
             .collect();
@@ -2833,10 +2841,34 @@ mod tests {
 
     #[test]
     fn shell_quote_arg_quotes_only_when_needed() {
-        assert_eq!(shell_quote_arg("/Users/tak/zeph-to/zeph"), "/Users/tak/zeph-to/zeph");
+        assert_eq!(
+            shell_quote_arg("/Users/tak/zeph-to/zeph"),
+            "/Users/tak/zeph-to/zeph"
+        );
         assert_eq!(shell_quote_arg("/tmp/a.b_c"), "/tmp/a.b_c");
         assert_eq!(shell_quote_arg("/My Docs/x"), "'/My Docs/x'");
         assert_eq!(shell_quote_arg("/a'b"), r"'/a'\''b'");
+    }
+
+    #[test]
+    fn zoxide_fuzzy_mode_matches_name_by_subsequence() {
+        // `z mz` under fuzzy finds `muzly` (m·u·z) by abbreviation, ranked
+        // ahead of a path-only hit. Prefix mode ignores the subsequence.
+        let rows = vec![
+            ("muzly".to_string(), "/w/muzly".to_string(), 50.0),
+            ("plugin".to_string(), "/w/mz-cache/plugin".to_string(), 40.0),
+        ];
+        let fuzzy: Vec<_> = rank_zoxide_matches(rows.clone(), "mz", MatchMode::Fuzzy)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(fuzzy, ["muzly", "plugin"]);
+        // Prefix mode: `muzly` has no `mz` substring → only the path hit.
+        let prefix: Vec<_> = rank_zoxide_matches(rows, "mz", MatchMode::Prefix)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(prefix, ["plugin"]);
     }
 
     #[test]
@@ -2845,7 +2877,7 @@ mod tests {
             ("b".to_string(), "/b".to_string(), 30.0),
             ("a".to_string(), "/a".to_string(), 20.0),
         ];
-        let names: Vec<_> = rank_zoxide_matches(rows, "")
+        let names: Vec<_> = rank_zoxide_matches(rows, "", MatchMode::Prefix)
             .into_iter()
             .map(|r| r.0)
             .collect();
@@ -2873,7 +2905,13 @@ mod tests {
         assert_eq!(arg_hint(&[mk("arg", true, true)]), "[arg...]");
         // no named args → empty; unnamed args skipped.
         assert_eq!(arg_hint(&[]), "");
-        assert_eq!(arg_hint(&[Arg { name: None, ..Default::default() }]), "");
+        assert_eq!(
+            arg_hint(&[Arg {
+                name: None,
+                ..Default::default()
+            }]),
+            ""
+        );
     }
 
     #[test]
