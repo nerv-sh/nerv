@@ -469,9 +469,17 @@ __nerv_insert_selected() {
     post="${after#$rest}"
   fi
 
-  # Build full BUFFER and place CURSOR right after the insertion+space.
-  BUFFER="${pre}${insertion} ${post# }"
-  CURSOR=$(( ${#pre} + ${#insertion} + 1 ))
+  # Trailing separator: a completed token gets a space so the next arg
+  # can be typed — EXCEPT a directory (`apps/`) or a `requiresSeparator`
+  # option (`--color=`), where the user drills deeper with no gap. Fig
+  # parity: `cd apps/` leaves the cursor flush so the next Tab lists
+  # `apps/mobile/…` instead of forcing a backspace.
+  local sep=" "
+  [[ "$insertion" == */ || "$insertion" == *= ]] && sep=""
+
+  # Build full BUFFER and place CURSOR right after the insertion+sep.
+  BUFFER="${pre}${insertion}${sep}${post# }"
+  CURSOR=$(( ${#pre} + ${#insertion} + ${#sep} ))
 
   # Frecency: record the accept in the background so the next
   # completion request can boost it. Fire-and-forget — never
