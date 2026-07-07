@@ -22,6 +22,27 @@
 
 import { readdir, mkdir, stat } from "node:fs/promises";
 import { resolve, basename, extname, dirname, join } from "node:path";
+import * as figGenerators from "@fig/autocomplete-generators";
+
+// Shared helper library many specs import from
+// `@fig/autocomplete-generators` (`keyValue`, `valueList`, `filepaths`,
+// …). Serialise each exported function so a closure that calls one
+// resolves it in the sandbox. Built once; prepended to every closure
+// (the gzipped spec cache collapses the identical block to ~nothing).
+const FIG_GENERATORS_PRELUDE: string = (() => {
+  const parts: string[] = [];
+  for (const [name, val] of Object.entries(figGenerators)) {
+    if (typeof val !== "function") continue;
+    try {
+      // globalThis assignment (not `const`) so it can't collide with a
+      // module-local declaration of the same name in CURRENT_PRELUDE.
+      parts.push(`globalThis.${name} = ${val.toString()};`);
+    } catch {
+      /* skip unstringifiable */
+    }
+  }
+  return parts.join("\n");
+})();
 
 /**
  * Detect whether a Fig generator object came from `filepaths()` or
@@ -428,8 +449,58 @@ const captureClosureSource = (fn: any): string | undefined => {
   const ctx =
     "{ tokens: globalThis.__nerv_tokens, " +
     "executeShellCommand: globalThis.executeShellCommand, " +
-    "executeCommand: globalThis.executeCommand }";
-  return `(${body})(globalThis.__nerv_tokens, globalThis.executeShellCommand, ${ctx})`;
+    "executeCommand: globalThis.executeCommand, " +
+    "environmentVariables: globalThis.environmentVariables, " +
+    "currentWorkingDirectory: (globalThis.process.env.PWD || '.'), " +
+    "currentProcess: '', sshPrefix: '', searchTerm: '' }";
+  // Prepend the closure's module-level helper scope (see CURRENT_PRELUDE)
+  // so references like `customGenerator(...)` / `separator` resolve inside
+  // the sandbox. Emitted as one eval unit: the prelude's top-level consts
+  // are in scope for the IIFE that follows.
+  const modScope = CURRENT_PRELUDE ? CURRENT_PRELUDE + "\n" : "";
+  const call = `(${body})(globalThis.__nerv_tokens, globalThis.executeShellCommand, ${ctx})`;
+  return FIG_GENERATORS_PRELUDE + "\n" + modScope + call;
+};
+
+// Module-level helper scope for the file currently being converted, as
+// runnable JS. Set by loadOneAt (save/restore, mirroring AWS_SERVICE_HINT)
+// so captureClosureSource can prepend it without threading a parameter
+// through the whole conversion chain. Fig spec closures routinely call
+// top-level helpers (`customGenerator`, `separator`, `getSuggestions`, …)
+// declared in their `.ts` module; capturing just the closure body loses
+// them, which was the dominant Tier C failure mode.
+let CURRENT_PRELUDE: string = "";
+
+/// Extract a `.ts` spec module's top-level helper declarations (everything
+/// before the `completionSpec` / default export) and transpile to JS. The
+/// big spec object itself is dropped — only the helpers the closures reach
+/// for are kept. `import` lines are stripped (unresolvable in the sandbox;
+/// helpers that depend on them stay broken, a smaller residual class).
+/// Capped so a pathological module can't bloat every closure it owns.
+const captureModulePrelude = (source: string): string => {
+  const markers = ["\nconst completionSpec", "\nexport default", "\nexport const completionSpec"];
+  let cut = source.length;
+  for (const m of markers) {
+    const i = source.indexOf(m);
+    if (i >= 0 && i < cut) cut = i;
+  }
+  let head = source.slice(0, cut);
+  // Strip module syntax QuickJS's script-mode eval rejects: `import …`
+  // lines (unresolvable) and the `export` keyword on top-level helpers
+  // (`export const foo` → `const foo`; bare `export { … }` re-exports
+  // dropped). The helpers stay as plain declarations in the eval scope.
+  head = head.replace(/^\s*import\s.*$/gm, "");
+  head = head.replace(/^\s*export\s+\{[^}]*\}\s*;?\s*$/gm, "");
+  head = head.replace(/^(\s*)export\s+(?=(default\s+)?(const|let|var|function|async|class)\b)/gm, "$1");
+  if (head.trim().length === 0) return "";
+  try {
+    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(head);
+    // Belt-and-suspenders: the transpiler can re-introduce `export`.
+    const clean = js.replace(/^(\s*)export\s+/gm, "$1");
+    return clean.length > 24 * 1024 ? "" : clean;
+  } catch {
+    return "";
+  }
 };
 
 const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
@@ -1089,12 +1160,22 @@ const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
   // an extra arg through the whole conversion chain.
   const prev = AWS_SERVICE_HINT;
   AWS_SERVICE_HINT = file.includes("/aws/") ? stem : null;
+  // Capture this module's top-level helper scope for Tier C closures.
+  // Save/restore around the (possibly nested loadSpec) conversion so a
+  // child file's helpers don't leak into the parent's closures.
+  const prevPrelude = CURRENT_PRELUDE;
+  try {
+    CURRENT_PRELUDE = captureModulePrelude(await Bun.file(file).text());
+  } catch {
+    CURRENT_PRELUDE = "";
+  }
   try {
     const spec = await convertSpec(exported as FigSpec, ctx, stem);
     if (K8S_NAMESPACE_SPEC_STEMS.has(stem)) enrichK8sNamespaces(spec);
     return spec;
   } finally {
     AWS_SERVICE_HINT = prev;
+    CURRENT_PRELUDE = prevPrelude;
   }
 };
 

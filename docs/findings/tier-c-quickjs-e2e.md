@@ -22,23 +22,39 @@ rquickjs (+0.78 MB, no deno_core, no invariant break):
   `(tokens, executeShellCommand, generatorContext)` instead of a stub.
 
 **Measured on the 473-closure corpus** (`tests/measure_tierc.rs`, cwd=None, no
-cloud creds): **settled=150 (32%)**, err=323. The earlier "435 timeouts" were a
-misdiagnosis — the classifier mapped every `Error::Exception` to Timeout; they
-were actually JS throws. Real error breakdown after the fixes:
+cloud creds). The earlier "435 timeouts" were a misdiagnosis — the classifier
+mapped every `Error::Exception` to Timeout; they were actually JS throws.
 
-| Remaining error | Count | Nature |
-|-----------------|-------|--------|
-| module-level helper not defined (`customGenerator`, `separator`, `getSuggestions`, …) | ~250 | closure references a top-level const/fn from its spec's `.ts` module; converter captures only the closure body, losing lexical scope |
-| misc (`environmentVariables.HOME` shapes, spec-specific) | ~70 | assorted |
+Recovery climbed as each blocker was addressed:
 
-`ran(settled)=150` undercounts real-world recovery: `empty=112` of those are
-closures that ran cleanly but had no data **in this sandbox** (missing CLIs / no
-creds / cwd=None). On a real shell they return results.
+| Step | settled | note |
+|------|---------|------|
+| machinery only (async + shims) | 150 (32%) | dominant residual: undefined module-level helpers |
+| + module-scope prelude | 220 (47%) | capture each `.ts` module's top-level helpers |
+| + strip `export` from prelude | 272 (58%) | QuickJS script-mode rejects `export` |
+| + enrich generatorContext | 293 (62%) | `context.environmentVariables` etc. |
+| + `@fig/autocomplete-generators` prelude | 295 (62%) | shared `keyValue`/`valueList`/… library |
 
-**Next ceiling = module-scope bundling**: capture each spec module's top-level
-declarations and prepend them to the closure source. High-value (one `aws`
-`customGenerator` helper unblocks 61 closures) but a real converter project
-(AST-extract top-level decls) + JSON bloat. Deferred pending a go decision.
+**Final: 295/473 settle (62%)**, `ok_ge1=78 (16%)`. `ran` undercounts real-world
+recovery: ~212 `empty` ran cleanly but had no data **in this sandbox** (missing
+CLIs / no creds / cwd=None); on a real shell they return results.
+
+### Module-scope bundling (done)
+
+`captureModulePrelude` slices each spec `.ts` file's top-level helper
+declarations (everything before `completionSpec`), strips `import`/`export`,
+transpiles TS→JS, and `captureClosureSource` prepends it (set per file via the
+`CURRENT_PRELUDE` save/restore, mirroring `AWS_SERVICE_HINT`). A global
+`FIG_GENERATORS_PRELUDE` serialises the shared `@fig/autocomplete-generators`
+exports. Gzip collapses the repeated preludes, so the shipped cache barely grows.
+
+### Remaining ceiling (~38%, deferred)
+
+Residual failures reference helpers the top-level slice can't reach: defined
+**inside** the spec object, in version subdirs (`az/2.53.0/…`), or pulled
+through **transitive imports** of local modules. Recovering them needs a real
+bundler pass (esbuild the whole module tree per spec) — a much larger lever with
+sharply diminishing returns. Stop here; Tier C is now a working opt-in.
 
 ---
 
