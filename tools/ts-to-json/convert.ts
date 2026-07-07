@@ -457,9 +457,59 @@ const captureClosureSource = (fn: any): string | undefined => {
   // so references like `customGenerator(...)` / `separator` resolve inside
   // the sandbox. Emitted as one eval unit: the prelude's top-level consts
   // are in scope for the IIFE that follows.
-  const modScope = CURRENT_PRELUDE ? CURRENT_PRELUDE + "\n" : "";
   const call = `(${body})(globalThis.__nerv_tokens, globalThis.executeShellCommand, ${ctx})`;
-  return FIG_GENERATORS_PRELUDE + "\n" + modScope + call;
+  return withPreludes(call);
+};
+
+// Prepend the shared + module-local helper scopes to an eval expression
+// so the closure's free identifiers (`customGenerator`, `keyValue`,
+// `postProcessFiles`, …) resolve in the sandbox. Shared by the `custom`
+// capture and the synthesized function-form `script` capture below.
+const withPreludes = (inner: string): string => {
+  const modScope = CURRENT_PRELUDE ? CURRENT_PRELUDE + "\n" : "";
+  return FIG_GENERATORS_PRELUDE + "\n" + modScope + inner;
+};
+
+// Synthesize a Tier C `custom` source from a function-form `script`
+// generator (`script: (tokens) => [...cmd]`, optional
+// `postProcess: (out, tokens) => Suggestion[]`). The converter can't
+// serialise the script to a static array, but the sandbox can run it:
+// call `script(tokens)` for the command, exec it, then hand stdout to
+// `postProcess`. Covers aws s3, ssh, and other dynamic-command
+// generators. Returns undefined when the script isn't stringifiable.
+const synthesizeScriptSource = (
+  scriptFn: any,
+  postProcessFn: any
+): string | undefined => {
+  let scriptSrc: string;
+  try {
+    scriptSrc = scriptFn.toString();
+  } catch {
+    return undefined;
+  }
+  if (scriptSrc.length > 32 * 1024) return undefined;
+  let postSrc = "null";
+  if (typeof postProcessFn === "function") {
+    try {
+      const s = postProcessFn.toString();
+      if (s.length <= 32 * 1024) postSrc = s;
+    } catch {
+      /* keep null */
+    }
+  }
+  const body = `(async (tokens, exec) => {
+  const __cmd = (${scriptSrc})(tokens);
+  if (!__cmd || (Array.isArray(__cmd) && __cmd.length === 0)) return [];
+  const __r = typeof __cmd === "string"
+    ? await exec(__cmd)
+    : await exec({ command: __cmd[0], args: __cmd.slice(1) });
+  const __out = typeof __r === "string" ? __r : (__r && __r.stdout) || "";
+  const __pp = ${postSrc};
+  return typeof __pp === "function"
+    ? __pp(__out, tokens)
+    : String(__out).split("\\n").filter(Boolean);
+})(globalThis.__nerv_tokens, globalThis.executeShellCommand)`;
+  return withPreludes(body);
 };
 
 // Module-level helper scope for the file currently being converted, as
@@ -754,8 +804,15 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
       scriptArr = splitShellCommand(g.script);
     }
     if (scriptArr.length === 0) {
-      // Couldn't recover a runnable command — surface as Tier C
-      // marker so `nerv spec list` can show it without dropping.
+      // Function-form script we couldn't reduce to a static command.
+      // Synthesize a Tier C custom source that runs script(tokens) →
+      // exec → postProcess(out) in the sandbox (covers aws s3 / ssh /
+      // other dynamic-command generators). Falls back to the inert
+      // marker only when the script isn't stringifiable.
+      if (typeof g.script === "function") {
+        const source = synthesizeScriptSource(g.script, g.postProcess);
+        if (source) return { type: "custom", description_hint: null, source };
+      }
       return {
         type: "script",
         script: [],

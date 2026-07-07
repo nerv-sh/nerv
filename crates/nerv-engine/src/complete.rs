@@ -1246,12 +1246,23 @@ fn emit_candidates_for_arg(
                     if let Some(cands) =
                         crate::tier_c::execute_custom_source(source, &token_strs, cwd)
                     {
+                        // Path / URL-style generators (aws `s3://…`, file
+                        // paths) return candidates for the segment AFTER the
+                        // last separator — the closure already accounts for
+                        // the leading path. Match and insert against that
+                        // tail so the token's prefix (`s3://`, `dir/`) is
+                        // preserved instead of replaced. No separator → the
+                        // whole token is the query (unchanged behaviour).
+                        let (base, query) = match prefix.rfind('/') {
+                            Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+                            None => ("", prefix),
+                        };
                         out.extend(
                             cands
                                 .into_iter()
-                                .filter(|s| matches_name(s, prefix, mode))
+                                .filter(|s| matches_name(s, query, mode))
                                 .map(|s| Suggestion {
-                                    insertion: s.clone(),
+                                    insertion: format!("{base}{s}"),
                                     display: s,
                                     description: None,
                                     kind: SuggestionKind::Argument,
