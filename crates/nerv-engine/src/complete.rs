@@ -402,6 +402,20 @@ pub fn complete_in(
     mode: MatchMode,
 ) -> CompleteResult {
     let cursor = clamp_cursor_to_char_boundary(line, cursor);
+
+    // Inside an unterminated quote the user is typing a free-text string
+    // literal — a commit message, an `echo` argument, a `--foo="…` value.
+    // There is nothing to complete, and the naive whitespace tokenizer
+    // would split the quoted body into fake positional tokens (e.g.
+    // `git commit -m "feat: update web` → a bogus `<pathspec>` arg that
+    // surfaces filenames). Suppress, matching Fig/q.
+    if cursor_in_open_quote(&line[..cursor]) {
+        return CompleteResult {
+            items: vec![],
+            reason: Some("inside quoted string".into()),
+        };
+    }
+
     let tokens = tokenize(&line[..cursor]);
 
     if tokens.is_empty() {
@@ -518,6 +532,47 @@ pub fn complete_in(
         items,
         reason: None,
     }
+}
+
+/// True when the cursor (end of `text`) sits inside an unterminated
+/// single or double quote. Mirrors POSIX shell quoting: single quotes
+/// take no escapes, double quotes honor `\`, and a backslash outside any
+/// quote escapes the next byte. `$'…'` is treated as a plain double-open
+/// for this purpose (we only care whether a completion should fire).
+fn cursor_in_open_quote(text: &str) -> bool {
+    #[derive(PartialEq)]
+    enum Q {
+        None,
+        Single,
+        Double,
+    }
+    let mut state = Q::None;
+    let mut bytes = text.bytes();
+    while let Some(b) = bytes.next() {
+        match state {
+            Q::None => match b {
+                b'\'' => state = Q::Single,
+                b'"' => state = Q::Double,
+                b'\\' => {
+                    bytes.next();
+                }
+                _ => {}
+            },
+            Q::Single => {
+                if b == b'\'' {
+                    state = Q::None;
+                }
+            }
+            Q::Double => match b {
+                b'"' => state = Q::None,
+                b'\\' => {
+                    bytes.next();
+                }
+                _ => {}
+            },
+        }
+    }
+    state != Q::None
 }
 
 fn tokenize(text: &str) -> Vec<Annotation> {
@@ -3538,6 +3593,24 @@ mod tests {
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].text, "git");
         assert_eq!(toks[1].text, "status");
+    }
+
+    #[test]
+    fn cursor_in_open_quote_detects_state() {
+        // Open double quote — cursor inside a commit message.
+        assert!(cursor_in_open_quote(r#"git commit -m "feat: update web"#));
+        // Closed again — back outside.
+        assert!(!cursor_in_open_quote(r#"git commit -m "feat: done""#));
+        // Open single quote.
+        assert!(cursor_in_open_quote("echo 'hello wor"));
+        // No quotes at all.
+        assert!(!cursor_in_open_quote("git checkout ma"));
+        // Escaped quote outside stays outside.
+        assert!(!cursor_in_open_quote(r#"echo \""#));
+        // Escaped quote inside a double string doesn't close it.
+        assert!(cursor_in_open_quote(r#"echo "a\"b"#));
+        // Single quotes take no escapes — the \ is literal, ' still closes.
+        assert!(!cursor_in_open_quote(r#"echo 'a\'"#));
     }
 
     // Both env-mutating tests below share HOME/HISTFILE in the same
