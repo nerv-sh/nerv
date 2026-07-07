@@ -48,13 +48,32 @@ transpiles TS→JS, and `captureClosureSource` prepends it (set per file via the
 `FIG_GENERATORS_PRELUDE` serialises the shared `@fig/autocomplete-generators`
 exports. Gzip collapses the repeated preludes, so the shipped cache barely grows.
 
-### Remaining ceiling (~38%, deferred)
+### Function-form `script` synthesis (done) — the big lever
+
+Many generators use `script: (tokens) => [...cmd]` + `postProcess: (out) =>
+Suggestion[]` (aws `s3://`, ssh, file listings). The converter couldn't reduce
+the function to a static array, so it emitted an inert `{type:script,
+script:[]}` marker — 652 dead generators. Now `synthesizeScriptSource` wraps the
+`script` + `postProcess` function bodies into a Tier C `custom` source that, in
+the sandbox, calls `script(tokens)` → `executeShellCommand` → `postProcess(out)`.
+The module-scope preludes resolve their helpers.
+
+The engine's Tier C arm is also **separator-aware**: for a `s3://` / `dir/`
+token it matches + inserts against the segment after the last `/` (the closure
+already owns the leading path), so `aws s3 ls s3://<tab>` completes to
+`s3://<bucket>/`.
+
+**Corpus grew 473 → 1125 custom sources** (the 652 revived function-form
+scripts). Recovery with real creds/CLIs present: **922/1125 settle (82%),
+ok_ge1 = 693 (62%)** — real bucket/host/path completions, not just "ran".
+
+### Remaining ceiling (deferred)
 
 Residual failures reference helpers the top-level slice can't reach: defined
 **inside** the spec object, in version subdirs (`az/2.53.0/…`), or pulled
 through **transitive imports** of local modules. Recovering them needs a real
-bundler pass (esbuild the whole module tree per spec) — a much larger lever with
-sharply diminishing returns. Stop here; Tier C is now a working opt-in.
+bundler pass (esbuild the whole module tree per spec) — a larger lever with
+diminishing returns. Tier C is now a genuinely useful opt-in.
 
 ---
 
