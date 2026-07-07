@@ -402,10 +402,12 @@ const probeCargoKind = async (g: any): Promise<string | null | "any"> => {
  * Capture a Fig closure as a Tier C source string the Rust engine can
  * feed to `nerv-engine::tier_c::execute_custom_source` under the
  * `quickjs` feature. Wraps the closure in IIFE form so the eval
- * resolves to the closure's return value with `tokens` bound from the
- * sandbox global. `exec` is stubbed because the sandbox refuses host
- * bindings — closures that call it will throw at runtime and the
- * engine drops to "no candidates" silently.
+ * resolves to the closure's return value. The sandbox provides the
+ * three arguments Fig generator closures take, across signature
+ * variants: `tokens` (the live command tokens), `executeShellCommand`
+ * (a real host binding that spawns in the client cwd), and a
+ * `generatorContext` object bundling both plus `executeCommand` for the
+ * closures that destructure a single context arg.
  *
  * Returns null when:
  *  - the value isn't a function (defensive — caller already checks)
@@ -423,7 +425,11 @@ const captureClosureSource = (fn: any): string | undefined => {
     return undefined;
   }
   if (body.length > 32 * 1024) return undefined;
-  return `(${body})(globalThis.__nerv_tokens, () => Promise.resolve(""))`;
+  const ctx =
+    "{ tokens: globalThis.__nerv_tokens, " +
+    "executeShellCommand: globalThis.executeShellCommand, " +
+    "executeCommand: globalThis.executeCommand }";
+  return `(${body})(globalThis.__nerv_tokens, globalThis.executeShellCommand, ${ctx})`;
 };
 
 const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {

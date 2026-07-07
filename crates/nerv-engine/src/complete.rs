@@ -1243,7 +1243,9 @@ fn emit_candidates_for_arg(
                     // the dispatcher just falls through to the next
                     // generator or the smart fallback.
                     let token_strs: Vec<String> = tokens.iter().map(|a| a.text.clone()).collect();
-                    if let Some(cands) = crate::tier_c::execute_custom_source(source, &token_strs) {
+                    if let Some(cands) =
+                        crate::tier_c::execute_custom_source(source, &token_strs, cwd)
+                    {
                         out.extend(
                             cands
                                 .into_iter()
@@ -1459,7 +1461,10 @@ const GENERATOR_TIMEOUT_MS: u64 = 800;
 /// `buf_cap` sets the initial Vec capacity; pick the rough expected
 /// payload size to avoid reallocs (8 KB for line-shaped Fig
 /// generators, 64 KB for blob payloads like `cargo metadata`).
-fn spawn_with_timeout(mut child: std::process::Child, buf_cap: usize) -> Option<Vec<u8>> {
+pub(crate) fn spawn_with_timeout(
+    mut child: std::process::Child,
+    buf_cap: usize,
+) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -4586,15 +4591,18 @@ mod tests {
         #[test]
         fn closure_sees_tokens_via_global() {
             // Closures that capture the live token list reach it via
-            // `globalThis.__nerv_tokens`. Lower-case each token so the
-            // case-sensitive prefix gate still admits the result.
-            let src = "(tokens => tokens.map(t => t.toLowerCase()))(globalThis.__nerv_tokens)";
+            // `globalThis.__nerv_tokens`. The closure derives a suggestion
+            // from the last token (`gi` → `gi-branch`); the distinct suffix
+            // keeps it clear of the no-op filter (which drops a suggestion
+            // equal to the already-typed prefix).
+            let src =
+                "(tokens => [tokens[tokens.length - 1] + '-branch'])(globalThis.__nerv_tokens)";
             let r = complete("x gi", 4, &registry_with(spec_with_custom(src)));
             let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
-            // Tokens are ["x", "gi"]; lower-cased → ["x", "gi"]. The
-            // current-token prefix is "gi" → only "gi" survives the
-            // matches_name (prefix) gate.
-            assert_eq!(names, ["gi"]);
+            // Tokens are ["x", "gi"]; the closure returns ["gi-branch"],
+            // which starts with the prefix "gi" and survives both the
+            // prefix gate and the no-op filter.
+            assert_eq!(names, ["gi-branch"]);
         }
 
         #[test]
