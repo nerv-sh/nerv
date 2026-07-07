@@ -500,6 +500,18 @@ const synthesizeScriptSource = (
   const body = `(async (tokens, exec) => {
   const __cmd = (${scriptSrc})(tokens);
   if (!__cmd || (Array.isArray(__cmd) && __cmd.length === 0)) return [];
+  // Propagate aws global flags the user already typed (left of the
+  // cursor) into the generated command — the vendor closures build a
+  // bare \`aws <svc> <verb>\` and ignore --profile/--region, so a spec
+  // that needs a non-default profile would otherwise AccessDenied.
+  if (Array.isArray(__cmd) && __cmd[0] === "aws") {
+    for (const __f of ["--profile", "--region", "--endpoint-url"]) {
+      const __i = tokens.lastIndexOf(__f);
+      if (__i >= 0 && tokens[__i + 1] && !__cmd.includes(__f)) {
+        __cmd.splice(1, 0, __f, tokens[__i + 1]);
+      }
+    }
+  }
   const __r = typeof __cmd === "string"
     ? await exec(__cmd)
     : await exec({ command: __cmd[0], args: __cmd.slice(1) });
