@@ -91,7 +91,7 @@
   - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 mode=Prefix 시 prefix downgrade / mode=Fuzzy 시 서브시퀀스
   - `getQueryTerm` (0 spec but infra ready) — `cargo search "tokio,serde"` 같은 delim split. 현재 Fig spec 은 closure form 만 쓰지만 M1 회복 시 사용 예정
 - ✅ **smart description fallback**: cd/z 같은 folder-only emit 의 footer 가 모두 "dir" 이던 문제. `dir_summary` 가 read_dir 1회로 `n items` / `empty` / `1 item` 출력. dotfile 제외, 200 entries cap (latency bound). 50µs/dir 추정.
-- ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. 서브커맨드/옵션/제너레이터 출력 전부 동일하게 게이트. 매칭 알고리즘: `nerv-engine::complete::matches_filter` + `matches_name`.
+- ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. **3자 이상** case-insensitive 서브시퀀스 (`git chk` → `checkout`); 1-2자·all-dots 는 prefix 유지(`git ps`→prefix, push 안 뜸 / `aws --profile l`→`lemon`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. zoxide 제외한 서브커맨드/옵션/제너레이터 출력 전부 `mode_match` 게이트. 매칭 알고리즘: `nerv-engine::complete::mode_match` (`matches_filter`/`matches_name` 공용).
 - ✅ **Homebrew tap 인프라**: `packaging/homebrew/nerv.rb` Formula 템플릿 (ARM-only `aarch64-apple-darwin`, `brew services` 통합). `.github/workflows/homebrew-bump.yml` 가 GitHub release 발행 시 자동으로 `nerv-sh/homebrew-tap` 의 Formula 를 버전+sha256 갱신. 사용자 액션: tap repo 생성 + `HOMEBREW_TAP_TOKEN` PAT secret 추가.
 - ✅ **icon glyph width contract**: `sanitize_icon` 이 `unicode-width` 로 non-ASCII glyph display width == 2 강제 (이전 ≤4 byte gate 만으로는 ambiguous-width `⚠` / Latin-extended `à` 통과 → 1-cell 밀림). ASCII = width 1, non-ASCII = width 2 외 거부. 위젯 측은 "non-ASCII = 2 cells" 가정 그대로 유지 — contract 가 엔진에서 보장.
 - ✅ **흡수 crate 브랜드 strip (active surface)**:
@@ -135,7 +135,8 @@
 
 | 영역 | 불변식 | 근거 |
 |------|--------|------|
-| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). fuzzy 활성 시 case-insensitive 서브시퀀스. 데몬 부팅 시 1회 로드 — config 변경엔 재시작 필요 | PLAN §5.1 / `nerv-engine/src/config.rs` / `nerv-engine/src/complete.rs::matches_filter` |
+| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). fuzzy 활성 시 **3자 이상만** case-insensitive 서브시퀀스 — 1-2자(`l`/`ps`) + all-dots(`.`/`..`)는 prefix 유지 (한글자 서브시퀀스가 전부 매칭돼 실히트 파묻힘). 게이트 = `mode_match`. **zoxide(`z`)는 자체 fuzzy 경로 — 이 게이트 미적용** (`z mz`→muzly 2자 축약 유지). 데몬 부팅 시 1회 로드 — config 변경엔 재시작 필요 | PLAN §5.1 / `nerv-engine/src/config.rs` / `nerv-engine/src/complete.rs::mode_match` |
+| generator 정렬 | `Generator::Template` 출력(`aws configure list-profiles`→`default` 먼저, `git branch` 체크아웃순)은 **소스 순서 유지** — alpha 재정렬 금지. source index 를 descending priority(`1000-idx`)로 인코딩해 `sort_by_priority_then_alpha` 의 alpha tie-break 무력화. frecency 는 그 위로 부양 | `nerv-engine/src/complete.rs` Template arm |
 | 매칭 알고리즘 | 빈 prefix 는 모두 매치 (`git ⎵` 케이스) | first-5-min §1단계 |
 | 마커 블록 | `# >>> nerv >>>` ~ `# <<< nerv <<<` 는 **고정 문자열**. `fig_integrations` 흡수 시 marker 교체 필수 (Q 의 `# Fig pre block` 잔존 금지) | uninstall-spec §3 / `nerv-shell::MARKER_*` |
 | 경로 | `~/Library/Caches/nerv/`, `~/Library/Logs/nerv/`, `~/.config/nerv/` — `directories` 크레이트 사용 X (docs 가 contract). `fig_util` / `fig_log` / `fig_settings` 흡수 시 Q 기본 경로 (`~/.config/q/`, `~/Library/Caches/amzn/`) 전부 nerv 경로로 재배선 | uninstall-spec §2 / `nerv-engine/src/paths.rs` |
