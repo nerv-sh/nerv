@@ -1,10 +1,51 @@
-# Finding — Tier C (quickjs) e2e recovery rate = 0%
+# Finding — Tier C (quickjs) recovery: 0% → 32% (machinery fixed)
 
-**Date**: 2026-06-06 (decision recorded 2026-06-07)
+**Date**: 2026-06-06 (0% baseline) · **2026-07-07 update: machinery fixed, 32%**
+**Status**: 🔧 **re-opened and largely fixed**. The three 0%-era root causes are
+resolved; the executor now runs closures for real. Remaining ceiling is closure
+**lexical scope** (module-level helpers the converter doesn't capture), not the
+runtime. Still `--features quickjs` opt-in.
+
+## 2026-07-07 update — machinery works
+
+The 0% was an unfinished executor, not an rquickjs limit. Fixed, all within
+rquickjs (+0.78 MB, no deno_core, no invariant break):
+
+- **async/Promise** — `Sandbox::eval_resolved` drives the job queue
+  (`Promise::finish`) and unwraps the settled value.
+- **`__awaiter`/`__generator`** — tslib shims injected via `install_ts_helpers`.
+- **host bindings** — real `executeShellCommand` (polymorphic string **and**
+  `{command,args}` object) + `executeCommand`, spawning `sh -c` in the client
+  cwd (200 ms cap, same trust as a Tier B `script`). Plus `console` / `process`
+  / `environmentVariables` shims.
+- **converter** — `captureClosureSource` now passes the real
+  `(tokens, executeShellCommand, generatorContext)` instead of a stub.
+
+**Measured on the 473-closure corpus** (`tests/measure_tierc.rs`, cwd=None, no
+cloud creds): **settled=150 (32%)**, err=323. The earlier "435 timeouts" were a
+misdiagnosis — the classifier mapped every `Error::Exception` to Timeout; they
+were actually JS throws. Real error breakdown after the fixes:
+
+| Remaining error | Count | Nature |
+|-----------------|-------|--------|
+| module-level helper not defined (`customGenerator`, `separator`, `getSuggestions`, …) | ~250 | closure references a top-level const/fn from its spec's `.ts` module; converter captures only the closure body, losing lexical scope |
+| misc (`environmentVariables.HOME` shapes, spec-specific) | ~70 | assorted |
+
+`ran(settled)=150` undercounts real-world recovery: `empty=112` of those are
+closures that ran cleanly but had no data **in this sandbox** (missing CLIs / no
+creds / cwd=None). On a real shell they return results.
+
+**Next ceiling = module-scope bundling**: capture each spec module's top-level
+declarations and prepend them to the closure source. High-value (one `aws`
+`customGenerator` helper unblocks 61 closures) but a real converter project
+(AST-extract top-level decls) + JSON bloat. Deferred pending a go decision.
+
+---
+
+## Original 0% finding (2026-06-06)
+
 **Branch**: feat/m1-batch-v3
-**Status**: ✅ **decided — defer**. `--features quickjs` scaffold stays, but
-production ships with it **OFF / not bundled** (opt-in only). Re-open when the
-root causes below are addressed. Recorded in PLAN §0.2 (JS generator) + CLAUDE.md §3.
+**Status**: ✅ **decided — defer** (superseded by the 2026-07-07 update above).
 
 ## TL;DR
 
