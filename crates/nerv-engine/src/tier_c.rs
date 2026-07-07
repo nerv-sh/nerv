@@ -105,10 +105,50 @@ pub fn execute_debug(
     run_in_sandbox(source, tokens, cwd, budget)
 }
 
+type ShellCacheKey = (String, Option<PathBuf>);
+type ShellCacheMap = std::collections::HashMap<ShellCacheKey, (std::time::Instant, String)>;
+
+/// Process-wide cache of `executeShellCommand` stdout, keyed by
+/// (command, cwd). Tier C closures shell out to real commands (`aws s3
+/// ls`, `ssh -G`, …) that cost hundreds of ms — mostly network. Without
+/// this every keystroke that re-runs the closure re-spawns the same
+/// command; the 5s TTL means only the first keystroke of a burst pays,
+/// the rest hit cache. Same policy as the Tier B `GENERATOR_CACHE`.
+static SHELL_CACHE: std::sync::LazyLock<std::sync::Mutex<ShellCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const SHELL_CACHE_TTL: Duration = Duration::from_secs(5);
+const SHELL_CACHE_MAX: usize = 64;
+
 /// Spawn `sh -c <cmd>` in `cwd` and return its stdout (empty on failure
-/// or timeout). The command text originates from the vendored spec
-/// closure — the same trust boundary as a Tier B `script` generator.
+/// or timeout), memoised for [`SHELL_CACHE_TTL`]. The command text
+/// originates from the vendored spec closure — the same trust boundary
+/// as a Tier B `script` generator.
 fn run_shell(cmd: &str, cwd: Option<&Path>) -> String {
+    let key: ShellCacheKey = (cmd.to_string(), cwd.map(Path::to_path_buf));
+    if let Ok(cache) = SHELL_CACHE.lock() {
+        if let Some((stamp, out)) = cache.get(&key) {
+            if stamp.elapsed() < SHELL_CACHE_TTL {
+                return out.clone();
+            }
+        }
+    }
+    let out = spawn_shell(cmd, cwd);
+    if let Ok(mut cache) = SHELL_CACHE.lock() {
+        if cache.len() >= SHELL_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), out.clone()));
+    }
+    out
+}
+
+fn spawn_shell(cmd: &str, cwd: Option<&Path>) -> String {
     use std::process::{Command, Stdio};
     let mut command = Command::new("sh");
     command
