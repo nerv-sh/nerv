@@ -588,24 +588,27 @@ fn matches_filter(name: &str, query: &str, strategy: Option<&str>, mode: MatchMo
     if let Some("substring") = strategy {
         return name.contains(query);
     }
-    if is_dot_literal(query) {
-        return name.starts_with(query);
-    }
-    match mode {
-        MatchMode::Fuzzy => fuzzy_subsequence_match(name, query),
-        MatchMode::Prefix => name.starts_with(query),
-    }
+    mode_match(name, query, mode)
 }
 
 /// Mode-aware name gate for subcommand / option / generator outputs
 /// that don't carry a `filterStrategy` of their own.
 fn matches_name(name: &str, prefix: &str, mode: MatchMode) -> bool {
-    if is_dot_literal(prefix) {
-        return name.starts_with(prefix);
-    }
+    mode_match(name, prefix, mode)
+}
+
+/// The shared Prefix/Fuzzy decision. Under `Fuzzy`, subsequence matching
+/// only kicks in for queries of **3+ chars**: a 1–2 char subsequence
+/// (`l`, `ps`) matches almost everything and buries the real hit, so
+/// short queries stay prefix. `.` / `..` are literal path tokens (never
+/// abbreviations) and always stay prefix too. (Zoxide keeps its own
+/// fuzzy-by-design path — this gate does not touch `z`.)
+fn mode_match(name: &str, query: &str, mode: MatchMode) -> bool {
     match mode {
-        MatchMode::Fuzzy => fuzzy_subsequence_match(name, prefix),
-        MatchMode::Prefix => name.starts_with(prefix),
+        MatchMode::Fuzzy if !is_dot_literal(query) && query.chars().count() >= 3 => {
+            fuzzy_subsequence_match(name, query)
+        }
+        _ => name.starts_with(query),
     }
 }
 
@@ -990,12 +993,20 @@ fn emit_candidates_for_arg(
                                 .into_iter()
                                 .map(|line| split_id_label(&line))
                                 .filter(|(ins, _)| matches_name(ins, prefix, mode))
-                                .map(|(insertion, display)| Suggestion {
+                                .enumerate()
+                                .map(|(idx, (insertion, display))| Suggestion {
                                     insertion,
                                     display,
                                     description: None,
                                     kind: SuggestionKind::Argument,
-                                    priority: None,
+                                    // Preserve the command's own output order
+                                    // (`aws configure list-profiles` leads with
+                                    // `default`; `git branch` by checkout order)
+                                    // instead of re-alphabetising it. A distinct
+                                    // descending priority defeats the alpha tie-
+                                    // break in sort_by_priority_then_alpha, and
+                                    // frecency still floats repeat picks on top.
+                                    priority: Some(1_000u32.saturating_sub(idx as u32)),
                                     icon: None,
                                 }),
                         );
@@ -3067,6 +3078,28 @@ mod tests {
         assert_eq!(names, ["alpha", "beta", "gamma"]);
     }
 
+    #[test]
+    fn template_generator_preserves_source_order_not_alpha() {
+        // `aws configure list-profiles` leads with `default`; re-alpha-
+        // sorting would bury it. Template output keeps the command's own
+        // order (here `zebra` before `apple`), never alphabetical.
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("opt".into()),
+                generators: vec![Generator::Template {
+                    script: vec!["/usr/bin/printf".into(), "zebra\napple\nmango\n".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(names, ["zebra", "apple", "mango"]);
+    }
+
     /// `cargo run -p <Tab>` regression: a `ScriptWithJsonPath` generator
     /// whose script emits a nested JSON object (`{packages:[…], …}`) must
     /// navigate `parent_key`/`id_field` over the **raw** stdout. The arm
@@ -3858,10 +3891,18 @@ mod tests {
         assert_eq!(fuzzy.len(), 1);
         assert_eq!(fuzzy[0].display, "commit");
 
-        // Fuzzy mode: "ck" matches checkout but NOT commit / config.
-        let fuzzy_ck = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
-        assert_eq!(fuzzy_ck.len(), 1);
-        assert_eq!(fuzzy_ck[0].display, "checkout");
+        // Fuzzy mode (3+ chars): "chk" matches checkout but NOT commit/config.
+        let fuzzy_chk = emit_subcommands(&node, "chk", MatchMode::Fuzzy);
+        assert_eq!(fuzzy_chk.len(), 1);
+        assert_eq!(fuzzy_chk[0].display, "checkout");
+
+        // Short (1–2 char) fuzzy queries stay PREFIX — `ck` no longer
+        // subsequence-matches checkout (would bury the real hit).
+        let short = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
+        assert!(
+            short.is_empty(),
+            "2-char fuzzy must be prefix, got {short:?}"
+        );
     }
 
     #[test]
@@ -3878,8 +3919,8 @@ mod tests {
         // Prefix "co" hits the alias.
         let prefix = emit_subcommands(&node, "co", MatchMode::Prefix);
         assert_eq!(prefix.len(), 1);
-        // Fuzzy "ck" hits the canonical name (alias is shorter than query).
-        let fuzzy = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
+        // Fuzzy "chk" (3+ chars) hits the canonical name via subsequence.
+        let fuzzy = emit_subcommands(&node, "chk", MatchMode::Fuzzy);
         assert_eq!(fuzzy.len(), 1);
     }
 
