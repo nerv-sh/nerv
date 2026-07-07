@@ -14,6 +14,12 @@ readme.workspace = true
 name = "nervd"
 path = "src/main.rs"
 
+[features]
+# Forward to nerv-engine's Tier C (rquickjs) closure executor. Off by
+# default so the shipped `nervd` stays rquickjs-free; opt in with
+# `cargo build -p nerv-daemon --features quickjs`.
+quickjs = ["nerv-engine/quickjs"]
+
 [dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }

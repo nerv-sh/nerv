@@ -14,6 +14,12 @@ readme.workspace = true
 name = "nerv"
 path = "src/main.rs"
 
+[features]
+# Forward to nerv-engine's Tier C (rquickjs) closure executor. Off by
+# default; opt in with `cargo build -p nerv-cli --features quickjs`.
+# Only the `_complete` IPC bridge path exercises it.
+quickjs = ["nerv-engine/quickjs"]
+
 [dependencies]
 clap = { workspace = true }
 anyhow = { workspace = true }
