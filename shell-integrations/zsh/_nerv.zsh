@@ -39,6 +39,10 @@ typeset -gi __NERV_ACTIVE=0
 # the reservation (and its flicker-inducing blank frame) when a redraw
 # keeps the same row count.
 typeset -gi __NERV_RESERVED=0
+# Flip state: __NERV_FLIP=1 draws the box above the cursor (near the
+# screen bottom); __NERV_FLIP_ROWS caches the row count the decision was
+# made for, so the DSR probe only re-runs when the popup height changes.
+typeset -gi __NERV_FLIP=0 __NERV_FLIP_ROWS=-1
 # Cached box dimensions (widest display cells / widest desc cells / any
 # wide icon), measured once per item set by __nerv_measure_items so
 # show_popup doesn't re-scan all N items on every navigation keystroke.
@@ -53,12 +57,18 @@ KEYTIMEOUT=1
 typeset -gi __NERV_WIDTH=46
 typeset -gi __NERV_PASTING=0
 typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
+# The clear sequence actually used by hide — set per render to match the
+# direction the box was drawn (downward = __NERV_CLEAR_ESC; upward flip =
+# an up-clear built in show_popup). Defaults to the downward clear.
+typeset -g __NERV_CLEAR_DYN=$'\e7\e[B\e[G\e[J\e8'
 
 __nerv_reset_state() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=0
   __NERV_HAS_SENTINEL=0
   __NERV_RESERVED=0
+  __NERV_FLIP=0
+  __NERV_FLIP_ROWS=-1
   __NERV_ITEMS=()
   zle -R ""
 }
@@ -149,6 +159,27 @@ __nerv_cursor_col() {
     (( col > cols - 20 )) && col=1
   fi
   print -r -- $col
+}
+
+# Query the cursor's current screen ROW via DSR (CPR). Sets REPLY to the
+# 1-based row, or 0 when the terminal doesn't answer. Reads the reply
+# straight off /dev/tty with a short timeout: a terminal that ignores
+# DSR (or races the line editor) degrades to "unknown" — the caller then
+# just draws the popup downward as before — rather than hanging or
+# leaking the reply bytes into the edit buffer. Used only to decide
+# whether a tall popup should flip above the cursor near the screen
+# bottom, so an occasional miss is harmless.
+__nerv_cursor_row() {
+  emulate -L zsh
+  REPLY=0
+  local pos
+  print -n $'\e[6n' > /dev/tty
+  # Reply shape: ESC [ <row> ; <col> R — read through the terminating R.
+  IFS='' read -rs -t 0.05 -d 'R' pos < /dev/tty 2>/dev/null || return 1
+  pos=${pos##*$'\e['}
+  local row=${pos%%;*}
+  [[ $row == <-> ]] || return 1
+  REPLY=$row
 }
 
 # Max visible rows — tight enough that the popup never runs past
@@ -381,44 +412,71 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
 
-  # Step 1: reserve the space with ZLE — but only on first show or when
-  # the row count changes. Re-issuing `zle -R` on every keystroke blanks
-  # the whole region right before the printf repaints it; that one blank
-  # frame per render is the flicker seen while arrowing through a long
-  # list. When the reservation already matches, skip to the printf, which
-  # overwrites the box in place (each row clears to EOL) — no blank frame.
-  if (( ! __NERV_ACTIVE || __NERV_RESERVED != ${#plain} )); then
-    zle -R "" "${plain[@]}"
-    __NERV_RESERVED=${#plain}
+  # Direction: the box normally drops BELOW the cursor. Near the screen
+  # bottom it won't fit and the downward save/restore render tears (the
+  # `\e[B` past the last line scrolls, invalidating the saved cursor).
+  # When the terminal answers DSR and there's room overhead, flip the
+  # box ABOVE the cursor instead (Fig-style). Any DSR miss → crow=0 →
+  # stay with the downward path.
+  # Cache the flip decision across keystrokes: the DSR probe only fires
+  # on a fresh popup or when the row count changes, not on every redraw —
+  # otherwise a terminal that's slow to answer CPR would stall each
+  # keystroke by the read timeout. Within one popup the cursor row is
+  # stable enough that reusing the decision is safe.
+  local nrows=${#plain}
+  if (( ! __NERV_ACTIVE || __NERV_FLIP_ROWS != nrows )); then
+    __nerv_cursor_row
+    local crow=$REPLY
+    __NERV_FLIP=0
+    (( crow > 0 && crow + nrows > term_lines && crow > nrows + 1 )) && __NERV_FLIP=1
+    __NERV_FLIP_ROWS=$nrows
   fi
+  local flip=$__NERV_FLIP
 
-  # Anchor the popup's left edge under the input cursor. Query the
-  # cursor column AFTER `zle -R` so it reflects the input line. Clamp
-  # so a box near the right edge shifts left to stay on screen.
-  #
-  # Each colored row is prefixed with 2 leading spaces (see the
-  # "  ${BG}…" rows below), so the painted footprint is W + 2 cells, not
-  # W. Reserve one more column on top of that: writing into the very last
-  # cell arms the terminal's pending-wrap flag, and the next row's
-  # cursor-down then scrolls — drifting every following row one line low
-  # and tearing the box into the alternating "│ … │" / margin-"│"
-  # fragments seen with long prompts. So keep start_col + 2 + W ≤ cols.
+  # Anchor the popup's left edge under the input cursor. Clamp so a box
+  # near the right edge shifts left to stay on screen. Each colored row
+  # carries 2 leading spaces, so the footprint is W + 2 cells; keep one
+  # more column of slack (start_col + 2 + W ≤ cols) or the pending-wrap
+  # flag scrolls the next row and tears the box.
   local start_col=$(__nerv_cursor_col)
   (( start_col < 1 )) && start_col=1
   (( start_col + W + 2 > term_cols )) && start_col=$(( term_cols - W - 2 ))
   (( start_col < 1 )) && start_col=1
+  local colmove=$'\e['${start_col}'G'
 
-  # Step 2-4: save cursor, move down + overwrite with colored
-  # content per row at the anchored column, restore cursor. Works as
-  # long as the popup stays within the visible screen — MAX_VIS above
-  # clamps to $LINES so we don't trigger a mid-render scroll that
-  # would invalidate the saved cursor pos.
-  local move=$'\e[B\e['${start_col}'G'
-  local buf=$'\e7'
-  for (( i=1; i<=${#colored}; i++ )); do
-    buf+="${move}${colored[$i]}"$'\e[K'
-  done
-  buf+=$'\e8'
+  local buf
+  if (( flip )); then
+    # Draw upward: save, hop up nrows lines, paint each row downward.
+    # No `zle -R` reserve — the box overlays the scrollback above the
+    # prompt and clears on dismiss / next prompt. Track a matching
+    # up-clear sequence for hide.
+    __NERV_RESERVED=0
+    buf=$'\e7\e['${nrows}'A'
+    for (( i=1; i<=nrows; i++ )); do
+      buf+="${colmove}${colored[$i]}"$'\e[K'
+      (( i < nrows )) && buf+=$'\e[B'
+    done
+    buf+=$'\e8'
+    __NERV_CLEAR_DYN=$'\e7\e['${nrows}'A'
+    repeat $nrows; do __NERV_CLEAR_DYN+=$'\e[2K\e[B'; done
+    __NERV_CLEAR_DYN+=$'\e8'
+  else
+    # Downward: reserve the space with ZLE (only on first show or a row-
+    # count change — re-issuing `zle -R` every keystroke blanks the region
+    # for one frame, the flicker seen while arrowing a long list), then
+    # overwrite in place with the colored rows.
+    if (( ! __NERV_ACTIVE || __NERV_RESERVED != nrows )); then
+      zle -R "" "${plain[@]}"
+      __NERV_RESERVED=$nrows
+    fi
+    local move=$'\e[B'"$colmove"
+    buf=$'\e7'
+    for (( i=1; i<=${#colored}; i++ )); do
+      buf+="${move}${colored[$i]}"$'\e[K'
+    done
+    buf+=$'\e8'
+    __NERV_CLEAR_DYN=$__NERV_CLEAR_ESC
+  fi
   printf '%s' "$buf"
 
   __NERV_ACTIVE=1
@@ -433,7 +491,7 @@ __nerv_hide_popup() {
   # Clear the raw-ANSI overlay we painted in show_popup BEFORE
   # zle -R releases the status lines, otherwise the colored
   # remnants persist where the blank lines used to be.
-  printf '%s' "$__NERV_CLEAR_ESC"
+  printf '%s' "$__NERV_CLEAR_DYN"
   __nerv_reset_state
 }
 
@@ -499,7 +557,7 @@ __nerv_insert_selected() {
   # Clear the raw-ANSI popup overlay, then reset internal state.
   # reset-prompt + redisplay force ZLE to repaint the prompt now
   # that BUFFER/CURSOR have moved.
-  printf '%s' "$__NERV_CLEAR_ESC"
+  printf '%s' "$__NERV_CLEAR_DYN"
   __NERV_PREV_LBUFFER="$LBUFFER"
   __nerv_reset_state
   zle reset-prompt 2>/dev/null
@@ -846,7 +904,21 @@ __nerv_pre_redraw() {
     region_highlight+=("${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) fg=242, memo=nerv_ghost")
   fi
 }
-zle -N zle-line-pre-redraw __nerv_pre_redraw
+# Chain into the pre-redraw hook via add-zle-hook-widget instead of
+# `zle -N zle-line-pre-redraw` — the latter REPLACES the special widget,
+# clobbering zsh-syntax-highlighting's own pre-redraw hook so command
+# text loses its colour (valid-command green → default white). Hooking
+# lets both run; registering after other plugins means our ghost paint
+# lands on top of their region_highlight rather than being overwritten.
+zle -N __nerv_pre_redraw
+if autoload -Uz add-zle-hook-widget 2>/dev/null && \
+   add-zle-hook-widget line-pre-redraw __nerv_pre_redraw 2>/dev/null; then
+  :
+else
+  # Fallback for a zsh without add-zle-hook-widget (< 5.3): bind
+  # directly. Rare on our 5.8+ floor, but keep the ghost working.
+  zle -N zle-line-pre-redraw __nerv_pre_redraw
+fi
 
 __nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
 zle -N __nerv_dismiss
