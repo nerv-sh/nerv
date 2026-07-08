@@ -145,21 +145,56 @@ def main():
         # (an item), never a bare `[N]` (the sentinel).
         master, proc = new_shell(env)
         pump(master, 2.0)
-        os.write(master, b"git c")
+        # Type `git ` first and DISCARD its frame — that boundary state
+        # legitimately shows the sentinel. Then type `c` and capture only
+        # that frame, so the assertions see the final `git c` popup.
+        os.write(master, b"git ")
+        pump(master, 1.2)
+        os.write(master, b"c")
         out3 = pump(master, 1.5)
         kill(master, proc)
         item_footer = re.findall(rb"\[(\d+)/(\d+)\]", out3)
         partial_selects_item = bool(item_footer) and item_footer[-1][0] == b"1"
-        log(f"case3 partial_selects_item={partial_selects_item} footer={item_footer[-1:]}")
+        # A filtered (partial) popup must NOT carry the sentinel row.
+        no_sentinel_on_partial = b"Immediately execute" not in out3
+        log(
+            f"case3 partial_selects_item={partial_selects_item} "
+            f"no_sentinel={no_sentinel_on_partial} footer={item_footer[-1:]}"
+        )
 
-        if exec_bare and not inserted_checkout and nav_inserted and partial_selects_item:
-            log("PASS — sentinel executes; Tab+Enter inserts; partial selects item 1")
+        # --- Case 4: Tab on a partial-token popup INSERTS the highlighted
+        # item (no navigation needed) — `git c` + Tab → `git checkout`.
+        master, proc = new_shell(env)
+        pump(master, 2.0)
+        os.write(master, b"git ")
+        pump(master, 1.2)
+        os.write(master, b"c")
+        pump(master, 1.2)
+        os.write(master, b"\t")  # Tab accepts the highlighted item
+        out4 = pump(master, 1.5)
+        kill(master, proc)
+        tab_inserted = b"git checkout" in out4
+        log(f"case4 tab_inserted_checkout={tab_inserted}")
+
+        if (
+            exec_bare
+            and not inserted_checkout
+            and nav_inserted
+            and partial_selects_item
+            and no_sentinel_on_partial
+            and tab_inserted
+        ):
+            log(
+                "PASS — sentinel executes; partial hides sentinel + selects "
+                "item 1; Tab inserts the highlighted item"
+            )
             rc = 0
         else:
             log("FAIL")
             log(f"  case1 tail: {out1[-300:]!r}")
             log(f"  case2 tail: {out2[-300:]!r}")
             log(f"  case3 tail: {out3[-300:]!r}")
+            log(f"  case4 tail: {out4[-300:]!r}")
     finally:
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
 

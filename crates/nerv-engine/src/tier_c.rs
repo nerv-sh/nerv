@@ -12,20 +12,18 @@
 //!  - Strict execution budget: 200ms by default, matching the Tier B
 //!    `script` runner. Stale shell completions are worse than missing
 //!    ones.
-//!  - No host bindings: a `tokens` array is the only context the
-//!    closure sees, exposed as a top-level `arguments`-style variable.
-//!    Closures that reach for `executeCommand`, `currentWorkingDirectory`,
-//!    or `generatorContext` will throw, and we treat that as a soft
-//!    failure (no candidates).
-//!
-//! Wire-up to `complete.rs` is intentionally deferred — the converter
-//! must first emit `source` (today it doesn't). This module is the
-//! callable surface that wire-up will consume; tests below exercise
-//! the same shape with hand-built sources.
+//!  - Fig runtime shims: the sandbox is primed with the TS async helpers
+//!    (`__awaiter`/`__generator`), a real `executeShellCommand` /
+//!    `executeCommand` host binding (spawns the spec-defined command in
+//!    the client cwd — same trust boundary as a Tier B `script`), and
+//!    the live `tokens` array via `globalThis.__nerv_tokens`. Closures
+//!    that reach for anything else (`process`, `fetch`, filesystem) throw
+//!    and we treat that as a soft failure (no candidates).
 //!
 //! Module is gated by `cfg(feature = "quickjs")` at the declaration
 //! site in `lib.rs`; no inner `#![cfg(...)]` needed.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nerv_quickjs::Sandbox;
@@ -37,16 +35,19 @@ use serde_json::Value;
 /// falls through to the next generator.
 pub const DEFAULT_BUDGET: Duration = Duration::from_millis(200);
 
-/// Execute a captured Custom closure with a `tokens` array as its sole
-/// argument. The source MUST be an expression that evaluates to the
-/// closure's return value — typically the converter wraps the original
-/// arrow function in `(<arrow>)(tokens)` so the eval immediately invokes
-/// it. Returns the candidate strings extracted from the result, or
-/// `None` for any failure mode (parse / throw / timeout / non-array
-/// return). Callers map `None` to "no Tier C candidates for this
-/// generator" and let the next generator try.
-pub fn execute_custom_source(source: &str, tokens: &[String]) -> Option<Vec<String>> {
-    execute_with_budget(source, tokens, DEFAULT_BUDGET)
+/// Execute a captured Custom closure with the live `tokens` list and the
+/// client `cwd`. The source is an expression that resolves to the
+/// closure's return value (the converter emits closure-call form). The
+/// sandbox is primed with the TS async shims, a real `executeShellCommand`
+/// host binding (spawns in `cwd`, same trust as a Tier B script), and the
+/// token array. Returns the extracted candidate strings, or `None` on any
+/// failure (parse / throw / timeout / non-settling promise / non-array).
+pub fn execute_custom_source(
+    source: &str,
+    tokens: &[String],
+    cwd: Option<&Path>,
+) -> Option<Vec<String>> {
+    execute_with_budget(source, tokens, cwd, DEFAULT_BUDGET)
 }
 
 /// Lower-level entry point that lets the caller dial the budget. Tests
@@ -54,19 +55,117 @@ pub fn execute_custom_source(source: &str, tokens: &[String]) -> Option<Vec<Stri
 pub fn execute_with_budget(
     source: &str,
     tokens: &[String],
+    cwd: Option<&Path>,
     budget: Duration,
 ) -> Option<Vec<String>> {
-    let sandbox = Sandbox::new().ok()?;
+    run_in_sandbox(source, tokens, cwd, budget)
+        .ok()
+        .and_then(|v| extract_string_candidates(&v))
+}
+
+/// Shared sandbox pipeline. Surfaces the failing stage as a string so a
+/// diagnostic harness can bucket errors; production callers ignore it.
+fn run_in_sandbox(
+    source: &str,
+    tokens: &[String],
+    cwd: Option<&Path>,
+    budget: Duration,
+) -> Result<Value, String> {
+    let sandbox = Sandbox::new().map_err(|e| format!("init: {e}"))?;
+    sandbox
+        .install_ts_helpers()
+        .map_err(|e| format!("helpers: {e}"))?;
+    // Real shell host binding: closures that `await executeShellCommand(…)`
+    // spawn the spec-defined command in the client cwd (200ms/drain cap).
+    let exec_cwd: Option<PathBuf> = cwd.map(Path::to_path_buf);
+    sandbox
+        .set_shell_exec(move |cmd| run_shell(&cmd, exec_cwd.as_deref()))
+        .map_err(|e| format!("exec-bind: {e}"))?;
     let bind = format!(
         "globalThis.__nerv_tokens = {};\n",
-        serde_json::to_string(tokens).ok()?
+        serde_json::to_string(tokens).map_err(|e| format!("tokens: {e}"))?
     );
-    // Eval the binding first (no budget needed for the assignment).
-    sandbox.eval_isolated(&bind).ok()?;
-    let result = sandbox
-        .eval_with_budget(&wrap_source(source), budget)
-        .ok()?;
-    extract_string_candidates(&result)
+    sandbox
+        .eval_isolated(&bind)
+        .map_err(|e| format!("tokens-eval: {e}"))?;
+    sandbox
+        .eval_resolved(&wrap_source(source), budget)
+        .map_err(|e| format!("eval: {e}"))
+}
+
+/// Diagnostic entry point for the recovery-measurement harness. Returns
+/// the raw JSON value or the failing-stage string. Not used in
+/// production — only `tests/measure_tierc.rs` calls it.
+pub fn execute_debug(
+    source: &str,
+    tokens: &[String],
+    cwd: Option<&Path>,
+    budget: Duration,
+) -> Result<Value, String> {
+    run_in_sandbox(source, tokens, cwd, budget)
+}
+
+type ShellCacheKey = (String, Option<PathBuf>);
+type ShellCacheMap = std::collections::HashMap<ShellCacheKey, (std::time::Instant, String)>;
+
+/// Process-wide cache of `executeShellCommand` stdout, keyed by
+/// (command, cwd). Tier C closures shell out to real commands (`aws s3
+/// ls`, `ssh -G`, …) that cost hundreds of ms — mostly network. Without
+/// this every keystroke that re-runs the closure re-spawns the same
+/// command; the 5s TTL means only the first keystroke of a burst pays,
+/// the rest hit cache. Same policy as the Tier B `GENERATOR_CACHE`.
+static SHELL_CACHE: std::sync::LazyLock<std::sync::Mutex<ShellCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const SHELL_CACHE_TTL: Duration = Duration::from_secs(5);
+const SHELL_CACHE_MAX: usize = 64;
+
+/// Spawn `sh -c <cmd>` in `cwd` and return its stdout (empty on failure
+/// or timeout), memoised for [`SHELL_CACHE_TTL`]. The command text
+/// originates from the vendored spec closure — the same trust boundary
+/// as a Tier B `script` generator.
+fn run_shell(cmd: &str, cwd: Option<&Path>) -> String {
+    let key: ShellCacheKey = (cmd.to_string(), cwd.map(Path::to_path_buf));
+    if let Ok(cache) = SHELL_CACHE.lock() {
+        if let Some((stamp, out)) = cache.get(&key) {
+            if stamp.elapsed() < SHELL_CACHE_TTL {
+                return out.clone();
+            }
+        }
+    }
+    let out = spawn_shell(cmd, cwd);
+    if let Ok(mut cache) = SHELL_CACHE.lock() {
+        if cache.len() >= SHELL_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), out.clone()));
+    }
+    out
+}
+
+fn spawn_shell(cmd: &str, cwd: Option<&Path>) -> String {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(cmd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let Ok(child) = command.spawn() else {
+        return String::new();
+    };
+    crate::complete::spawn_with_timeout(child, 8192)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default()
 }
 
 /// Wrap user `source` so it can read tokens via a stable name. The
@@ -115,14 +214,14 @@ mod tests {
     #[test]
     fn extracts_string_array() {
         let src = r#"["main", "dev"]"#;
-        let got = execute_custom_source(src, &[]);
+        let got = execute_custom_source(src, &[], None);
         assert_eq!(got, Some(vec!["main".into(), "dev".into()]));
     }
 
     #[test]
     fn extracts_object_array_via_name_field() {
         let src = r#"[{ name: "alpha" }, { name: "beta" }]"#;
-        let got = execute_custom_source(src, &[]);
+        let got = execute_custom_source(src, &[], None);
         assert_eq!(got, Some(vec!["alpha".into(), "beta".into()]));
     }
 
@@ -131,7 +230,7 @@ mod tests {
         // Mix valid strings, objects with `name`, and unrecognised
         // values. Output preserves the valid ones in order.
         let src = r#"["good", 42, { other: 1 }, { name: "also" }, null]"#;
-        let got = execute_custom_source(src, &[]).unwrap();
+        let got = execute_custom_source(src, &[], None).unwrap();
         assert_eq!(got, vec!["good".to_string(), "also".to_string()]);
     }
 
@@ -139,21 +238,21 @@ mod tests {
     fn tokens_are_visible_to_closure() {
         // The closure can read the array we pinned via globalThis.
         let src = "globalThis.__nerv_tokens.map(t => t.toUpperCase())";
-        let got = execute_custom_source(src, &["git".to_string(), "co".to_string()]);
+        let got = execute_custom_source(src, &["git".to_string(), "co".to_string()], None);
         assert_eq!(got, Some(vec!["GIT".into(), "CO".into()]));
     }
 
     #[test]
     fn returns_none_on_non_array_result() {
         let src = r#""just a string""#;
-        let got = execute_custom_source(src, &[]);
+        let got = execute_custom_source(src, &[], None);
         assert_eq!(got, None);
     }
 
     #[test]
     fn returns_none_on_thrown_error() {
         let src = r#"throw new Error("nope")"#;
-        let got = execute_custom_source(src, &[]);
+        let got = execute_custom_source(src, &[], None);
         assert_eq!(got, None);
     }
 
@@ -161,16 +260,35 @@ mod tests {
     fn budget_kills_infinite_loop() {
         // Pin the budget to a small value so the test stays fast.
         let src = "while (true) {}";
-        let got = execute_with_budget(src, &[], Duration::from_millis(50));
+        let got = execute_with_budget(src, &[], None, Duration::from_millis(50));
         assert_eq!(got, None);
     }
 
     #[test]
+    fn closure_shells_out_via_exec_binding() {
+        // End-to-end: an async closure runs a real command through the
+        // host binding and splits stdout into candidates.
+        let src = r#"(async () => { const o = await executeShellCommand("printf 'main\ndev\nfeat'"); return o.split("\n"); })()"#;
+        let got = execute_custom_source(src, &[], None);
+        assert_eq!(got, Some(vec!["main".into(), "dev".into(), "feat".into()]));
+    }
+
+    #[test]
     fn host_bindings_throw_softly() {
-        // `process` / `executeCommand` aren't in the sandbox — closures
-        // that touch them throw, and we fall through to None.
-        let src = "process.env.PATH.split(':')";
-        let got = execute_custom_source(src, &[]);
+        // The sandbox shims console / process / executeShellCommand, but
+        // not the browser/network surface — a closure reaching for `fetch`
+        // throws and we fall through to None rather than crash.
+        let src = "fetch('https://example.com').then(r => [r])";
+        let got = execute_custom_source(src, &[], None);
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn process_env_shim_is_readable() {
+        // `process.env` is seeded from the daemon env so path-building
+        // closures work (`environmentVariables` aliases it too).
+        let src = "[typeof process.env, typeof environmentVariables, typeof console.log]";
+        let got = execute_custom_source(src, &[], None).unwrap();
+        assert_eq!(got, vec!["object", "object", "function"]);
     }
 }

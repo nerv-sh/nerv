@@ -8,16 +8,19 @@
 //! engine never sees a raw JS handle.
 //!
 //! Hard constraints baked into the API:
-//! - **No globals** — every eval starts from a fresh `Runtime` so a
-//!   prior call can't leak state. The runtime itself is constructed
-//!   per `Sandbox` so it's cheap to drop a hung evaluator without
-//!   ripping the whole process down.
-//! - **No host bindings** — only the standard ECMAScript globals
-//!   (`Math`, `JSON`, `Array`, ...) are reachable. There is no `console`,
-//!   no `process`, no `fetch`, no filesystem.
-//! - **Wall-clock budget** — `eval_with_budget` aborts after the
-//!   supplied `Duration`. QuickJS exposes an interrupt callback; we poll
-//!   the deadline on each call.
+//! - **Fresh runtime per `Sandbox`** — every eval starts from a new
+//!   `Runtime` so a prior call can't leak state, and a hung evaluator
+//!   drops without ripping the process down.
+//! - **Opt-in Fig host surface** — the base sandbox is bare ECMAScript
+//!   (`Math`, `JSON`, `Array`, …). Callers explicitly opt into the Fig
+//!   runtime: [`Sandbox::install_ts_helpers`] (`__awaiter`/`__generator`)
+//!   and [`Sandbox::set_shell_exec`] (`executeShellCommand` /
+//!   `executeCommand` / `console` / `process`). `fetch`, network, and
+//!   arbitrary filesystem stay absent. The shell binding is the same
+//!   trust boundary as a Tier B `script` — the command text is spec-
+//!   authored, not user input.
+//! - **Wall-clock budget** — `eval_with_budget` / `eval_resolved` abort
+//!   after the supplied `Duration` via QuickJS's interrupt callback.
 //!
 //! CLAUDE.md §4 invariant: deno_core is forbidden — this crate is the
 //! sanctioned Tier C path. `rquickjs` adds ~1 MB to the binary when the
@@ -116,7 +119,197 @@ impl Sandbox {
         self.runtime.set_interrupt_handler(None);
         result
     }
+
+    /// Promise-aware evaluation with a wall-clock budget. Fig spec
+    /// closures are almost all `async` — a bare `eval` of `(async …)()`
+    /// yields a **pending Promise**, not the array we want. This drives
+    /// the QuickJS job queue ([`rquickjs::Promise::finish`], which pumps
+    /// microtasks until the promise settles) and unwraps the resolved
+    /// value. Non-promise results pass straight through. A promise that
+    /// can't settle without external work (a real async host call that
+    /// never resolves) surfaces as `Javascript("would block")`.
+    pub fn eval_resolved(&self, source: &str, budget: Duration) -> Result<Value, SandboxError> {
+        let deadline = Instant::now() + budget;
+        let budget_ms = budget.as_millis();
+        self.runtime
+            .set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+        let result = self.context.with(|ctx| {
+            let raw: rquickjs::Value<'_> = ctx
+                .eval(source)
+                .map_err(|e| classify(&ctx, e, budget_ms, deadline))?;
+            let settled = if raw.is_promise() {
+                let promise = raw.into_promise().expect("is_promise() just checked");
+                promise
+                    .finish::<rquickjs::Value<'_>>()
+                    .map_err(|e| classify(&ctx, e, budget_ms, deadline))?
+            } else {
+                raw
+            };
+            value_to_json(settled).map_err(|e| SandboxError::Serde(e.to_string()))
+        });
+        self.runtime.set_interrupt_handler(None);
+        result
+    }
+
+    /// Install the TypeScript async-runtime shims (`__awaiter`,
+    /// `__generator`) that `tsc` emits when it down-levels `async`/`await`.
+    /// 21% of captured closures reference these; without them the eval
+    /// throws `ReferenceError`. Idempotent — evaluated once per sandbox.
+    pub fn install_ts_helpers(&self) -> Result<(), SandboxError> {
+        self.context.with(|ctx| {
+            ctx.eval::<(), _>(TS_HELPERS)
+                .map_err(|e| SandboxError::Javascript(e.to_string()))
+        })
+    }
+
+    /// Install the Fig shell host bindings. `exec` is a caller-supplied
+    /// synchronous spawn (the engine owns the timeout + cwd + argv policy
+    /// so this crate stays dependency-light and shell-agnostic); it takes
+    /// the command line and returns stdout. Two globals are exposed to
+    /// match the two Fig runtime shapes closures reach for:
+    ///
+    /// - `executeShellCommand(cmd)` → stdout string  (legacy)
+    /// - `executeCommand({command, args})` → `{stdout, stderr, status,
+    ///   exitCode}`  (current)
+    ///
+    /// Both resolve synchronously; `await` on the string/object just
+    /// yields it, and [`Self::eval_resolved`] drains the microtask queue.
+    /// This is the same trust boundary as a Tier B `script` generator —
+    /// the command text comes from the vendored spec, not user input.
+    pub fn set_shell_exec<F>(&self, exec: F) -> Result<(), SandboxError>
+    where
+        F: Fn(String) -> String + 'static,
+    {
+        self.context.with(|ctx| {
+            let func = rquickjs::Function::new(ctx.clone(), move |cmd: String| exec(cmd))
+                .map_err(|e| SandboxError::Javascript(e.to_string()))?;
+            ctx.globals()
+                .set("__nerv_run", func)
+                .map_err(|e| SandboxError::Javascript(e.to_string()))?;
+            Ok::<_, SandboxError>(())
+        })?;
+        let shim = host_shim();
+        self.context.with(|ctx| {
+            ctx.eval::<(), _>(shim.as_str())
+                .map_err(|e| SandboxError::Javascript(e.to_string()))
+        })
+    }
 }
+
+/// Build the Fig host-runtime shim. On top of the Rust `__nerv_run`
+/// (string command → stdout) it defines the globals Fig closures reach
+/// for across API generations:
+///
+/// - `executeShellCommand` — **polymorphic**: a string yields stdout
+///   (legacy), an object `{command, args}` yields `{stdout, …}` (current).
+/// - `executeCommand` — always the record shape.
+/// - `console` — a no-op sink (closures log freely; we don't care).
+/// - `process` — `{ env, platform }` seeded from the daemon's real
+///   environment so `process.env.HOME`-style path building works.
+fn host_shim() -> String {
+    let env_json = process_env_json();
+    format!(
+        r#"
+globalThis.console = {{ log: function () {{}}, error: function () {{}}, warn: function () {{}}, info: function () {{}}, debug: function () {{}} }};
+globalThis.process = {{ env: {env_json}, platform: "darwin" }};
+globalThis.environmentVariables = globalThis.process.env;
+globalThis.__figLine = function (input) {{
+  return typeof input === "string" ? input : [input.command].concat(input.args || []).join(" ");
+}};
+globalThis.executeShellCommand = function (input) {{
+  var out = globalThis.__nerv_run(globalThis.__figLine(input));
+  return typeof input === "string" ? out : {{ stdout: out, stderr: "", status: "success", exitCode: 0 }};
+}};
+globalThis.executeCommand = function (input) {{
+  return {{ stdout: globalThis.__nerv_run(globalThis.__figLine(input)), stderr: "", status: "success", exitCode: 0 }};
+}};
+"#
+    )
+}
+
+/// A small allowlist of the daemon's environment, JSON-encoded for the
+/// `process.env` shim. Only path-shaped vars closures actually read —
+/// not the whole environment.
+fn process_env_json() -> String {
+    let mut map = serde_json::Map::new();
+    for key in ["HOME", "USER", "PATH", "PWD", "SHELL", "LANG", "TMPDIR"] {
+        if let Ok(val) = std::env::var(key) {
+            map.insert(key.to_string(), Value::String(val));
+        }
+    }
+    Value::Object(map).to_string()
+}
+
+/// Map an rquickjs error to the sandbox's error taxonomy. Both a budget
+/// interrupt AND a real `throw` surface as `Error::Exception`; they are
+/// told apart by the deadline — past it, the interrupt fired (Timeout);
+/// otherwise the script threw, and [`Ctx::catch`] recovers the message.
+/// A promise that drains its job queue without settling is `WouldBlock`.
+fn classify(
+    ctx: &rquickjs::Ctx<'_>,
+    e: rquickjs::Error,
+    budget_ms: u128,
+    deadline: Instant,
+) -> SandboxError {
+    match e {
+        rquickjs::Error::Exception if Instant::now() >= deadline => {
+            SandboxError::Timeout { budget_ms }
+        }
+        rquickjs::Error::Exception => {
+            let caught = ctx.catch();
+            let msg = caught
+                .as_exception()
+                .and_then(|ex| ex.message())
+                .or_else(|| caught.as_string().and_then(|s| s.to_string().ok()))
+                .unwrap_or_else(|| "uncaught exception".to_string());
+            SandboxError::Javascript(msg)
+        }
+        rquickjs::Error::WouldBlock => SandboxError::Javascript("promise did not settle".into()),
+        other => SandboxError::Javascript(other.to_string()),
+    }
+}
+
+/// tslib `__awaiter` + `__generator`, verbatim from the TypeScript
+/// runtime. `tsc` references these by name in every down-levelled
+/// `async` function body; injecting them lets those closures run.
+const TS_HELPERS: &str = r#"
+globalThis.__awaiter = function (thisArg, _arguments, P, generator) {
+  function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+  return new (P || (P = Promise))(function (resolve, reject) {
+    function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+    function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+    function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+    step((generator = generator.apply(thisArg, _arguments || [])).next());
+  });
+};
+globalThis.__generator = function (thisArg, body) {
+  var _ = { label: 0, sent: function () { if (t[0] & 1) throw t[1]; return t[1]; }, trys: [], ops: [] }, f, y, t, g;
+  return g = { next: verb(0), "throw": verb(1), "return": verb(2) }, typeof Symbol === "function" && (g[Symbol.iterator] = function () { return this; }), g;
+  function verb(n) { return function (v) { return step([n, v]); }; }
+  function step(op) {
+    if (f) throw new TypeError("Generator is already executing.");
+    while (g && (g = 0, op[0] && (_ = 0)), _) try {
+      if (f = 1, y && (t = op[0] & 2 ? y["return"] : op[0] ? y["throw"] || ((t = y["return"]) && t.call(y), 0) : y.next) && !(t = t.call(y, op[1])).done) return t;
+      if (y = 0, t) op = [op[0] & 2, t.value];
+      switch (op[0]) {
+        case 0: case 1: t = op; break;
+        case 4: _.label++; return { value: op[1], done: false };
+        case 5: _.label++; y = op[1]; op = [0]; continue;
+        case 7: op = _.ops.pop(); _.trys.pop(); continue;
+        default:
+          if (!(t = _.trys, t = t.length > 0 && t[t.length - 1]) && (op[0] === 6 || op[0] === 2)) { _ = 0; continue; }
+          if (op[0] === 3 && (!t || (op[1] > t[0] && op[1] < t[3]))) { _.label = op[1]; break; }
+          if (op[0] === 6 && _.label < t[1]) { _.label = t[1]; t = op; break; }
+          if (t && _.label < t[2]) { _.label = t[2]; _.ops.push(op); break; }
+          if (t[2]) _.ops.pop();
+          _.trys.pop(); continue;
+      }
+      op = body.call(thisArg, _);
+    } catch (e) { op = [6, e]; y = 0; } finally { f = t = 0; }
+    if (op[0] & 5) throw op[1]; return { value: op[0] ? op[1] : void 0, done: true };
+  }
+};
+"#;
 
 /// Convert a QuickJS value into a serde_json::Value. Handles the four
 /// types Fig spec closures actually return — string, number, bool,
@@ -261,5 +454,112 @@ mod tests {
         let sb = Sandbox::new().unwrap();
         let v = sb.eval_with_budget("42", Duration::from_secs(1)).unwrap();
         assert_eq!(v, Value::Number(serde_json::Number::from(42)));
+    }
+
+    #[test]
+    fn eval_resolved_unwraps_async_closure() {
+        // The core Tier C case: `(async () => [...])()` is a Promise.
+        // eval_resolved must drive the job queue and return the array.
+        let sb = Sandbox::new().unwrap();
+        let v = sb
+            .eval_resolved("(async () => ['main', 'dev'])()", Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                Value::String("main".into()),
+                Value::String("dev".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn eval_resolved_awaits_inside_async() {
+        let sb = Sandbox::new().unwrap();
+        let v = sb
+            .eval_resolved(
+                "(async () => { const x = await Promise.resolve(21); return [String(x * 2)]; })()",
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(v, Value::Array(vec![Value::String("42".into())]));
+    }
+
+    #[test]
+    fn eval_resolved_passes_through_non_promise() {
+        let sb = Sandbox::new().unwrap();
+        let v = sb
+            .eval_resolved("['a', 'b']", Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![Value::String("a".into()), Value::String("b".into())])
+        );
+    }
+
+    #[test]
+    fn shell_exec_binding_feeds_closure() {
+        // A closure that shells out: `executeShellCommand` returns the
+        // stubbed stdout, the closure splits it into candidates.
+        let sb = Sandbox::new().unwrap();
+        sb.set_shell_exec(|cmd| {
+            assert!(cmd.contains("branch"), "got cmd: {cmd}");
+            "main\ndev\nfeature/x".to_string()
+        })
+        .unwrap();
+        let v = sb
+            .eval_resolved(
+                "(async () => { const o = await executeShellCommand('git branch'); \
+                 return o.split('\\n'); })()",
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                Value::String("main".into()),
+                Value::String("dev".into()),
+                Value::String("feature/x".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn execute_command_shim_returns_record() {
+        // Modern shape: `executeCommand({command, args})` → `{stdout,…}`.
+        let sb = Sandbox::new().unwrap();
+        sb.set_shell_exec(|cmd| {
+            assert_eq!(cmd, "aws configure list-profiles");
+            "default\nlemon".to_string()
+        })
+        .unwrap();
+        let v = sb
+            .eval_resolved(
+                "(async () => { const r = await executeCommand({ command: 'aws', \
+                 args: ['configure', 'list-profiles'] }); return r.stdout.split('\\n'); })()",
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![
+                Value::String("default".into()),
+                Value::String("lemon".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn ts_helpers_enable_awaiter_transpiled_closure() {
+        // What `tsc` emits for `async () => ['x']` at ES5 target.
+        let sb = Sandbox::new().unwrap();
+        sb.install_ts_helpers().unwrap();
+        let src = "(function () { return __awaiter(this, void 0, void 0, function () { \
+                   return __generator(this, function (_a) { return [2, ['x', 'y']]; }); }); })()";
+        let v = sb.eval_resolved(src, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            v,
+            Value::Array(vec![Value::String("x".into()), Value::String("y".into())])
+        );
     }
 }

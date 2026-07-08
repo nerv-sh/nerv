@@ -22,6 +22,27 @@
 
 import { readdir, mkdir, stat } from "node:fs/promises";
 import { resolve, basename, extname, dirname, join } from "node:path";
+import * as figGenerators from "@fig/autocomplete-generators";
+
+// Shared helper library many specs import from
+// `@fig/autocomplete-generators` (`keyValue`, `valueList`, `filepaths`,
+// …). Serialise each exported function so a closure that calls one
+// resolves it in the sandbox. Built once; prepended to every closure
+// (the gzipped spec cache collapses the identical block to ~nothing).
+const FIG_GENERATORS_PRELUDE: string = (() => {
+  const parts: string[] = [];
+  for (const [name, val] of Object.entries(figGenerators)) {
+    if (typeof val !== "function") continue;
+    try {
+      // globalThis assignment (not `const`) so it can't collide with a
+      // module-local declaration of the same name in CURRENT_PRELUDE.
+      parts.push(`globalThis.${name} = ${val.toString()};`);
+    } catch {
+      /* skip unstringifiable */
+    }
+  }
+  return parts.join("\n");
+})();
 
 /**
  * Detect whether a Fig generator object came from `filepaths()` or
@@ -402,10 +423,12 @@ const probeCargoKind = async (g: any): Promise<string | null | "any"> => {
  * Capture a Fig closure as a Tier C source string the Rust engine can
  * feed to `nerv-engine::tier_c::execute_custom_source` under the
  * `quickjs` feature. Wraps the closure in IIFE form so the eval
- * resolves to the closure's return value with `tokens` bound from the
- * sandbox global. `exec` is stubbed because the sandbox refuses host
- * bindings — closures that call it will throw at runtime and the
- * engine drops to "no candidates" silently.
+ * resolves to the closure's return value. The sandbox provides the
+ * three arguments Fig generator closures take, across signature
+ * variants: `tokens` (the live command tokens), `executeShellCommand`
+ * (a real host binding that spawns in the client cwd), and a
+ * `generatorContext` object bundling both plus `executeCommand` for the
+ * closures that destructure a single context arg.
  *
  * Returns null when:
  *  - the value isn't a function (defensive — caller already checks)
@@ -423,7 +446,123 @@ const captureClosureSource = (fn: any): string | undefined => {
     return undefined;
   }
   if (body.length > 32 * 1024) return undefined;
-  return `(${body})(globalThis.__nerv_tokens, () => Promise.resolve(""))`;
+  const ctx =
+    "{ tokens: globalThis.__nerv_tokens, " +
+    "executeShellCommand: globalThis.executeShellCommand, " +
+    "executeCommand: globalThis.executeCommand, " +
+    "environmentVariables: globalThis.environmentVariables, " +
+    "currentWorkingDirectory: (globalThis.process.env.PWD || '.'), " +
+    "currentProcess: '', sshPrefix: '', searchTerm: '' }";
+  // Prepend the closure's module-level helper scope (see CURRENT_PRELUDE)
+  // so references like `customGenerator(...)` / `separator` resolve inside
+  // the sandbox. Emitted as one eval unit: the prelude's top-level consts
+  // are in scope for the IIFE that follows.
+  const call = `(${body})(globalThis.__nerv_tokens, globalThis.executeShellCommand, ${ctx})`;
+  return withPreludes(call);
+};
+
+// Prepend the shared + module-local helper scopes to an eval expression
+// so the closure's free identifiers (`customGenerator`, `keyValue`,
+// `postProcessFiles`, …) resolve in the sandbox. Shared by the `custom`
+// capture and the synthesized function-form `script` capture below.
+const withPreludes = (inner: string): string => {
+  const modScope = CURRENT_PRELUDE ? CURRENT_PRELUDE + "\n" : "";
+  return FIG_GENERATORS_PRELUDE + "\n" + modScope + inner;
+};
+
+// Synthesize a Tier C `custom` source from a function-form `script`
+// generator (`script: (tokens) => [...cmd]`, optional
+// `postProcess: (out, tokens) => Suggestion[]`). The converter can't
+// serialise the script to a static array, but the sandbox can run it:
+// call `script(tokens)` for the command, exec it, then hand stdout to
+// `postProcess`. Covers aws s3, ssh, and other dynamic-command
+// generators. Returns undefined when the script isn't stringifiable.
+const synthesizeScriptSource = (
+  scriptFn: any,
+  postProcessFn: any
+): string | undefined => {
+  let scriptSrc: string;
+  try {
+    scriptSrc = scriptFn.toString();
+  } catch {
+    return undefined;
+  }
+  if (scriptSrc.length > 32 * 1024) return undefined;
+  let postSrc = "null";
+  if (typeof postProcessFn === "function") {
+    try {
+      const s = postProcessFn.toString();
+      if (s.length <= 32 * 1024) postSrc = s;
+    } catch {
+      /* keep null */
+    }
+  }
+  const body = `(async (tokens, exec) => {
+  const __cmd = (${scriptSrc})(tokens);
+  if (!__cmd || (Array.isArray(__cmd) && __cmd.length === 0)) return [];
+  // Propagate aws global flags the user already typed (left of the
+  // cursor) into the generated command — the vendor closures build a
+  // bare \`aws <svc> <verb>\` and ignore --profile/--region, so a spec
+  // that needs a non-default profile would otherwise AccessDenied.
+  if (Array.isArray(__cmd) && __cmd[0] === "aws") {
+    for (const __f of ["--profile", "--region", "--endpoint-url"]) {
+      const __i = tokens.lastIndexOf(__f);
+      if (__i >= 0 && tokens[__i + 1] && !__cmd.includes(__f)) {
+        __cmd.splice(1, 0, __f, tokens[__i + 1]);
+      }
+    }
+  }
+  const __r = typeof __cmd === "string"
+    ? await exec(__cmd)
+    : await exec({ command: __cmd[0], args: __cmd.slice(1) });
+  const __out = typeof __r === "string" ? __r : (__r && __r.stdout) || "";
+  const __pp = ${postSrc};
+  return typeof __pp === "function"
+    ? __pp(__out, tokens)
+    : String(__out).split("\\n").filter(Boolean);
+})(globalThis.__nerv_tokens, globalThis.executeShellCommand)`;
+  return withPreludes(body);
+};
+
+// Module-level helper scope for the file currently being converted, as
+// runnable JS. Set by loadOneAt (save/restore, mirroring AWS_SERVICE_HINT)
+// so captureClosureSource can prepend it without threading a parameter
+// through the whole conversion chain. Fig spec closures routinely call
+// top-level helpers (`customGenerator`, `separator`, `getSuggestions`, …)
+// declared in their `.ts` module; capturing just the closure body loses
+// them, which was the dominant Tier C failure mode.
+let CURRENT_PRELUDE: string = "";
+
+/// Extract a `.ts` spec module's top-level helper declarations (everything
+/// before the `completionSpec` / default export) and transpile to JS. The
+/// big spec object itself is dropped — only the helpers the closures reach
+/// for are kept. `import` lines are stripped (unresolvable in the sandbox;
+/// helpers that depend on them stay broken, a smaller residual class).
+/// Capped so a pathological module can't bloat every closure it owns.
+const captureModulePrelude = (source: string): string => {
+  const markers = ["\nconst completionSpec", "\nexport default", "\nexport const completionSpec"];
+  let cut = source.length;
+  for (const m of markers) {
+    const i = source.indexOf(m);
+    if (i >= 0 && i < cut) cut = i;
+  }
+  let head = source.slice(0, cut);
+  // Strip module syntax QuickJS's script-mode eval rejects: `import …`
+  // lines (unresolvable) and the `export` keyword on top-level helpers
+  // (`export const foo` → `const foo`; bare `export { … }` re-exports
+  // dropped). The helpers stay as plain declarations in the eval scope.
+  head = head.replace(/^\s*import\s.*$/gm, "");
+  head = head.replace(/^\s*export\s+\{[^}]*\}\s*;?\s*$/gm, "");
+  head = head.replace(/^(\s*)export\s+(?=(default\s+)?(const|let|var|function|async|class)\b)/gm, "$1");
+  if (head.trim().length === 0) return "";
+  try {
+    const js = new Bun.Transpiler({ loader: "ts" }).transformSync(head);
+    // Belt-and-suspenders: the transpiler can re-introduce `export`.
+    const clean = js.replace(/^(\s*)export\s+/gm, "$1");
+    return clean.length > 24 * 1024 ? "" : clean;
+  } catch {
+    return "";
+  }
 };
 
 const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
@@ -677,8 +816,15 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
       scriptArr = splitShellCommand(g.script);
     }
     if (scriptArr.length === 0) {
-      // Couldn't recover a runnable command — surface as Tier C
-      // marker so `nerv spec list` can show it without dropping.
+      // Function-form script we couldn't reduce to a static command.
+      // Synthesize a Tier C custom source that runs script(tokens) →
+      // exec → postProcess(out) in the sandbox (covers aws s3 / ssh /
+      // other dynamic-command generators). Falls back to the inert
+      // marker only when the script isn't stringifiable.
+      if (typeof g.script === "function") {
+        const source = synthesizeScriptSource(g.script, g.postProcess);
+        if (source) return { type: "custom", description_hint: null, source };
+      }
       return {
         type: "script",
         script: [],
@@ -1083,12 +1229,22 @@ const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
   // an extra arg through the whole conversion chain.
   const prev = AWS_SERVICE_HINT;
   AWS_SERVICE_HINT = file.includes("/aws/") ? stem : null;
+  // Capture this module's top-level helper scope for Tier C closures.
+  // Save/restore around the (possibly nested loadSpec) conversion so a
+  // child file's helpers don't leak into the parent's closures.
+  const prevPrelude = CURRENT_PRELUDE;
+  try {
+    CURRENT_PRELUDE = captureModulePrelude(await Bun.file(file).text());
+  } catch {
+    CURRENT_PRELUDE = "";
+  }
   try {
     const spec = await convertSpec(exported as FigSpec, ctx, stem);
     if (K8S_NAMESPACE_SPEC_STEMS.has(stem)) enrichK8sNamespaces(spec);
     return spec;
   } finally {
     AWS_SERVICE_HINT = prev;
+    CURRENT_PRELUDE = prevPrelude;
   }
 };
 

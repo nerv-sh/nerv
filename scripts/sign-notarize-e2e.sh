@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# M0-8: Developer ID sign + notarize pre-validation e2e (PLAN §10 M0-8).
+# OPT-IN Developer ID sign + notarize scaffold (PLAN §10 M0-8).
 #
-# Builds a bare `fn main(){}` binary, signs it with the Developer ID
-# Application certificate (hardened runtime + secure timestamp), submits
-# it to Apple notary service, and verifies the result — proving the
-# whole release-signing pipeline works before wiring it into release.yml.
+# NOT a release blocker. v1.0 ships via Homebrew, which doesn't attach the
+# com.apple.quarantine xattr, so Gatekeeper never prompts and the ad-hoc
+# signature Rust/linker already applies is enough to run on arm64
+# (M0-8 policy, dropped notarization 2026-07-04). This script exists for
+# the future case of adding *direct-tarball* distribution: it builds a
+# bare `fn main(){}` binary, signs it with the Developer ID Application
+# certificate (hardened runtime + secure timestamp), submits it to Apple
+# notary service, and verifies the result — proving the release-signing
+# pipeline before wiring it into release.yml. Requires a paid Apple
+# Developer account (see credentials below).
 #
 # Usage:
 #   ./scripts/sign-notarize-e2e.sh                 # sign + notarize + assess

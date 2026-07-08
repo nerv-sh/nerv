@@ -402,6 +402,20 @@ pub fn complete_in(
     mode: MatchMode,
 ) -> CompleteResult {
     let cursor = clamp_cursor_to_char_boundary(line, cursor);
+
+    // Inside an unterminated quote the user is typing a free-text string
+    // literal — a commit message, an `echo` argument, a `--foo="…` value.
+    // There is nothing to complete, and the naive whitespace tokenizer
+    // would split the quoted body into fake positional tokens (e.g.
+    // `git commit -m "feat: update web` → a bogus `<pathspec>` arg that
+    // surfaces filenames). Suppress, matching Fig/q.
+    if cursor_in_open_quote(&line[..cursor]) {
+        return CompleteResult {
+            items: vec![],
+            reason: Some("inside quoted string".into()),
+        };
+    }
+
     let tokens = tokenize(&line[..cursor]);
 
     if tokens.is_empty() {
@@ -520,6 +534,47 @@ pub fn complete_in(
     }
 }
 
+/// True when the cursor (end of `text`) sits inside an unterminated
+/// single or double quote. Mirrors POSIX shell quoting: single quotes
+/// take no escapes, double quotes honor `\`, and a backslash outside any
+/// quote escapes the next byte. `$'…'` is treated as a plain double-open
+/// for this purpose (we only care whether a completion should fire).
+fn cursor_in_open_quote(text: &str) -> bool {
+    #[derive(PartialEq)]
+    enum Q {
+        None,
+        Single,
+        Double,
+    }
+    let mut state = Q::None;
+    let mut bytes = text.bytes();
+    while let Some(b) = bytes.next() {
+        match state {
+            Q::None => match b {
+                b'\'' => state = Q::Single,
+                b'"' => state = Q::Double,
+                b'\\' => {
+                    bytes.next();
+                }
+                _ => {}
+            },
+            Q::Single => {
+                if b == b'\'' {
+                    state = Q::None;
+                }
+            }
+            Q::Double => match b {
+                b'"' => state = Q::None,
+                b'\\' => {
+                    bytes.next();
+                }
+                _ => {}
+            },
+        }
+    }
+    state != Q::None
+}
+
 fn tokenize(text: &str) -> Vec<Annotation> {
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -588,19 +643,36 @@ fn matches_filter(name: &str, query: &str, strategy: Option<&str>, mode: MatchMo
     if let Some("substring") = strategy {
         return name.contains(query);
     }
-    match mode {
-        MatchMode::Fuzzy => fuzzy_subsequence_match(name, query),
-        MatchMode::Prefix => name.starts_with(query),
-    }
+    mode_match(name, query, mode)
 }
 
 /// Mode-aware name gate for subcommand / option / generator outputs
 /// that don't carry a `filterStrategy` of their own.
 fn matches_name(name: &str, prefix: &str, mode: MatchMode) -> bool {
+    mode_match(name, prefix, mode)
+}
+
+/// The shared Prefix/Fuzzy decision. Under `Fuzzy`, subsequence matching
+/// only kicks in for queries of **3+ chars**: a 1–2 char subsequence
+/// (`l`, `ps`) matches almost everything and buries the real hit, so
+/// short queries stay prefix. `.` / `..` are literal path tokens (never
+/// abbreviations) and always stay prefix too. (Zoxide keeps its own
+/// fuzzy-by-design path — this gate does not touch `z`.)
+fn mode_match(name: &str, query: &str, mode: MatchMode) -> bool {
     match mode {
-        MatchMode::Fuzzy => fuzzy_subsequence_match(name, prefix),
-        MatchMode::Prefix => name.starts_with(prefix),
+        MatchMode::Fuzzy if !is_dot_literal(query) && query.chars().count() >= 3 => {
+            fuzzy_subsequence_match(name, query)
+        }
+        _ => name.starts_with(query),
     }
+}
+
+/// `.` / `..` are literal path tokens (this dir / parent), never
+/// abbreviations. Under fuzzy a bare `.` would subsequence-match every
+/// path containing a dot (`git add .` → every `*.tsx`), so a dots-only
+/// query always falls back to prefix semantics.
+fn is_dot_literal(query: &str) -> bool {
+    !query.is_empty() && query.chars().all(|c| c == '.')
 }
 
 /// Case-insensitive subsequence match — every char of `query` appears
@@ -720,7 +792,9 @@ fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
 fn arg_hint(args: &[crate::spec_parser::Arg]) -> String {
     let mut parts: Vec<String> = Vec::new();
     for a in args {
-        let Some(name) = a.name.as_deref() else { continue };
+        let Some(name) = a.name.as_deref() else {
+            continue;
+        };
         if name.is_empty() {
             continue;
         }
@@ -974,12 +1048,20 @@ fn emit_candidates_for_arg(
                                 .into_iter()
                                 .map(|line| split_id_label(&line))
                                 .filter(|(ins, _)| matches_name(ins, prefix, mode))
-                                .map(|(insertion, display)| Suggestion {
+                                .enumerate()
+                                .map(|(idx, (insertion, display))| Suggestion {
                                     insertion,
                                     display,
                                     description: None,
                                     kind: SuggestionKind::Argument,
-                                    priority: None,
+                                    // Preserve the command's own output order
+                                    // (`aws configure list-profiles` leads with
+                                    // `default`; `git branch` by checkout order)
+                                    // instead of re-alphabetising it. A distinct
+                                    // descending priority defeats the alpha tie-
+                                    // break in sort_by_priority_then_alpha, and
+                                    // frecency still floats repeat picks on top.
+                                    priority: Some(1_000u32.saturating_sub(idx as u32)),
                                     icon: None,
                                 }),
                         );
@@ -1216,13 +1298,26 @@ fn emit_candidates_for_arg(
                     // the dispatcher just falls through to the next
                     // generator or the smart fallback.
                     let token_strs: Vec<String> = tokens.iter().map(|a| a.text.clone()).collect();
-                    if let Some(cands) = crate::tier_c::execute_custom_source(source, &token_strs) {
+                    if let Some(cands) =
+                        crate::tier_c::execute_custom_source(source, &token_strs, cwd)
+                    {
+                        // Path / URL-style generators (aws `s3://…`, file
+                        // paths) return candidates for the segment AFTER the
+                        // last separator — the closure already accounts for
+                        // the leading path. Match and insert against that
+                        // tail so the token's prefix (`s3://`, `dir/`) is
+                        // preserved instead of replaced. No separator → the
+                        // whole token is the query (unchanged behaviour).
+                        let (base, query) = match prefix.rfind('/') {
+                            Some(i) => (&prefix[..=i], &prefix[i + 1..]),
+                            None => ("", prefix),
+                        };
                         out.extend(
                             cands
                                 .into_iter()
-                                .filter(|s| matches_name(s, prefix, mode))
+                                .filter(|s| matches_name(s, query, mode))
                                 .map(|s| Suggestion {
-                                    insertion: s.clone(),
+                                    insertion: format!("{base}{s}"),
                                     display: s,
                                     description: None,
                                     kind: SuggestionKind::Argument,
@@ -1243,11 +1338,19 @@ fn emit_candidates_for_arg(
                         // sort_by_priority_then_alpha preserves it
                         // instead of re-alphabetising (which buried the
                         // literal `encl` match under `app`/`apps`).
-                        for (rank, (name, path, score)) in
-                            rank_zoxide_matches(rows, prefix).into_iter().enumerate()
+                        //
+                        // Insert the FULL PATH, not the folder name:
+                        // accepting `zeph` and running `z zeph` re-runs
+                        // zoxide's own fuzzy match, which may land on a
+                        // higher-scored sibling (`zeph-to`) instead of the
+                        // dir the user picked. `z <absolute-existing-dir>`
+                        // cd's there exactly. Display stays the short name.
+                        for (rank, (name, path, score)) in rank_zoxide_matches(rows, prefix, mode)
+                            .into_iter()
+                            .enumerate()
                         {
                             out.push(Suggestion {
-                                insertion: name.clone(),
+                                insertion: shell_quote_arg(&path),
                                 display: name,
                                 description: Some(format!("{path} (score {score:.1})")),
                                 kind: SuggestionKind::Argument,
@@ -1424,7 +1527,10 @@ const GENERATOR_TIMEOUT_MS: u64 = 800;
 /// `buf_cap` sets the initial Vec capacity; pick the rough expected
 /// payload size to avoid reallocs (8 KB for line-shaped Fig
 /// generators, 64 KB for blob payloads like `cargo metadata`).
-fn spawn_with_timeout(mut child: std::process::Child, buf_cap: usize) -> Option<Vec<u8>> {
+pub(crate) fn spawn_with_timeout(
+    mut child: std::process::Child,
+    buf_cap: usize,
+) -> Option<Vec<u8>> {
     use std::io::Read;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1518,10 +1624,13 @@ fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<V
             return extract_json_candidates(&text);
         }
     }
+    // Dedupe while preserving order: `git remote -v` yields each remote
+    // twice (fetch + push) → one `origin` after the first-column extract.
+    let mut seen = std::collections::HashSet::new();
     let lines: Vec<String> = text
         .lines()
         .map(sanitize_generator_line)
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && seen.insert(s.clone()))
         .collect();
     Some(lines)
 }
@@ -2047,6 +2156,21 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
 // Well-known generator: zoxide directory history (z, zoxide)
 // ---------------------------------------------------------------------------
 
+/// Shell-quote a path for insertion when it holds characters the shell
+/// would split or interpret. A plain path (ASCII alnum + a small safe
+/// set) inserts raw; anything else is single-quoted with embedded single
+/// quotes escaped, so `z /My Docs/x` becomes `z '/My Docs/x'`.
+fn shell_quote_arg(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-~+=:@,".contains(c));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
 /// Rank zoxide rows against the typed query. `rows` arrive score-desc
 /// (frecency). Groups, in order of intent: folder-name prefix hits, then
 /// folder-name substring hits, then path-only hits (the name doesn't
@@ -2057,15 +2181,20 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
 fn rank_zoxide_matches(
     rows: Vec<(String, String, f64)>,
     query: &str,
+    mode: MatchMode,
 ) -> Vec<(String, String, f64)> {
     let needle = query.to_lowercase();
-    let (mut name_prefix, mut name_substr, mut path_only) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let (mut name_prefix, mut name_substr, mut path_only) = (Vec::new(), Vec::new(), Vec::new());
     for row in rows {
         let name_lc = row.0.to_lowercase();
+        // Name bucket 2: substring always, plus subsequence when the
+        // user opted into fuzzy — so `z mz` finds `muzly` by abbreviation
+        // while name hits still rank ahead of path-only ones.
+        let name_secondary = name_lc.contains(&needle)
+            || (mode == MatchMode::Fuzzy && fuzzy_subsequence_match(&name_lc, &needle));
         if needle.is_empty() || name_lc.starts_with(&needle) {
             name_prefix.push(row);
-        } else if name_lc.contains(&needle) {
+        } else if name_secondary {
             name_substr.push(row);
         } else if row.1.to_lowercase().contains(&needle) {
             path_only.push(row);
@@ -2621,6 +2750,13 @@ fn find_package_json(start: &std::path::Path) -> Option<std::path::PathBuf> {
 /// belongs in a JS post-process hook (Tier C, deferred).
 fn sanitize_generator_line(raw: &str) -> String {
     let mut s = strip_ansi(raw);
+    // A tab means a multi-column row — `git remote -v` emits
+    // `origin\t<url> (fetch)`. The first column is the completion value;
+    // keep only it. (A raw tab would also corrupt the tab-separated wire
+    // format and tear the popup box.)
+    if let Some((first, _)) = s.split_once('\t') {
+        s = first.to_string();
+    }
     s = s.trim().to_string();
     if let Some(rest) = s.strip_prefix("* ") {
         s = rest.trim_start().to_string();
@@ -2629,13 +2765,33 @@ fn sanitize_generator_line(raw: &str) -> String {
     }
     // git refnames never start with `(`, so a `(`-leading line is one of
     // git's parenthesised pseudo-branches (detached HEAD, rebase state).
+    // ` -> ` also covers `git status --short` renames (`R old -> new`),
+    // which have no single clean insertion.
     if s.starts_with('(') || s.contains(" -> ") {
         return String::new();
     }
+    // `git add` runs `git status --short`, emitting `XY path` where XY is
+    // a 1–2 char status code (`M`, `??`, `MM`, …). Keep only the path so
+    // the insertion is `apps/x`, not `M apps/x` (which `git add` rejects).
+    s = strip_git_status_marker(s);
     if let Some(rest) = s.strip_prefix("remotes/") {
         s = rest.to_string();
     }
     s
+}
+
+/// Strip a leading `git status --short` status code (`XY `) so the file
+/// path alone is the completion value. A status code is 1–2 chars, all
+/// from git's porcelain alphabet, followed by a space and a non-empty
+/// path. Anything else (branch names, single tokens) is returned as-is.
+fn strip_git_status_marker(s: String) -> String {
+    let mut it = s.splitn(2, ' ');
+    let code = it.next().unwrap_or("");
+    let rest = it.next().unwrap_or("").trim_start();
+    let is_status = (1..=2).contains(&code.len())
+        && code.chars().all(|c| "MADRCU?!".contains(c))
+        && !rest.is_empty();
+    if is_status { rest.to_string() } else { s }
 }
 
 /// Remove ANSI CSI escape sequences (`\x1b[...m` etc.) without
@@ -2778,7 +2934,7 @@ mod tests {
             ("encl".to_string(), "/w/encl".to_string(), 80.0),
             ("ios".to_string(), "/w/encl/ios".to_string(), 70.0),
         ];
-        let names: Vec<_> = rank_zoxide_matches(rows, "enc")
+        let names: Vec<_> = rank_zoxide_matches(rows, "enc", MatchMode::Prefix)
             .into_iter()
             .map(|r| r.0)
             .collect();
@@ -2788,12 +2944,85 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_generator_line_keeps_first_tab_column() {
+        // `git remote -v` → `origin\t<url> (fetch)`: keep only `origin`,
+        // never the tab (which would tear the tab-separated wire format).
+        assert_eq!(
+            sanitize_generator_line("origin\tgit@github.com:x/y.git (fetch)"),
+            "origin"
+        );
+        assert_eq!(sanitize_generator_line("plain-branch"), "plain-branch");
+        assert_eq!(sanitize_generator_line("* current"), "current");
+    }
+
+    #[test]
+    fn sanitize_strips_git_status_short_marker() {
+        // `git add` file generator (`git status --short`): keep the path.
+        assert_eq!(
+            sanitize_generator_line("M apps/admin/chapter.tsx"),
+            "apps/admin/chapter.tsx"
+        );
+        assert_eq!(sanitize_generator_line("?? new.rs"), "new.rs");
+        assert_eq!(
+            sanitize_generator_line("MM staged-then-edited"),
+            "staged-then-edited"
+        );
+        // Renames have no single insertion → dropped.
+        assert_eq!(sanitize_generator_line("R old.txt -> new.txt"), "");
+        // Not a status line: real single tokens survive untouched.
+        assert_eq!(sanitize_generator_line("main"), "main");
+        assert_eq!(sanitize_generator_line("Makefile"), "Makefile");
+    }
+
+    #[test]
+    fn dot_literal_query_never_fuzzy_explodes() {
+        // `git add .` must not subsequence-match every dotted path.
+        assert!(!matches_name("apps/chapter.tsx", ".", MatchMode::Fuzzy));
+        assert!(matches_name(".gitignore", ".", MatchMode::Fuzzy));
+        assert!(matches_name("..", "..", MatchMode::Fuzzy));
+        // Non-dots query still fuzzy-matches under Fuzzy.
+        assert!(matches_name("chapter.tsx", "ch", MatchMode::Fuzzy));
+    }
+
+    #[test]
+    fn shell_quote_arg_quotes_only_when_needed() {
+        assert_eq!(
+            shell_quote_arg("/Users/tak/zeph-to/zeph"),
+            "/Users/tak/zeph-to/zeph"
+        );
+        assert_eq!(shell_quote_arg("/tmp/a.b_c"), "/tmp/a.b_c");
+        assert_eq!(shell_quote_arg("/My Docs/x"), "'/My Docs/x'");
+        assert_eq!(shell_quote_arg("/a'b"), r"'/a'\''b'");
+    }
+
+    #[test]
+    fn zoxide_fuzzy_mode_matches_name_by_subsequence() {
+        // `z mz` under fuzzy finds `muzly` (m·u·z) by abbreviation, ranked
+        // ahead of a path-only hit. Prefix mode ignores the subsequence.
+        let rows = vec![
+            ("muzly".to_string(), "/w/muzly".to_string(), 50.0),
+            ("plugin".to_string(), "/w/mz-cache/plugin".to_string(), 40.0),
+        ];
+        let fuzzy: Vec<_> = rank_zoxide_matches(rows.clone(), "mz", MatchMode::Fuzzy)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(fuzzy, ["muzly", "plugin"]);
+        // Prefix mode: `muzly` has no `mz` substring → only the path hit.
+        let prefix: Vec<_> = rank_zoxide_matches(rows, "mz", MatchMode::Prefix)
+            .into_iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(prefix, ["plugin"]);
+    }
+
+    #[test]
     fn zoxide_empty_query_preserves_frecency_order() {
         let rows = vec![
             ("b".to_string(), "/b".to_string(), 30.0),
             ("a".to_string(), "/a".to_string(), 20.0),
         ];
-        let names: Vec<_> = rank_zoxide_matches(rows, "")
+        let names: Vec<_> = rank_zoxide_matches(rows, "", MatchMode::Prefix)
             .into_iter()
             .map(|r| r.0)
             .collect();
@@ -2821,7 +3050,13 @@ mod tests {
         assert_eq!(arg_hint(&[mk("arg", true, true)]), "[arg...]");
         // no named args → empty; unnamed args skipped.
         assert_eq!(arg_hint(&[]), "");
-        assert_eq!(arg_hint(&[Arg { name: None, ..Default::default() }]), "");
+        assert_eq!(
+            arg_hint(&[Arg {
+                name: None,
+                ..Default::default()
+            }]),
+            ""
+        );
     }
 
     #[test]
@@ -2912,6 +3147,28 @@ mod tests {
         let r = complete("x ", 2, &registry_with(spec));
         let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(names, ["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn template_generator_preserves_source_order_not_alpha() {
+        // `aws configure list-profiles` leads with `default`; re-alpha-
+        // sorting would bury it. Template output keeps the command's own
+        // order (here `zebra` before `apple`), never alphabetical.
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("opt".into()),
+                generators: vec![Generator::Template {
+                    script: vec!["/usr/bin/printf".into(), "zebra\napple\nmango\n".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = complete("x ", 2, &registry_with(spec));
+        let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(names, ["zebra", "apple", "mango"]);
     }
 
     /// `cargo run -p <Tab>` regression: a `ScriptWithJsonPath` generator
@@ -3338,6 +3595,24 @@ mod tests {
         assert_eq!(toks[1].text, "status");
     }
 
+    #[test]
+    fn cursor_in_open_quote_detects_state() {
+        // Open double quote — cursor inside a commit message.
+        assert!(cursor_in_open_quote(r#"git commit -m "feat: update web"#));
+        // Closed again — back outside.
+        assert!(!cursor_in_open_quote(r#"git commit -m "feat: done""#));
+        // Open single quote.
+        assert!(cursor_in_open_quote("echo 'hello wor"));
+        // No quotes at all.
+        assert!(!cursor_in_open_quote("git checkout ma"));
+        // Escaped quote outside stays outside.
+        assert!(!cursor_in_open_quote(r#"echo \""#));
+        // Escaped quote inside a double string doesn't close it.
+        assert!(cursor_in_open_quote(r#"echo "a\"b"#));
+        // Single quotes take no escapes — the \ is literal, ' still closes.
+        assert!(!cursor_in_open_quote(r#"echo 'a\'"#));
+    }
+
     // Both env-mutating tests below share HOME/HISTFILE in the same
     // process. Serialize them so parallel runs don't race.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -3705,10 +3980,18 @@ mod tests {
         assert_eq!(fuzzy.len(), 1);
         assert_eq!(fuzzy[0].display, "commit");
 
-        // Fuzzy mode: "ck" matches checkout but NOT commit / config.
-        let fuzzy_ck = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
-        assert_eq!(fuzzy_ck.len(), 1);
-        assert_eq!(fuzzy_ck[0].display, "checkout");
+        // Fuzzy mode (3+ chars): "chk" matches checkout but NOT commit/config.
+        let fuzzy_chk = emit_subcommands(&node, "chk", MatchMode::Fuzzy);
+        assert_eq!(fuzzy_chk.len(), 1);
+        assert_eq!(fuzzy_chk[0].display, "checkout");
+
+        // Short (1–2 char) fuzzy queries stay PREFIX — `ck` no longer
+        // subsequence-matches checkout (would bury the real hit).
+        let short = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
+        assert!(
+            short.is_empty(),
+            "2-char fuzzy must be prefix, got {short:?}"
+        );
     }
 
     #[test]
@@ -3725,8 +4008,8 @@ mod tests {
         // Prefix "co" hits the alias.
         let prefix = emit_subcommands(&node, "co", MatchMode::Prefix);
         assert_eq!(prefix.len(), 1);
-        // Fuzzy "ck" hits the canonical name (alias is shorter than query).
-        let fuzzy = emit_subcommands(&node, "ck", MatchMode::Fuzzy);
+        // Fuzzy "chk" (3+ chars) hits the canonical name via subsequence.
+        let fuzzy = emit_subcommands(&node, "chk", MatchMode::Fuzzy);
         assert_eq!(fuzzy.len(), 1);
     }
 
@@ -4392,15 +4675,18 @@ mod tests {
         #[test]
         fn closure_sees_tokens_via_global() {
             // Closures that capture the live token list reach it via
-            // `globalThis.__nerv_tokens`. Lower-case each token so the
-            // case-sensitive prefix gate still admits the result.
-            let src = "(tokens => tokens.map(t => t.toLowerCase()))(globalThis.__nerv_tokens)";
+            // `globalThis.__nerv_tokens`. The closure derives a suggestion
+            // from the last token (`gi` → `gi-branch`); the distinct suffix
+            // keeps it clear of the no-op filter (which drops a suggestion
+            // equal to the already-typed prefix).
+            let src =
+                "(tokens => [tokens[tokens.length - 1] + '-branch'])(globalThis.__nerv_tokens)";
             let r = complete("x gi", 4, &registry_with(spec_with_custom(src)));
             let names: Vec<_> = r.items.iter().map(|s| s.display.as_str()).collect();
-            // Tokens are ["x", "gi"]; lower-cased → ["x", "gi"]. The
-            // current-token prefix is "gi" → only "gi" survives the
-            // matches_name (prefix) gate.
-            assert_eq!(names, ["gi"]);
+            // Tokens are ["x", "gi"]; the closure returns ["gi-branch"],
+            // which starts with the prefix "gi" and survives both the
+            // prefix gate and the no-op filter.
+            assert_eq!(names, ["gi-branch"]);
         }
 
         #[test]
