@@ -579,86 +579,172 @@ fn parse_zsh_version(s: &str) -> (u32, u32) {
     (major, minor)
 }
 
-/// Marker block in ~/.zshrc.
+/// Every shell init file `nerv init {zsh,bash,fish}` may write its marker
+/// block into. Single source of truth for both the doctor hook check and the
+/// uninstall strip — they must agree on where a hook can live, or one covers a
+/// shell the other misses. Paths are relative to `$HOME`; fish's is nested.
+const SHELL_INIT_FILES: [&str; 8] = [
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".config/fish/config.fish",
+];
+
+/// Marker block presence across every shell's init files (zsh/bash/fish).
 fn check_shell_hook(r: &mut DoctorReport) {
     let Some(home) = std::env::var_os("HOME") else {
         r.push(DoctorLevel::Err, "shell hook", "HOME unset".into(), None);
         return;
     };
-    let zshrc = std::path::PathBuf::from(home).join(".zshrc");
-    if !zshrc.exists() {
+    let home = std::path::PathBuf::from(home);
+    // A block per file is fine (a dual-shell user installs into each); only
+    // >1 block in the *same* file is the not-idempotent case worth flagging.
+    let mut found: Vec<&str> = Vec::new();
+    let mut dup: Option<(&str, usize)> = None;
+    for name in SHELL_INIT_FILES {
+        let Ok(content) = std::fs::read_to_string(home.join(name)) else {
+            continue;
+        };
+        let count = nerv_shell::count_blocks(&content);
+        if count == 0 {
+            continue;
+        }
+        found.push(name);
+        if count > 1 && dup.is_none() {
+            dup = Some((name, count));
+        }
+    }
+    if let Some((file, n)) = dup {
         r.push(
             DoctorLevel::Warn,
             "shell hook",
-            "~/.zshrc not found".into(),
-            Some("run: nerv init zsh >> ~/.zshrc".into()),
+            format!("{n} marker blocks in ~/{file} (should be 1)"),
+            Some("run: nerv uninstall && nerv init <shell>".into()),
         );
         return;
     }
-    let content = match std::fs::read_to_string(&zshrc) {
-        Ok(c) => c,
-        Err(e) => {
-            r.push(
-                DoctorLevel::Err,
-                "shell hook",
-                format!("read failed: {e}"),
-                None,
-            );
-            return;
-        }
-    };
-    let count = nerv_shell::count_blocks(&content);
-    match count {
-        0 => r.push(
+    if found.is_empty() {
+        r.push(
             DoctorLevel::Warn,
             "shell hook",
-            "no nerv marker block in ~/.zshrc".into(),
-            Some("run: nerv init zsh >> ~/.zshrc".into()),
-        ),
-        1 => r.push(
-            DoctorLevel::Ok,
-            "shell hook",
-            "~/.zshrc marker block 1개 (멱등 OK)".into(),
-            None,
-        ),
-        n => r.push(
-            DoctorLevel::Warn,
-            "shell hook",
-            format!("{n} marker blocks (should be 1)"),
-            Some("run: nerv uninstall && nerv init zsh >> ~/.zshrc".into()),
-        ),
+            "no nerv marker block found".into(),
+            Some("run: nerv init <zsh|bash|fish> >> <rc>".into()),
+        );
+        return;
     }
+    let files = found
+        .iter()
+        .map(|f| format!("~/{f}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    r.push(
+        DoctorLevel::Ok,
+        "shell hook",
+        format!("marker block in {files} (멱등 OK)"),
+        None,
+    );
 }
 
 /// E1: nervd running.
+///
+/// Ground truth is whether the daemon answers on its UDS socket — that is
+/// exactly the E1 trigger the ZLE widget sees (`connect(2)` succeeds + a
+/// `Ping` is answered), per error-states.md §3.1. The PID file is a
+/// secondary artifact: a daemon started outside `nerv start` (or one whose
+/// PID file was cleaned up while it kept serving) is alive without one, so a
+/// PID-file-only check reports a false "not running" and sends the user to
+/// spawn a duplicate. Probe the socket first; use the PID file only for the
+/// diagnostic detail and to distinguish a stale PID from a clean absence.
 fn check_daemon(r: &mut DoctorReport) {
-    let Some(pid_path) = paths::pid_path() else {
-        r.push(DoctorLevel::Err, "daemon", "HOME unset".into(), None);
+    let pid = paths::pid_path().and_then(|p| read_pid(&p));
+    let responds = paths::socket_path()
+        .map(|s| daemon_responds_at(&s))
+        .unwrap_or(false);
+    if responds {
+        let detail = match pid {
+            Some(pid) => format!("nervd running (pid {pid})"),
+            None => "nervd running".into(),
+        };
+        r.push(DoctorLevel::Ok, "daemon", detail, None);
         return;
-    };
-    let Some(pid) = read_pid(&pid_path) else {
-        r.push(
+    }
+    // Socket silent — fall back to the PID file for a precise message.
+    match pid {
+        Some(pid) if process_alive(pid) => r.push(
             DoctorLevel::Err,
             "daemon",
-            "nervd not running".into(),
-            Some("run: nerv start".into()),
-        );
-        return;
-    };
-    if process_alive(pid) {
-        r.push(
-            DoctorLevel::Ok,
-            "daemon",
-            format!("nervd running (pid {pid})"),
-            None,
-        );
-    } else {
-        r.push(
+            format!("nervd process alive (pid {pid}) but socket unresponsive"),
+            Some("run: nerv stop && nerv start".into()),
+        ),
+        Some(pid) => r.push(
             DoctorLevel::Err,
             "daemon",
             format!("stale PID file (pid {pid} not alive)"),
             Some("run: nerv start".into()),
-        );
+        ),
+        None => r.push(
+            DoctorLevel::Err,
+            "daemon",
+            "nervd not running".into(),
+            Some("run: nerv start".into()),
+        ),
+    }
+}
+
+/// Synchronous liveness probe: connect to the daemon's UDS socket at `sock`
+/// and send a `Ping`, returning true iff it answers with a `pong`. Short
+/// timeouts keep `nerv doctor` snappy when the socket file is present but
+/// nothing is listening.
+fn daemon_responds_at(sock: &std::path::Path) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let Ok(mut stream) = UnixStream::connect(sock) else {
+        return false;
+    };
+    let timeout = Some(std::time::Duration::from_millis(500));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    if stream.write_all(b"{\"method\":\"ping\"}\n").is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 128];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => std::str::from_utf8(&buf[..n])
+            .map(|s| s.contains("pong"))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Ask the daemon for its PID over the socket: send a `Ping` and parse the
+/// `pid` out of the `pong` reply. Returns None if nothing answers, the reply
+/// isn't a pong, or it carries no usable pid (an older daemon predating the
+/// `pid` field decodes it as 0 via `#[serde(default)]` — those are stoppable
+/// only through the PID file). Lets `nerv stop` / `uninstall` terminate a live
+/// daemon whose PID file is missing or stale.
+fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(sock).ok()?;
+    let timeout = Some(std::time::Duration::from_millis(500));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    stream.write_all(b"{\"method\":\"ping\"}\n").ok()?;
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&buf[..n]).ok()?;
+    if v.get("kind")?.as_str()? != "pong" {
+        return None;
+    }
+    match v.get("pid")?.as_u64()? {
+        0 => None, // older daemon (serde default) — no usable pid
+        p => Some(p as u32),
     }
 }
 
@@ -717,6 +803,21 @@ fn cmd_start() -> anyhow::Result<()> {
     let pid_path = paths::pid_path().context("HOME unset")?;
     let cache_dir = paths::cache_dir().context("HOME unset")?;
     let log_path = paths::daemon_log_path().context("HOME unset")?;
+
+    // A daemon may already be serving on the socket without a readable PID
+    // file (started outside this path, or the file was removed while it kept
+    // running). Spawning anyway rebinds the socket and orphans the live
+    // daemon, so probe the socket first — it's the real readiness signal
+    // (same as `nerv doctor` / the ZLE widget), independent of the PID file.
+    if let Some(sock) = paths::socket_path() {
+        if daemon_responds_at(&sock) {
+            match read_pid(&pid_path) {
+                Some(pid) => println!("nervd already running (pid {pid})"),
+                None => println!("nervd already running"),
+            }
+            return Ok(());
+        }
+    }
 
     if let Some(pid) = read_pid(&pid_path) {
         if process_alive(pid) {
@@ -777,15 +878,26 @@ fn cmd_stop() -> anyhow::Result<()> {
     use std::time::Duration;
 
     let pid_path = paths::pid_path().context("HOME unset")?;
-    let Some(pid) = read_pid(&pid_path) else {
-        println!("nervd not running");
-        return Ok(());
+    let file_pid = read_pid(&pid_path);
+
+    // Resolve the daemon PID: prefer the PID file, but fall back to asking
+    // the daemon over its socket. A live daemon whose PID file was removed
+    // (or that was started outside `nerv start`) is still stoppable.
+    let pid = match file_pid {
+        Some(pid) if process_alive(pid) => pid,
+        _ => match paths::socket_path().and_then(|s| daemon_pid_via_socket(&s)) {
+            Some(pid) => pid,
+            None => {
+                if file_pid.is_some() {
+                    let _ = fs::remove_file(&pid_path);
+                    println!("nervd not running (stale PID file removed)");
+                } else {
+                    println!("nervd not running");
+                }
+                return Ok(());
+            }
+        },
     };
-    if !process_alive(pid) {
-        let _ = fs::remove_file(&pid_path);
-        println!("nervd not running (stale PID file removed)");
-        return Ok(());
-    }
 
     #[cfg(unix)]
     {
@@ -968,7 +1080,7 @@ fn cmd_uninstall(keep_config: bool, quiet: bool) -> anyhow::Result<()> {
     // Step 3: shell-hook removal (atomic, with timestamped backup)
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let backup_path = match &home {
-        Some(h) => strip_zsh_hooks(h, &mut log)?,
+        Some(h) => strip_shell_hooks(h, &mut log)?,
         None => {
             log.warn("shell hook", "HOME unset");
             None
@@ -1028,14 +1140,23 @@ fn stop_daemon_for_uninstall(log: &mut UninstallLog) -> bool {
         log.warn("daemon", "HOME unset");
         return false;
     };
-    let Some(pid) = read_pid(&pid_path) else {
-        log.ok("daemon", "not running".into());
-        return true;
+    // Prefer the PID file; fall back to the socket so a live daemon with a
+    // missing/stale PID file is still stopped — uninstall must leave zero
+    // trace (uninstall-spec.md §4), and a surviving daemon is a trace.
+    let file_pid = read_pid(&pid_path);
+    let pid = match file_pid {
+        Some(pid) if process_alive(pid) => pid,
+        _ => match paths::socket_path().and_then(|s| daemon_pid_via_socket(&s)) {
+            Some(pid) => pid,
+            None => {
+                match file_pid {
+                    Some(pid) => log.ok("daemon", format!("stale pid {pid} ignored")),
+                    None => log.ok("daemon", "not running".into()),
+                }
+                return true;
+            }
+        },
     };
-    if !process_alive(pid) {
-        log.ok("daemon", format!("stale pid {pid} ignored"));
-        return true;
-    }
 
     #[cfg(unix)]
     {
@@ -1069,17 +1190,20 @@ fn stop_daemon_for_uninstall(log: &mut UninstallLog) -> bool {
 /// Step 3 of uninstall-spec.md: scan zsh init files, strip marker
 /// blocks, write atomically, leave a timestamped backup behind.
 /// Returns the backup path of the first file actually modified.
-fn strip_zsh_hooks(
+fn strip_shell_hooks(
     home: &std::path::Path,
     log: &mut UninstallLog,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
     use std::fs;
 
-    let init_files = [".zshrc", ".zshenv", ".zprofile", ".zlogin"];
     let mut first_backup: Option<std::path::PathBuf> = None;
     let mut total_blocks_removed = 0usize;
 
-    for name in init_files {
+    // Scan every shell's init file — see [`SHELL_INIT_FILES`]. `nerv init
+    // {zsh,bash,fish}` all emit the same marker block, so a leftover bash/fish
+    // hook would run `eval "$(nerv …)"` on shell start after the binary is gone
+    // → command-not-found on every new shell (uninstall-spec §3a / §114).
+    for name in SHELL_INIT_FILES {
         let path = home.join(name);
         if !path.exists() {
             continue;
@@ -1316,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_zsh_hooks_removes_block_and_creates_backup() {
+    fn strip_shell_hooks_removes_block_and_creates_backup() {
         // Isolated HOME so we don't touch the real ~/.zshrc.
         let tmp = std::env::temp_dir().join(format!("nerv-strip-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1328,7 +1452,7 @@ mod tests {
         std::fs::write(&zshrc, &original).unwrap();
 
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap();
         assert!(backup.is_some(), "expected backup PathBuf");
         let backup_path = backup.unwrap();
         assert!(backup_path.exists(), "backup file should exist");
@@ -1348,25 +1472,72 @@ mod tests {
     }
 
     #[test]
-    fn strip_zsh_hooks_no_op_when_no_blocks() {
+    fn strip_shell_hooks_covers_bash_and_fish() {
+        // `nerv init` supports bash + fish; uninstall must strip their marker
+        // blocks too, or the leftover `eval "$(nerv …)"` breaks every new
+        // shell once the binary is gone (uninstall-spec §3a / §114).
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-bf-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join(".config/fish")).unwrap();
+        let bashrc = tmp.join(".bashrc");
+        let fishcfg = tmp.join(".config/fish/config.fish");
+        std::fs::write(
+            &bashrc,
+            format!(
+                "alias ll=ls\n{}",
+                nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "bash")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &fishcfg,
+            format!(
+                "set -gx FOO 1\n{}",
+                nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "fish")
+            ),
+        )
+        .unwrap();
+
+        let mut log = UninstallLog::new(true);
+        strip_shell_hooks(&tmp, &mut log).unwrap();
+
+        let bash_after = std::fs::read_to_string(&bashrc).unwrap();
+        assert_eq!(
+            nerv_shell::count_blocks(&bash_after),
+            0,
+            "bash hook block must be stripped"
+        );
+        assert!(bash_after.contains("alias ll=ls"));
+        let fish_after = std::fs::read_to_string(&fishcfg).unwrap();
+        assert_eq!(
+            nerv_shell::count_blocks(&fish_after),
+            0,
+            "fish hook block must be stripped"
+        );
+        assert!(fish_after.contains("set -gx FOO 1"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn strip_shell_hooks_no_op_when_no_blocks() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-noop-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let zshrc = tmp.join(".zshrc");
         let body = "alias x=ls\n";
         std::fs::write(&zshrc, body).unwrap();
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap();
         assert!(backup.is_none(), "no backup when nothing to strip");
         assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), body);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn strip_zsh_hooks_handles_missing_home_files() {
+    fn strip_shell_hooks_handles_missing_home_files() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-empty-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap();
         assert!(backup.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1448,12 +1619,130 @@ mod tests {
         assert!(!process_alive(probe));
     }
 
-    /// `strip_zsh_hooks` cycles through .zshrc, .zshenv, .zprofile,
+    /// A missing socket file means the daemon is not listening — probe
+    /// returns false without erroring (the common "not started" case).
+    #[cfg(unix)]
+    #[test]
+    fn daemon_responds_at_false_when_no_socket() {
+        let sock =
+            std::path::PathBuf::from(format!("/tmp/nerv-doctor-none-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        assert!(!daemon_responds_at(&sock));
+    }
+
+    /// A live daemon answers a `Ping` with a `pong` — regression for the
+    /// PID-file-only false negative (daemon serving without a PID file).
+    #[cfg(unix)]
+    #[test]
+    fn daemon_responds_at_true_on_pong() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let sock =
+            std::path::PathBuf::from(format!("/tmp/nerv-doctor-pong-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"{\"kind\":\"pong\",\"version\":\"0.1.0\"}\n");
+            }
+        });
+        assert!(daemon_responds_at(&sock));
+        let _ = handle.join();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A socket that accepts but answers with something other than a
+    /// `pong` (e.g. a foreign process) must read as "not the daemon".
+    #[cfg(unix)]
+    #[test]
+    fn daemon_responds_at_false_on_non_pong() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let sock = std::path::PathBuf::from(format!(
+            "/tmp/nerv-doctor-garbage-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"nope\n");
+            }
+        });
+        assert!(!daemon_responds_at(&sock));
+        let _ = handle.join();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A one-shot `pong` server for the `daemon_pid_via_socket` tests:
+    /// accepts one connection, ignores the request, replies with `reply`.
+    #[cfg(unix)]
+    fn pong_server(tag: &str, reply: &'static str) -> std::path::PathBuf {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let sock = std::path::PathBuf::from(format!(
+            "/tmp/nerv-pidsock-{tag}-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        sock
+    }
+
+    /// `daemon_pid_via_socket` extracts the daemon PID from a `pong` so
+    /// `nerv stop` / `uninstall` can signal a daemon with no PID file.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_pid_via_socket_extracts_pid() {
+        let sock = pong_server(
+            "pid",
+            "{\"kind\":\"pong\",\"version\":\"0.1.0\",\"pid\":4242}\n",
+        );
+        assert_eq!(daemon_pid_via_socket(&sock), Some(4242));
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A pong from an older daemon (no `pid`, decoded as 0) or with an
+    /// explicit 0 yields None — not a usable target to signal.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_pid_via_socket_none_without_usable_pid() {
+        let no_pid = pong_server("nopid", "{\"kind\":\"pong\",\"version\":\"0.1.0\"}\n");
+        assert_eq!(daemon_pid_via_socket(&no_pid), None);
+        let _ = std::fs::remove_file(&no_pid);
+
+        let zero = pong_server(
+            "zero",
+            "{\"kind\":\"pong\",\"version\":\"0.1.0\",\"pid\":0}\n",
+        );
+        assert_eq!(daemon_pid_via_socket(&zero), None);
+        let _ = std::fs::remove_file(&zero);
+
+        let missing = std::path::PathBuf::from(format!(
+            "/tmp/nerv-pidsock-missing-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(daemon_pid_via_socket(&missing), None);
+    }
+
+    /// `strip_shell_hooks` cycles through .zshrc, .zshenv, .zprofile,
     /// .zlogin in that order and reports the first backup path. When
     /// only .zshenv has a marker block, the backup path returned must
     /// point at .zshenv.
     #[test]
-    fn strip_zsh_hooks_first_backup_picks_first_modified_file() {
+    fn strip_shell_hooks_first_backup_picks_first_modified_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-first-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let plain_rc = "alias ll=ls\n";
@@ -1464,7 +1753,7 @@ mod tests {
         );
         std::fs::write(tmp.join(".zshenv"), &env_with_block).unwrap();
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap().expect("backup");
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap().expect("backup");
         assert!(
             backup
                 .file_name()
@@ -1485,14 +1774,14 @@ mod tests {
     /// stripped + counted. Catches a regression where the
     /// total_blocks_removed counter would only see the first match.
     #[test]
-    fn strip_zsh_hooks_counts_multiple_blocks_per_file() {
+    fn strip_shell_hooks_counts_multiple_blocks_per_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-multi-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh");
         let zshrc = format!("alias a=1\n{blk}alias b=2\n{blk}alias c=3\n");
         std::fs::write(tmp.join(".zshrc"), &zshrc).unwrap();
         let mut log = UninstallLog::new(true);
-        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let _ = strip_shell_hooks(&tmp, &mut log).unwrap();
         let after = std::fs::read_to_string(tmp.join(".zshrc")).unwrap();
         assert_eq!(nerv_shell::count_blocks(&after), 0);
         assert!(after.contains("alias a=1"));
@@ -1505,7 +1794,7 @@ mod tests {
     /// over the original. Confirm no `.nerv-tmp` leftover is left
     /// behind on the happy path.
     #[test]
-    fn strip_zsh_hooks_cleans_up_temp_file() {
+    fn strip_shell_hooks_cleans_up_temp_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-tmp-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let body = format!(
@@ -1514,7 +1803,7 @@ mod tests {
         );
         std::fs::write(tmp.join(".zshrc"), &body).unwrap();
         let mut log = UninstallLog::new(true);
-        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let _ = strip_shell_hooks(&tmp, &mut log).unwrap();
         let leftover = tmp.join(".nerv-tmp");
         assert!(
             !leftover.exists(),

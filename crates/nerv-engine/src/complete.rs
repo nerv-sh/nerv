@@ -20,6 +20,7 @@ use crate::spec_parser::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Lazy spec set, keyed by binary name.
@@ -34,9 +35,22 @@ use std::sync::{Arc, RwLock};
 /// reinstalled / regenerated the spec), the cache entry is dropped
 /// and the spec is re-read. Adds ~1µs per lookup on top of the
 /// HashMap hit (cheap compared to even the fastest UDS roundtrip).
+/// Max positive (spec-bearing) entries the lazy lookup cache keeps resident.
+/// A big cloud spec parses large (aws → ~290MB RSS) and reloads slowly
+/// (~220ms), so this bound is generous: actively-used specs stay warm (every
+/// lookup re-bumps their LRU order), and eviction only fires once more than
+/// this many *distinct* specs are in play — freeing the least-recently-used
+/// so an always-on daemon doesn't grow without limit. Negative entries are
+/// byte-free and don't count. Only the lazy `lookup` / `insert` paths evict;
+/// the eager `load_dir` scan (doctor, short-lived) is exempt.
+const SPEC_CACHE_CAP: usize = 16;
+
 pub struct SpecRegistry {
     dir: Option<PathBuf>,
     cache: RwLock<HashMap<String, CacheEntry>>,
+    /// Monotonic counter stamped onto `CacheEntry.tick` at each access; the
+    /// basis for LRU eviction order.
+    next_tick: AtomicU64,
     /// Spec stems (binary names) marked dirty by the FS watcher. Drained
     /// at lookup-time so any cached entry gets re-read from disk on the
     /// very next call. `None` when no watcher is active (e.g. empty
@@ -62,13 +76,14 @@ impl Default for SpecRegistry {
         Self {
             dir: None,
             cache: RwLock::new(HashMap::new()),
+            next_tick: AtomicU64::new(0),
             pending_invalidations: None,
             _watcher: None,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CacheEntry {
     /// Last-known mtime of the on-disk file. `None` = negative
     /// cache entry (file didn't exist last time we looked).
@@ -76,6 +91,9 @@ struct CacheEntry {
     /// `None` for negative entries OR parse failures (don't keep
     /// retrying a broken file every keystroke).
     spec: Option<Arc<Spec>>,
+    /// Registry tick at last access, for LRU eviction. Bumped on every
+    /// cache hit — atomic so it mutates under the shared read lock.
+    tick: AtomicU64,
 }
 
 impl SpecRegistry {
@@ -97,6 +115,7 @@ impl SpecRegistry {
         Self {
             dir: Some(dir.to_path_buf()),
             cache: RwLock::new(HashMap::new()),
+            next_tick: AtomicU64::new(0),
             pending_invalidations: Some(pending),
             _watcher: watcher,
         }
@@ -137,13 +156,17 @@ impl SpecRegistry {
                     } else {
                         continue;
                     };
+                    let tick = registry.next_tick();
                     cache.insert(
                         key,
                         CacheEntry {
                             mtime,
                             spec: Some(Arc::new(spec)),
+                            tick: AtomicU64::new(tick),
                         },
                     );
+                    // No evict here: load_dir is the eager full scan (doctor,
+                    // short-lived), not the bounded lazy runtime cache.
                 }
                 Err(e) => errors.push(e),
             }
@@ -168,27 +191,63 @@ impl SpecRegistry {
         // lookup. Each drained stem evicts its cache entry so the
         // next read goes back to disk.
         self.drain_invalidations();
-        // Fast path: cache hit + mtime unchanged. Poisoned read →
-        // None → falls through to load_from_disk (no incorrectness).
-        let cached = self.cache.read().ok().and_then(|c| c.get(name).cloned());
-        if let Some(entry) = cached {
-            let disk_mtime = self.disk_mtime(name);
-            if entry.mtime == disk_mtime {
-                return entry.spec;
+        // Fast path: cache hit + mtime unchanged. Bump the entry's LRU tick
+        // (atomic → safe under the shared read lock) so an actively-used spec
+        // never evicts. Poisoned read → skip → load_from_disk (no
+        // incorrectness). The `disk_mtime` stat runs under the read lock;
+        // reads are shared, so it doesn't serialise concurrent lookups.
+        if let Ok(cache) = self.cache.read() {
+            if let Some(entry) = cache.get(name) {
+                if entry.mtime == self.disk_mtime(name) {
+                    entry.tick.store(self.next_tick(), Ordering::Relaxed);
+                    return entry.spec.clone();
+                }
+                // Mtime advanced (or file gone) — fall through to reload.
             }
-            // Mtime advanced (or file gone) — fall through to reload.
         }
         let (mtime, spec) = self.load_from_disk(name);
         if let Ok(mut cache) = self.cache.write() {
+            let tick = self.next_tick();
             cache.insert(
                 name.to_string(),
                 CacheEntry {
                     mtime,
                     spec: spec.clone(),
+                    tick: AtomicU64::new(tick),
                 },
             );
+            self.evict_overflow(&mut cache);
         }
         spec
+    }
+
+    /// Next monotonic tick for LRU stamping.
+    fn next_tick(&self) -> u64 {
+        self.next_tick.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Drop least-recently-used *positive* entries until at most
+    /// [`SPEC_CACHE_CAP`] remain. Negative entries (byte-free) never count
+    /// or evict. The just-inserted entry holds the highest tick, so it is
+    /// never the victim — the in-flight completion keeps its spec.
+    fn evict_overflow(&self, cache: &mut HashMap<String, CacheEntry>) {
+        loop {
+            let positive = cache.values().filter(|e| e.spec.is_some()).count();
+            if positive <= SPEC_CACHE_CAP {
+                break;
+            }
+            let victim = cache
+                .iter()
+                .filter(|(_, e)| e.spec.is_some())
+                .min_by_key(|(_, e)| e.tick.load(Ordering::Relaxed))
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(k) => {
+                    cache.remove(&k);
+                }
+                None => break,
+            }
+        }
     }
 
     /// stat() the file backing `name` (plain or .gz form) and return
@@ -258,13 +317,16 @@ impl SpecRegistry {
     pub fn insert(&self, spec: Spec) {
         let key = spec.name.clone();
         if let Ok(mut cache) = self.cache.write() {
+            let tick = self.next_tick();
             cache.insert(
                 key,
                 CacheEntry {
                     mtime: None,
                     spec: Some(Arc::new(spec)),
+                    tick: AtomicU64::new(tick),
                 },
             );
+            self.evict_overflow(&mut cache);
         }
     }
 
@@ -4535,6 +4597,54 @@ mod tests {
             .lookup("in_memory")
             .expect("in-memory entry must survive");
         assert_eq!(got.name, "in_memory");
+    }
+
+    /// The lazy cache is LRU-bounded so an always-on daemon can't accumulate
+    /// every spec ever completed (a single aws spec is ~290MB). Inserting more
+    /// than the cap evicts the least-recently-used positive entries; the most
+    /// recent survive.
+    #[test]
+    fn lru_cache_evicts_oldest_beyond_cap() {
+        // Empty registry (no dir) → lookup won't re-stat/evict these
+        // in-memory entries via mtime; only the cap governs.
+        let reg = SpecRegistry::empty();
+        let total = SPEC_CACHE_CAP + 3;
+        for i in 0..total {
+            reg.insert(Spec {
+                name: format!("spec{i}"),
+                ..Default::default()
+            });
+        }
+        // Positive entries are bounded to the cap.
+        assert_eq!(reg.len(), SPEC_CACHE_CAP);
+        // The three oldest were evicted; the newest is still cached.
+        assert!(
+            reg.lookup("spec0").is_none(),
+            "oldest positive entry should be evicted"
+        );
+        assert!(
+            reg.lookup(&format!("spec{}", total - 1)).is_some(),
+            "most-recent entry must survive"
+        );
+    }
+
+    /// A spec the user keeps completing against must never evict, even as
+    /// many other specs churn through — re-access bumps its LRU tick.
+    #[test]
+    fn lru_cache_keeps_actively_used_spec() {
+        let reg = SpecRegistry::empty();
+        reg.insert(Spec {
+            name: "hot".into(),
+            ..Default::default()
+        });
+        // Churn well past the cap, re-touching "hot" between each insert.
+        for i in 0..(SPEC_CACHE_CAP * 2) {
+            reg.insert(Spec {
+                name: format!("cold{i}"),
+                ..Default::default()
+            });
+            assert!(reg.lookup("hot").is_some(), "actively-used spec evicted");
+        }
     }
 
     #[test]

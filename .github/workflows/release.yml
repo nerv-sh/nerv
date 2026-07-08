@@ -54,9 +54,16 @@ jobs:
 
       - name: build nerv + nervd + nerv-pty
         run: |
+          # Ship Tier C (rquickjs) in the release binary: the aws bespoke
+          # closures (s3 buckets, ec2 filters, …) only complete when the
+          # quickjs feature is compiled in. JS machinery is ~2-3ms (well
+          # inside the 25ms budget) and +0.78MB. nerv-pty has no such
+          # feature, so scope it per-package. See docs/findings/
+          # tier-c-quickjs-e2e.md and PLAN §0.2.
           cargo build --release \
             --target ${{ matrix.target }} \
-            -p nerv-cli -p nerv-daemon -p nerv-pty
+            -p nerv-cli -p nerv-daemon -p nerv-pty \
+            --features nerv-cli/quickjs,nerv-daemon/quickjs
 
       - name: stage tarball
         id: stage

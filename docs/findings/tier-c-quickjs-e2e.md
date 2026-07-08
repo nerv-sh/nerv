@@ -1,10 +1,62 @@
-# Finding — Tier C (quickjs) recovery: 0% → 32% (machinery fixed)
+# Finding — Tier C (quickjs) recovery: 0% → 82% (shipped by default)
 
-**Date**: 2026-06-06 (0% baseline) · **2026-07-07 update: machinery fixed, 32%**
-**Status**: 🔧 **re-opened and largely fixed**. The three 0%-era root causes are
-resolved; the executor now runs closures for real. Remaining ceiling is closure
-**lexical scope** (module-level helpers the converter doesn't capture), not the
-runtime. Still `--features quickjs` opt-in.
+**Date**: 2026-06-06 (0% baseline) · **2026-07-07: machinery fixed, 82%** ·
+**2026-07-08: latency measured, shipped in release binary**
+**Status**: ✅ **shipped by default**. The three 0%-era root causes are resolved;
+the executor runs closures for real (82% settle, aws 746/749). A 2026-07-08
+latency measurement confirmed the JS machinery is 2-3ms (inside the 25ms budget),
+and revealed the release binary shipped *without* `--features quickjs` — so the
+recovery never reached users. `release.yml` now builds
+`--features nerv-cli/quickjs,nerv-daemon/quickjs` (+0.78MB). Remaining ceiling is
+closure **lexical scope** (module-level helpers the converter doesn't capture) —
+a niche-tool tail, deferred (needs a per-spec esbuild bundler).
+
+## 2026-07-08 update — latency measured, shipped
+
+Two questions gated the ship decision; a `measure_tierc.rs` run answered both.
+
+**1. Perf — is the per-keystroke JS cost inside budget?** Stage timing (avg over
+50 iters, shell stubbed no-op to isolate JS from the already-SHELL_CACHE'd
+subprocess):
+
+| stem | Sandbox::new | ts-helpers | host shim | tokens | eval (closure+prelude) | TOTAL |
+|------|------|------|------|------|------|-------|
+| cargo | 174µs | 295µs | 181µs | 8µs | 2078µs | **2.7ms** |
+| npm | 176µs | 296µs | 185µs | 8µs | 1809µs | **2.5ms** |
+| nx | 181µs | 303µs | 187µs | 10µs | 2479µs | **3.2ms** |
+| gh | 172µs | 289µs | 179µs | 8µs | 1513µs | **2.2ms** |
+
+The earlier "warm 8ms" included the (cached) shell round-trip. Pure JS machinery
+is **2-3ms** — comfortably inside the 25ms input budget. The token-independent
+setup (new + helpers + shim = ~0.65ms) *could* be amortised via Runtime reuse,
+but the dominant cost is `eval` (per-call, unavoidable) and the total is already
+in budget. **No perf work needed** — a result cache keyed on tokens would miss on
+every keystroke anyway, and the residual is token-independent.
+
+**2. Function — do the specs users actually use work?** Per-stem recovery
+(cwd=None, no creds — undercounts real-world; `empty` mostly = ran-clean-no-data):
+
+| stem | settled/total | ok_ge1 | note |
+|------|------|------|------|
+| aws | 746/749 | 615 | dominant corpus, essentially complete |
+| npm | 25/29 | 0 | ran clean, needs real npm |
+| meteor/trivy/dscl/st2 | full | — | niche, work |
+| **cargo** | **0/44** | 0 | all fail — `'lastIndexOf' is not defined` etc. |
+| chezmoi/nx/asdf/esbuild/deno/pnpm/swift/dotnet | 0-few/N | 0 | broken tail |
+
+The broken 18% is **niche tools** whose closures reference module-level helpers
+the prelude slice can't reach (`'separator'`, `'getSuggestions'`, `'map'`,
+`'keywords'` not defined). The specs a typical user hits (git/docker/kubectl/gh/
+npm/cargo core) are recovered by **Tier A/B + Rust-native recognizers**, not Tier
+C — so the tail is low priority. cargo's important completions (`-p <pkg>`, subs)
+come from native `detectCargoMetadataPackages`; only its bespoke Tier C tail
+fails, and that soft-fails to the next generator.
+
+**Decision (2026-07-08): ship Tier C in the release binary.** Perf is in budget,
+aws recovery is the biggest available functional win, and it only reaches users
+if compiled in. Reverses the 2026-06-07 "default-OFF, unbundled" decision (which
+was correct when execution was 0%). Closing the niche tail needs a per-spec
+esbuild bundler — a larger lever with diminishing returns, deferred.
 
 ## 2026-07-07 update — machinery works
 
@@ -67,13 +119,66 @@ already owns the leading path), so `aws s3 ls s3://<tab>` completes to
 scripts). Recovery with real creds/CLIs present: **922/1125 settle (82%),
 ok_ge1 = 693 (62%)** — real bucket/host/path completions, not just "ran".
 
-### Remaining ceiling (deferred)
+### Remaining ceiling — esbuild disproven (2026-07-08)
 
-Residual failures reference helpers the top-level slice can't reach: defined
-**inside** the spec object, in version subdirs (`az/2.53.0/…`), or pulled
-through **transitive imports** of local modules. Recovering them needs a real
-bundler pass (esbuild the whole module tree per spec) — a larger lever with
-diminishing returns. Tier C is now a genuinely useful opt-in.
+The earlier hypothesis ("needs a per-spec esbuild module-tree bundler") is
+**wrong**, disproven by `measure_undefined_scope`. Of the 203 residual failures,
+166 are `'X' is not defined` and **all 166 have `X` absent from the captured
+source** (`declared-in-src = 0`). They split as:
+
+| bucket | count | identifiers | real fix |
+|--------|-------|-------------|----------|
+| factory params | 67 | `separator`(50), `keywords`(17) | factory-call-level capture (see below) |
+| generators-lib private helpers | 75 | `getSuggestions`(36), `suggestOptions`(18), `lastIndexOf`(14), `getConfigLines`(7) | port the module-private helpers into the prelude |
+| single niche spec | 17 | `map` (all nx) | per-spec |
+| QuickJS builtin gap | 3 | `Intl` | enable the `Intl` feature in the rquickjs build |
+| bespoke per-spec | 4 | `npmSearchGenerator`, `getDenoConfig`, `isPlatform` | per-spec |
+
+**Why esbuild can't help.** These aren't missing `import`s — a bundler resolves
+import graphs. They are *runtime closure variables*. The converter captures a
+**leaf arrow** via `fn.toString()` (e.g. `keyValue({separator:":"})`'s inner
+`trigger`/`custom`), which drops the enclosing activation record: `separator` /
+`keywords` were bound when the factory ran, and `lastIndexOf` / `getSuggestions`
+are module-private siblings the `Object.entries(figGenerators)` prelude (public
+exports only) never captured. No `toString()`-based capture can reconstruct a
+runtime scope, and no bundler rebinds a factory parameter.
+
+**The real fix is a two-part converter rearchitecture, not a bundler:**
+1. *Cheap half* — extend `FIG_GENERATORS_PRELUDE` to also emit the module's
+   private helpers (`lastIndexOf`, `getSuggestions`, `getConfigLines`, …), not
+   just its public exports. Recovers sibling-helper refs.
+2. *Expensive half* — capture family generators at the **factory-call
+   expression** (`keyValue({...})`) instead of the leaf closure, so the sandbox
+   re-invokes the factory and rebuilds the parameter scope. Requires knowing the
+   factory args (the converter currently only imports the runtime module, which
+   exposes the produced `{trigger,custom}` object — it can't see which factory
+   call produced it). Both halves are needed for the dominant bucket; either
+   alone recovers little.
+
+**The expensive half is blocked by the Bun toolchain (2026-07-08 spike).** The
+natural way to get the factory args is to intercept `@fig/autocomplete-generators`
+at convert time and tag each produced object with `{name, args}`. Four
+interception mechanisms were tried against Bun 1.3.11; all fail:
+
+| mechanism | failure |
+|-----------|---------|
+| `bun:test` `mock.module` | no-op outside the test runner (`bun run`) |
+| `Bun.plugin` onLoad transform of `index.js` | breaks the `__exportStar` named-export static analysis → `keyValueList not found` |
+| onLoad transform of leaf `src/*.js` | rewrite makes the CJS module async → `index.js`'s `require()` throws |
+| onResolve → virtual ESM wrapper | onResolve never fires for the bare specifier resolved via `NODE_PATH` |
+
+The only remaining route is AST-parsing each spec's source to extract the
+factory-call expression and correlate it back to the runtime generator — hard
+when a spec has multiple factory calls, and still niche-only in payoff. Left as
+future work.
+
+**Decision: defer.** The payoff specs are niche (dscl / nx / chezmoi / asdf /
+meteor) plus cargo's `ai` generator — which calls a GPT endpoint, an explicit
+nerv non-goal (CLAUDE.md: no AI). aws, the one high-traffic spec, is already at
+92% and shipped. Real-usage completions come from Tier A/B + Rust-native
+recognizers. The converter rearchitecture is high effort against near-zero
+user value; not worth it now. `measure_undefined_scope` is kept as the gate if
+this is ever revisited.
 
 ---
 

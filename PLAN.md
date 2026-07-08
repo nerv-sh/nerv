@@ -25,7 +25,7 @@
 | 상위 의존 | `aws/amazon-q-developer-cli-autocomplete` (Apache-2.0 + MIT, 2026-02-03 활성) 의 Rust crates 흡수 |
 | 흡수 방식 | `vendor/aws-autocomplete/` 미수정 mirror (drift 감지) + `crates/nerv-*` 에 `git filter-repo` 로 9개 crate strip+rename 임포트 |
 | TS 엔진 처리 | `packages/autocomplete-parser/` + `packages/shell-parser/` 는 subtree 하지 않음. `docs/reference/` 에 복사 → Rust 1:1 포팅 |
-| JS generator | M0 = Tier A/B JSON only (현 정책 유지). M1 = **rquickjs** opt-in (Tier C 회복). deno_core 비채택 (~30MB 과잉). **⚠️ 출시 결정 (2026-06-07): Tier C 실행률 e2e 검증 = 0% (473 캡처 / 0 실행, async 未drain + `__awaiter` 미정의). `--features quickjs` 는 scaffold 유지하되 production 기본 OFF 확정 — opt-in 만, 출시 바이너리 미동봉. 상세 = `docs/findings/tier-c-quickjs-e2e.md`** |
+| JS generator | M0 = Tier A/B JSON only. M1 = **rquickjs** Tier C 회복. deno_core 비채택 (~30MB 과잉). **결정 뒤집힘 (2026-07-08): ~~출시 미동봉 (e2e 0%)~~ → 출시 동봉.** 2026-07-07 머신러리 수정으로 실행률 0% → 82% settle (aws 746/749), 재측정 결과 JS 머신러리 2-3ms (25ms 예산 내) + 출시 빌드에 quickjs 누락되어 있던 것 확인 → `release.yml --features nerv-cli/quickjs,nerv-daemon/quickjs` 동봉 (+0.78MB). 남은 tail(니치툴 module 헬퍼) = esbuild 번들러 deferred. 상세 = `docs/findings/tier-c-quickjs-e2e.md` |
 | Edit-buffer 인터셉트 | M0 = 기존 ZLE widget 유지 (latency 검증 우선). M1 = **figterm opt-in 추가** (bash/fish 도달 + ANSI 엣지케이스 해소). 두 path 사용자 선택 |
 | 새 비목표 | deno_core 임베드, fig_desktop webview UI, Q chat/AI 기능 (모두 strip 대상) |
 
@@ -145,7 +145,7 @@ M1 = 1,484 전체 자동 Tier 분류.
 - **Matching**:
   - 기본 = prefix (`git co` → `commit` / `config`, 단 `checkout` 은 `git ch` 에서만)
   - 옵션 = fuzzy (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`) — 활성 시 case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드, config 편집은 재시작 필요. spec per-arg `filterStrategy: "substring"` 은 user mode 무관 우선.
-- **동적 generator**: Tier B (정적 shell command, 예 `git branch --list`) 는 Rust 가 직접 spawn (200ms timeout + TTL 5s LRU 64 cache). well-known Tier C (kubectl/docker/aws/npm scripts/filepaths 등) 는 signature recognizer 로 Rust-native 회복. 남은 closure-only tail 만 `--features quickjs` opt-in (출시 미동봉, e2e 실행률 0% — `docs/findings/tier-c-quickjs-e2e.md`). M0 의 "동적 완성은 v1.1 지원 예정 — 직접 입력하세요" 힌트 UX (`Response::DynamicHint` / `LimitedArg`) 는 작동하는 동적완성이 대체 → 삭제 (CLAUDE.md §3, first-5-min §8).
+- **동적 generator**: Tier B (정적 shell command, 예 `git branch --list`) 는 Rust 가 직접 spawn (200ms timeout + TTL 5s LRU 64 cache). well-known Tier C (kubectl/docker/aws/npm scripts/filepaths 등) 는 signature recognizer 로 Rust-native 회복. 남은 closure-only tail 은 `rquickjs` Tier C (2026-07-08 출시 동봉, 실행률 82% settle — `docs/findings/tier-c-quickjs-e2e.md`). M0 의 "동적 완성은 v1.1 지원 예정 — 직접 입력하세요" 힌트 UX (`Response::DynamicHint` / `LimitedArg`) 는 작동하는 동적완성이 대체 → 삭제 (CLAUDE.md §3, first-5-min §8).
 
 ### 5.2 `?` 인라인 도움말
 
@@ -414,7 +414,7 @@ PLAN v0.5 §11 그대로. figterm opt-in 도입 시 `alacritty_terminal` 의 scr
 | **Apache-2.0 + MIT vs 우리 Apache-2.0 정합** | 낮음 | NOTICE 명시, 흡수 crate별 `LICENSE` 파일 보존 |
 | 1인 개발 + 14주 M1 → 번아웃 | 높음 | 4/10주차 체크포인트, 외부 기여 적극 수용 |
 | ~~Developer ID 서명/공증 (M0-8)~~ | ~~높음~~ → 해소 | Homebrew-only 배포로 공증 불필요 (2026-07-04). ad-hoc 서명 자동 + brew quarantine 미부착 |
-| Tier C 동적 generator 한계 (M0 drop) | 중간 | Tier B 직접 spawn + well-known recognizer 회복 (kubectl/docker/aws/npm); closure-only tail 은 rquickjs opt-in (미동봉) |
+| Tier C 동적 generator 한계 (M0 drop) | 중간 | Tier B 직접 spawn + well-known recognizer 회복 (kubectl/docker/aws/npm); closure-only tail 은 rquickjs Tier C (2026-07-08 출시 동봉, 82% settle) |
 | `withfig/autocomplete` archived (1차 spec 소스) | 중간 | spec-conversion-policy §5.3 (2주 모니터, 3개월 부재 시 fork) |
 | **`aws/amazon-q-developer-cli-autocomplete` archived 또는 EOL** (신규) | 중간 | 마지막 커밋 2026-02-03 활성 — `upstream-monitor.yml` 에 추가 (2주 cron, 90일 부재 시 fork) |
 | **figterm 흡수 시 attack surface 증가** (신규) | 중간 | M1 opt-in 으로 격리, ZLE path 와 상호 배타 |
