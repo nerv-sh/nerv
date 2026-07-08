@@ -579,55 +579,74 @@ fn parse_zsh_version(s: &str) -> (u32, u32) {
     (major, minor)
 }
 
-/// Marker block in ~/.zshrc.
+/// Every shell init file `nerv init {zsh,bash,fish}` may write its marker
+/// block into. Single source of truth for both the doctor hook check and the
+/// uninstall strip — they must agree on where a hook can live, or one covers a
+/// shell the other misses. Paths are relative to `$HOME`; fish's is nested.
+const SHELL_INIT_FILES: [&str; 8] = [
+    ".zshrc",
+    ".zshenv",
+    ".zprofile",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".profile",
+    ".config/fish/config.fish",
+];
+
+/// Marker block presence across every shell's init files (zsh/bash/fish).
 fn check_shell_hook(r: &mut DoctorReport) {
     let Some(home) = std::env::var_os("HOME") else {
         r.push(DoctorLevel::Err, "shell hook", "HOME unset".into(), None);
         return;
     };
-    let zshrc = std::path::PathBuf::from(home).join(".zshrc");
-    if !zshrc.exists() {
+    let home = std::path::PathBuf::from(home);
+    // A block per file is fine (a dual-shell user installs into each); only
+    // >1 block in the *same* file is the not-idempotent case worth flagging.
+    let mut found: Vec<&str> = Vec::new();
+    let mut dup: Option<(&str, usize)> = None;
+    for name in SHELL_INIT_FILES {
+        let Ok(content) = std::fs::read_to_string(home.join(name)) else {
+            continue;
+        };
+        let count = nerv_shell::count_blocks(&content);
+        if count == 0 {
+            continue;
+        }
+        found.push(name);
+        if count > 1 && dup.is_none() {
+            dup = Some((name, count));
+        }
+    }
+    if let Some((file, n)) = dup {
         r.push(
             DoctorLevel::Warn,
             "shell hook",
-            "~/.zshrc not found".into(),
-            Some("run: nerv init zsh >> ~/.zshrc".into()),
+            format!("{n} marker blocks in ~/{file} (should be 1)"),
+            Some("run: nerv uninstall && nerv init <shell>".into()),
         );
         return;
     }
-    let content = match std::fs::read_to_string(&zshrc) {
-        Ok(c) => c,
-        Err(e) => {
-            r.push(
-                DoctorLevel::Err,
-                "shell hook",
-                format!("read failed: {e}"),
-                None,
-            );
-            return;
-        }
-    };
-    let count = nerv_shell::count_blocks(&content);
-    match count {
-        0 => r.push(
+    if found.is_empty() {
+        r.push(
             DoctorLevel::Warn,
             "shell hook",
-            "no nerv marker block in ~/.zshrc".into(),
-            Some("run: nerv init zsh >> ~/.zshrc".into()),
-        ),
-        1 => r.push(
-            DoctorLevel::Ok,
-            "shell hook",
-            "~/.zshrc marker block 1개 (멱등 OK)".into(),
-            None,
-        ),
-        n => r.push(
-            DoctorLevel::Warn,
-            "shell hook",
-            format!("{n} marker blocks (should be 1)"),
-            Some("run: nerv uninstall && nerv init zsh >> ~/.zshrc".into()),
-        ),
+            "no nerv marker block found".into(),
+            Some("run: nerv init <zsh|bash|fish> >> <rc>".into()),
+        );
+        return;
     }
+    let files = found
+        .iter()
+        .map(|f| format!("~/{f}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    r.push(
+        DoctorLevel::Ok,
+        "shell hook",
+        format!("marker block in {files} (멱등 OK)"),
+        None,
+    );
 }
 
 /// E1: nervd running.
@@ -1177,25 +1196,14 @@ fn strip_shell_hooks(
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
     use std::fs;
 
-    // `nerv init {zsh,bash,fish}` all emit the same marker block, so the
-    // uninstall must scan every shell's init files — not just zsh. A leftover
-    // bash/fish block runs `eval "$(nerv …)"` on shell start after the binary
-    // is gone → command-not-found on every new shell (uninstall-spec §3a/§114).
-    // Paths are relative to $HOME; fish's lives under a subdir.
-    let init_files = [
-        ".zshrc",
-        ".zshenv",
-        ".zprofile",
-        ".zlogin",
-        ".bashrc",
-        ".bash_profile",
-        ".profile",
-        ".config/fish/config.fish",
-    ];
     let mut first_backup: Option<std::path::PathBuf> = None;
     let mut total_blocks_removed = 0usize;
 
-    for name in init_files {
+    // Scan every shell's init file — see [`SHELL_INIT_FILES`]. `nerv init
+    // {zsh,bash,fish}` all emit the same marker block, so a leftover bash/fish
+    // hook would run `eval "$(nerv …)"` on shell start after the binary is gone
+    // → command-not-found on every new shell (uninstall-spec §3a / §114).
+    for name in SHELL_INIT_FILES {
         let path = home.join(name);
         if !path.exists() {
             continue;
