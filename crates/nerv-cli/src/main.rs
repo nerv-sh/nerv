@@ -758,6 +758,21 @@ fn cmd_start() -> anyhow::Result<()> {
     let cache_dir = paths::cache_dir().context("HOME unset")?;
     let log_path = paths::daemon_log_path().context("HOME unset")?;
 
+    // A daemon may already be serving on the socket without a readable PID
+    // file (started outside this path, or the file was removed while it kept
+    // running). Spawning anyway rebinds the socket and orphans the live
+    // daemon, so probe the socket first — it's the real readiness signal
+    // (same as `nerv doctor` / the ZLE widget), independent of the PID file.
+    if let Some(sock) = paths::socket_path() {
+        if daemon_responds_at(&sock) {
+            match read_pid(&pid_path) {
+                Some(pid) => println!("nervd already running (pid {pid})"),
+                None => println!("nervd already running"),
+            }
+            return Ok(());
+        }
+    }
+
     if let Some(pid) = read_pid(&pid_path) {
         if process_alive(pid) {
             println!("nervd already running (pid {pid})");
