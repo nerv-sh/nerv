@@ -560,6 +560,15 @@ fn launch_shell(command: Option<&[String]>) -> Result<()> {
     unreachable!()
 }
 
+// The `profiling_early_exit` feature `break`s out of the main select loop the
+// instant the master PTY is readable, to measure startup cost in isolation.
+// That makes the read arm's `match` (and hence `res`, `processor`) unreachable
+// — expected only in that build. Scope the allow to the feature so the normal
+// build keeps full strictness.
+#[cfg_attr(
+    feature = "profiling_early_exit",
+    allow(unused_variables, unused_mut, unreachable_code)
+)]
 fn figterm_main(command: Option<&[String]>) -> Result<()> {
     nerv_settings::settings::init_global().ok();
     // Telemetry stripped (PRD v0.6 §0.2).
