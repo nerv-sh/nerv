@@ -43,8 +43,15 @@ pub enum Request {
 pub enum Response {
     /// Normal completion result.
     Suggestions { items: Vec<Suggestion> },
-    /// Daemon is alive (Ping reply).
-    Pong { version: String },
+    /// Daemon is alive (Ping reply). `pid` is the daemon's process id, so a
+    /// client (`nerv stop` / `uninstall`) can signal it even when the PID
+    /// file is missing. `#[serde(default)]` keeps replies from an older
+    /// daemon (no `pid`) decodable — they deserialize with `pid == 0`.
+    Pong {
+        version: String,
+        #[serde(default)]
+        pid: u32,
+    },
     /// Empty result — typically because the spec is disabled (E2).
     Empty { reason: Option<String> },
     /// An error condition the widget should surface (rare; usually
