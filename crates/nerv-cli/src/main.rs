@@ -1061,7 +1061,7 @@ fn cmd_uninstall(keep_config: bool, quiet: bool) -> anyhow::Result<()> {
     // Step 3: shell-hook removal (atomic, with timestamped backup)
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let backup_path = match &home {
-        Some(h) => strip_zsh_hooks(h, &mut log)?,
+        Some(h) => strip_shell_hooks(h, &mut log)?,
         None => {
             log.warn("shell hook", "HOME unset");
             None
@@ -1171,13 +1171,27 @@ fn stop_daemon_for_uninstall(log: &mut UninstallLog) -> bool {
 /// Step 3 of uninstall-spec.md: scan zsh init files, strip marker
 /// blocks, write atomically, leave a timestamped backup behind.
 /// Returns the backup path of the first file actually modified.
-fn strip_zsh_hooks(
+fn strip_shell_hooks(
     home: &std::path::Path,
     log: &mut UninstallLog,
 ) -> anyhow::Result<Option<std::path::PathBuf>> {
     use std::fs;
 
-    let init_files = [".zshrc", ".zshenv", ".zprofile", ".zlogin"];
+    // `nerv init {zsh,bash,fish}` all emit the same marker block, so the
+    // uninstall must scan every shell's init files — not just zsh. A leftover
+    // bash/fish block runs `eval "$(nerv …)"` on shell start after the binary
+    // is gone → command-not-found on every new shell (uninstall-spec §3a/§114).
+    // Paths are relative to $HOME; fish's lives under a subdir.
+    let init_files = [
+        ".zshrc",
+        ".zshenv",
+        ".zprofile",
+        ".zlogin",
+        ".bashrc",
+        ".bash_profile",
+        ".profile",
+        ".config/fish/config.fish",
+    ];
     let mut first_backup: Option<std::path::PathBuf> = None;
     let mut total_blocks_removed = 0usize;
 
@@ -1418,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_zsh_hooks_removes_block_and_creates_backup() {
+    fn strip_shell_hooks_removes_block_and_creates_backup() {
         // Isolated HOME so we don't touch the real ~/.zshrc.
         let tmp = std::env::temp_dir().join(format!("nerv-strip-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
@@ -1430,7 +1444,7 @@ mod tests {
         std::fs::write(&zshrc, &original).unwrap();
 
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap();
         assert!(backup.is_some(), "expected backup PathBuf");
         let backup_path = backup.unwrap();
         assert!(backup_path.exists(), "backup file should exist");
@@ -1450,25 +1464,72 @@ mod tests {
     }
 
     #[test]
-    fn strip_zsh_hooks_no_op_when_no_blocks() {
+    fn strip_shell_hooks_covers_bash_and_fish() {
+        // `nerv init` supports bash + fish; uninstall must strip their marker
+        // blocks too, or the leftover `eval "$(nerv …)"` breaks every new
+        // shell once the binary is gone (uninstall-spec §3a / §114).
+        let tmp = std::env::temp_dir().join(format!("nerv-strip-bf-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join(".config/fish")).unwrap();
+        let bashrc = tmp.join(".bashrc");
+        let fishcfg = tmp.join(".config/fish/config.fish");
+        std::fs::write(
+            &bashrc,
+            format!(
+                "alias ll=ls\n{}",
+                nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "bash")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &fishcfg,
+            format!(
+                "set -gx FOO 1\n{}",
+                nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "fish")
+            ),
+        )
+        .unwrap();
+
+        let mut log = UninstallLog::new(true);
+        strip_shell_hooks(&tmp, &mut log).unwrap();
+
+        let bash_after = std::fs::read_to_string(&bashrc).unwrap();
+        assert_eq!(
+            nerv_shell::count_blocks(&bash_after),
+            0,
+            "bash hook block must be stripped"
+        );
+        assert!(bash_after.contains("alias ll=ls"));
+        let fish_after = std::fs::read_to_string(&fishcfg).unwrap();
+        assert_eq!(
+            nerv_shell::count_blocks(&fish_after),
+            0,
+            "fish hook block must be stripped"
+        );
+        assert!(fish_after.contains("set -gx FOO 1"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn strip_shell_hooks_no_op_when_no_blocks() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-noop-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let zshrc = tmp.join(".zshrc");
         let body = "alias x=ls\n";
         std::fs::write(&zshrc, body).unwrap();
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap();
         assert!(backup.is_none(), "no backup when nothing to strip");
         assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), body);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn strip_zsh_hooks_handles_missing_home_files() {
+    fn strip_shell_hooks_handles_missing_home_files() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-empty-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap();
         assert!(backup.is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1668,12 +1729,12 @@ mod tests {
         assert_eq!(daemon_pid_via_socket(&missing), None);
     }
 
-    /// `strip_zsh_hooks` cycles through .zshrc, .zshenv, .zprofile,
+    /// `strip_shell_hooks` cycles through .zshrc, .zshenv, .zprofile,
     /// .zlogin in that order and reports the first backup path. When
     /// only .zshenv has a marker block, the backup path returned must
     /// point at .zshenv.
     #[test]
-    fn strip_zsh_hooks_first_backup_picks_first_modified_file() {
+    fn strip_shell_hooks_first_backup_picks_first_modified_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-first-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let plain_rc = "alias ll=ls\n";
@@ -1684,7 +1745,7 @@ mod tests {
         );
         std::fs::write(tmp.join(".zshenv"), &env_with_block).unwrap();
         let mut log = UninstallLog::new(true);
-        let backup = strip_zsh_hooks(&tmp, &mut log).unwrap().expect("backup");
+        let backup = strip_shell_hooks(&tmp, &mut log).unwrap().expect("backup");
         assert!(
             backup
                 .file_name()
@@ -1705,14 +1766,14 @@ mod tests {
     /// stripped + counted. Catches a regression where the
     /// total_blocks_removed counter would only see the first match.
     #[test]
-    fn strip_zsh_hooks_counts_multiple_blocks_per_file() {
+    fn strip_shell_hooks_counts_multiple_blocks_per_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-multi-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.1.0", "ts", "zsh");
         let zshrc = format!("alias a=1\n{blk}alias b=2\n{blk}alias c=3\n");
         std::fs::write(tmp.join(".zshrc"), &zshrc).unwrap();
         let mut log = UninstallLog::new(true);
-        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let _ = strip_shell_hooks(&tmp, &mut log).unwrap();
         let after = std::fs::read_to_string(tmp.join(".zshrc")).unwrap();
         assert_eq!(nerv_shell::count_blocks(&after), 0);
         assert!(after.contains("alias a=1"));
@@ -1725,7 +1786,7 @@ mod tests {
     /// over the original. Confirm no `.nerv-tmp` leftover is left
     /// behind on the happy path.
     #[test]
-    fn strip_zsh_hooks_cleans_up_temp_file() {
+    fn strip_shell_hooks_cleans_up_temp_file() {
         let tmp = std::env::temp_dir().join(format!("nerv-strip-tmp-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let body = format!(
@@ -1734,7 +1795,7 @@ mod tests {
         );
         std::fs::write(tmp.join(".zshrc"), &body).unwrap();
         let mut log = UninstallLog::new(true);
-        let _ = strip_zsh_hooks(&tmp, &mut log).unwrap();
+        let _ = strip_shell_hooks(&tmp, &mut log).unwrap();
         let leftover = tmp.join(".nerv-tmp");
         assert!(
             !leftover.exists(),
