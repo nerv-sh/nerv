@@ -80,6 +80,7 @@ missing completion on a common command · **P2** cosmetic / rare.
 | Date | Sev | Shell+Term | What happened | Repro | Status |
 |------|-----|-----------|---------------|-------|--------|
 | 2026-07-03 | P1 | zsh+p10k / iTerm | ZLE popup box renders at far-right edge, not under the cursor. `__nerv_cursor_col` computes col from `${(%)PS1}` last-line width; p10k's full-width filler bar (`····· time`) inflates `${#p}` to ≈COLUMNS → box clamped right. Cursor at col ~6, box at col ~190. | `git <space>` under a multiline p10k prompt | **fixed** — implausible-width guard in `__nerv_cursor_col`: when the estimate lands within 20 cols of the right edge the heuristic is treated as defeated and the box anchors from the left under the typed text. zsh unit cases + both ZLE e2e green. |
+| 2026-07-03/04 | P1/P2 | zsh+p10k / iTerm | Session batch (all **fixed**, PR #13): Enter inserted the wrong thing (`cd ` → `cd -`, `z ` → bare `z`) → **↩ Immediately execute sentinel** (default row; empty token→execute, partial→first match); no history inline suggestion → **history ghost** (autosuggestions style); `git status` re-suggested `status` → **no-op filter**; `z enc` ranked `encl` below path-only siblings → **name-match ranking**; loud blue selection / no ghost colour → **grey**; arg templates missing → **`push [remote] [branch]` hints**; empty-buffer arrows re-drew a stale popup → **history + precmd reset**; long-list navigation flickered → **`zle -R` reserve-once**. | see CLAUDE.md §3 dogfood UX 배치 | **fixed** — e2e-zle-{popup,pagekeys,enter,history} + engine units green |
 
 When a row is real and reproducible, file it at
 <https://github.com/nerv-sh/nerv/issues> and link the issue in *Status*.
@@ -93,7 +94,11 @@ These are by design (PLAN §4 비목표 / current scope). Logging them is noise:
   opt-in `--features quickjs`, and even then 0% e2e recovery today — see
   `docs/findings/tier-c-quickjs-e2e.md`). Static generators *do* work.
 - bash/fish need `NERV_PTY=1`; there is no ZLE-equivalent for them.
-- macOS Gatekeeper warns on first launch until M0-8 signing lands.
+- macOS Gatekeeper: no warning via `brew install` (Homebrew doesn't
+  quarantine; ad-hoc signature satisfies arm64). Only a **direct tarball
+  download** warns on first launch → `xattr -dr com.apple.quarantine
+  <path>`. Developer ID notarization is deferred (PLAN §10 M0-8, dropped
+  2026-07-04) — add it later only if raw-download distribution grows.
 - No Linux / Windows. No `nerv config` command (edit the TOML directly).
 
 ## 6. Wrap-up

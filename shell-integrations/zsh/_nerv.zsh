@@ -29,12 +29,20 @@ typeset -gi __NERV_E5_SHOWN=0
 # This is why `cd ` / `z ` + Enter execute the command rather than
 # injecting the first folder — the user navigates down to pick one.
 typeset -gi __NERV_SELECTED=0
+# 1 when the popup carries the "Immediately execute" sentinel as row 0
+# (segment boundary — browsing). 0 when the user is mid-token filtering,
+# where the sentinel is hidden and SELECTED indexes items 1..N directly.
+typeset -gi __NERV_HAS_SENTINEL=0
 typeset -ga __NERV_ITEMS=()
 typeset -gi __NERV_ACTIVE=0
 # Rows currently reserved via `zle -R`. Lets show_popup skip re-issuing
 # the reservation (and its flicker-inducing blank frame) when a redraw
 # keeps the same row count.
 typeset -gi __NERV_RESERVED=0
+# Cached box dimensions (widest display cells / widest desc cells / any
+# wide icon), measured once per item set by __nerv_measure_items so
+# show_popup doesn't re-scan all N items on every navigation keystroke.
+typeset -gi __NERV_MAXDISP=0 __NERV_MAXDESC=0 __NERV_HASWIDE=0
 
 # Tighten KEYTIMEOUT so single-press Esc dismisses the popup
 # without zsh's default 0.4s wait for longer escape sequences.
@@ -49,22 +57,58 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 __nerv_reset_state() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=0
+  __NERV_HAS_SENTINEL=0
   __NERV_RESERVED=0
   __NERV_ITEMS=()
   zle -R ""
 }
 
-# Cycle across [sentinel(0), item1, …, itemN], wrapping. next:
-# 0→1→…→N→0; prev: 0→N→…→1→0. The sentinel is one of the stops, so
-# tabbing past the last item lands back on "Immediately execute".
+# Scan the item set ONCE to size the box: widest display name (display
+# cells, `(m)` flag for CJK width), widest description, and whether any
+# row carries a wide (emoji) icon. Cached into globals so show_popup —
+# which fires on every navigation keystroke — reads O(1) instead of
+# re-scanning all N items (the ~400-subcommand `aws ` lag).
+__nerv_measure_items() {
+  local i n=${#__NERV_ITEMS} md=0 me=0 hw=0
+  for (( i=1; i<=n; i++ )); do
+    local rest="${__NERV_ITEMS[$i]#*	}"   # display \t desc \t icon
+    local d="${rest%%	*}"                  # display
+    local after="${rest#*	}"               # desc \t icon
+    local desc_full="${after%%	*}"         # desc
+    local dw=${(m)#d} ew=${(m)#desc_full}
+    (( dw > md )) && md=$dw
+    (( ew > me )) && me=$ew
+    if (( ! hw )); then
+      local ic="${after#*	}"; [[ "$ic" == "$after" ]] && ic=""
+      [[ "$ic" == *[^[:ascii:]]* ]] && hw=1
+    fi
+  done
+  (( md > 32 )) && md=32   # hard cap so a long name can't blow the box out
+  __NERV_MAXDISP=$md
+  __NERV_MAXDESC=$me
+  __NERV_HASWIDE=$hw
+}
+
+# Cycle across the selectable rows, wrapping. With the sentinel present
+# the range is [0(sentinel), 1..N] (0→1→…→N→0); without it, items only
+# [1..N] (1→2→…→N→1). Tabbing past the last item lands on the sentinel
+# when there is one, else back on the first item.
 __nerv_cycle_next() {
   local n=${#__NERV_ITEMS}
-  (( __NERV_SELECTED = (__NERV_SELECTED + 1) % (n + 1) ))
+  if (( __NERV_HAS_SENTINEL )); then
+    (( __NERV_SELECTED = (__NERV_SELECTED + 1) % (n + 1) ))
+  else
+    (( __NERV_SELECTED = __NERV_SELECTED % n + 1 ))
+  fi
 }
 
 __nerv_cycle_prev() {
   local n=${#__NERV_ITEMS}
-  (( __NERV_SELECTED = (__NERV_SELECTED + n) % (n + 1) ))
+  if (( __NERV_HAS_SENTINEL )); then
+    (( __NERV_SELECTED = (__NERV_SELECTED + n) % (n + 1) ))
+  else
+    (( __NERV_SELECTED = (__NERV_SELECTED + n - 2) % n + 1 ))
+  fi
 }
 
 # Best-effort on-screen column (1-based) of the input cursor, so the
@@ -159,26 +203,14 @@ __nerv_show_popup() {
     sel_desc="${sel_desc%%	*}"  # drop trailing icon field
   fi
 
-  # Auto-size: measure max display + max desc across ALL items
-  # (not just the window), so window-sliding doesn't reshape the
-  # popup width every tick.
-  local i max_disp=0 max_desc=0
-  for (( i=1; i<=total; i++ )); do
-    local line="${items[$i]}"
-    local rest="${line#*	}"
-    local d="${rest%%	*}"
-    local desc_full="${rest#*	}"
-    desc_full="${desc_full%%	*}"  # drop icon field
-    # Measure DISPLAY cells, not code points: CJK glyphs are 2 cells,
-    # so ${#d} undercounts and the right border drifts. The `m` flag
-    # makes the length operator count East Asian width.
-    local dw=${(m)#d} ew=${(m)#desc_full}
-    (( dw > max_disp )) && max_disp=$dw
-    (( ew > max_desc )) && max_desc=$ew
-  done
+  # Box dimensions come from __nerv_measure_items (called once when the
+  # item set changed) — NOT re-scanned here. show_popup fires on every
+  # navigation keystroke; re-measuring all N items each time made a ~400-
+  # subcommand `aws ` list lag badly on every arrow press.
+  local max_disp=$__NERV_MAXDISP
+  local max_desc=$__NERV_MAXDESC
+  local has_wide_icon=$__NERV_HASWIDE
 
-  # Hard caps so a long description doesn't blow the popup off-screen.
-  (( max_disp > 32 )) && max_disp=32
   local term_cols=${COLUMNS:-80}
   local cap=$(( term_cols * 8 / 10 ))
   (( cap < 30 )) && cap=30
@@ -189,16 +221,6 @@ __nerv_show_popup() {
   local foot_hint=$max_desc
   (( foot_hint > 60 )) && foot_hint=60
 
-  # Pre-scan items: if any row carries an emoji icon (4th field
-  # contains a non-ASCII byte), the glyph occupies 2 cells. Reserve
-  # an extra column in body so the right border doesn't clip.
-  local has_wide_icon=0
-  for (( i=1; i<=total; i++ )); do
-    local _l="${items[$i]}"
-    local _t="${_l#*	}"; _t="${_t#*	}"
-    local _ic="${_t#*	}"; [[ "$_ic" == "$_t" ]] && _ic=""
-    [[ "$_ic" == *[^[:ascii:]]* ]] && { has_wide_icon=1; break; }
-  done
   # Layout: " G " + display + " " — slot is 3 cols (ASCII glyph) or
   # 4 cols (emoji) depending on whether ANY row uses an emoji.
   local body
@@ -230,9 +252,9 @@ __nerv_show_popup() {
   local -a plain=()
   local blank=""
   repeat $(( W + 4 )); do blank+=" "; done
-  # visible items + sentinel row + 4 chrome (top / divider / footer /
-  # bottom).
-  local plain_rows=$(( visible + 5 ))
+  # visible items + 4 chrome (top / divider / footer / bottom), + 1 for
+  # the sentinel row when present.
+  local plain_rows=$(( visible + 4 + __NERV_HAS_SENTINEL ))
   repeat $plain_rows; do plain+=("$blank"); done
 
   # --- Build colored lines ---
@@ -254,19 +276,22 @@ __nerv_show_popup() {
   # " │" on the left and " │" on the right. Equals W - 2.
   local row_body=$(( W - 2 ))
 
-  # "Immediately execute" sentinel row (Fig parity), always drawn first
-  # and highlighted by default (SELECTED==0). Content = `↩` + label,
-  # width-measured so the right border stays aligned even if the glyph
-  # renders as 2 cells. Enter here runs the line as typed.
-  local sent_txt="↩ Immediately execute"
-  local sent_w=${(m)#sent_txt}
-  local sent_pad_n=$(( row_body - 1 - sent_w ))
-  (( sent_pad_n < 0 )) && sent_pad_n=0
-  local sent_pad=""; repeat $sent_pad_n; do sent_pad+=" "; done
-  if (( __NERV_SELECTED == 0 )); then
-    colored+=("  ${SELBG}${BDR}│${SELBG} ${SELFG}${sent_txt}${sent_pad}${BDR}│${R}")
-  else
-    colored+=("  ${BG}${BDR}│${DESC} ${sent_txt}${sent_pad}${BDR}│${R}")
+  # "Immediately execute" sentinel row (Fig parity) — drawn ONLY at a
+  # segment boundary (browsing), where it's row 0 and highlighted by
+  # default (SELECTED==0). Hidden while the user filters a token. Content
+  # = `↩` + label, width-measured so the right border stays aligned even
+  # if the glyph renders as 2 cells. Enter here runs the line as typed.
+  if (( __NERV_HAS_SENTINEL )); then
+    local sent_txt="↩ Immediately execute"
+    local sent_w=${(m)#sent_txt}
+    local sent_pad_n=$(( row_body - 1 - sent_w ))
+    (( sent_pad_n < 0 )) && sent_pad_n=0
+    local sent_pad=""; repeat $sent_pad_n; do sent_pad+=" "; done
+    if (( __NERV_SELECTED == 0 )); then
+      colored+=("  ${SELBG}${BDR}│${SELBG} ${SELFG}${sent_txt}${sent_pad}${BDR}│${R}")
+    else
+      colored+=("  ${BG}${BDR}│${DESC} ${sent_txt}${sent_pad}${BDR}│${R}")
+    fi
   fi
 
   for (( i=start; i<=end; i++ )); do
@@ -356,38 +381,31 @@ __nerv_show_popup() {
 
   colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
 
-  # Step 1: reserve the space with ZLE — but only on first show or when
-  # the row count changes. Re-issuing `zle -R` on every keystroke blanks
-  # the whole region right before the printf repaints it; that one blank
-  # frame per render is the flicker seen while arrowing through a long
-  # list. When the reservation already matches, skip to the printf, which
-  # overwrites the box in place (each row clears to EOL) — no blank frame.
+  # Reserve the space with ZLE — but only on first show or when the row
+  # count changes. Re-issuing `zle -R` on every keystroke blanks the whole
+  # region right before the printf repaints it; that one blank frame per
+  # render is the flicker seen while arrowing through a long list. When the
+  # reservation already matches, skip to the printf, which overwrites the
+  # box in place (each row clears to EOL) — no blank frame.
   if (( ! __NERV_ACTIVE || __NERV_RESERVED != ${#plain} )); then
     zle -R "" "${plain[@]}"
     __NERV_RESERVED=${#plain}
   fi
 
-  # Anchor the popup's left edge under the input cursor. Query the
-  # cursor column AFTER `zle -R` so it reflects the input line. Clamp
-  # so a box near the right edge shifts left to stay on screen.
-  #
-  # Each colored row is prefixed with 2 leading spaces (see the
-  # "  ${BG}…" rows below), so the painted footprint is W + 2 cells, not
-  # W. Reserve one more column on top of that: writing into the very last
-  # cell arms the terminal's pending-wrap flag, and the next row's
-  # cursor-down then scrolls — drifting every following row one line low
-  # and tearing the box into the alternating "│ … │" / margin-"│"
-  # fragments seen with long prompts. So keep start_col + 2 + W ≤ cols.
+  # Anchor the popup's left edge under the input cursor. Clamp so a box
+  # near the right edge shifts left to stay on screen. Each colored row
+  # carries 2 leading spaces, so the footprint is W + 2 cells; keep one
+  # more column of slack (start_col + 2 + W ≤ cols) or the pending-wrap
+  # flag scrolls the next row and tears the box.
   local start_col=$(__nerv_cursor_col)
   (( start_col < 1 )) && start_col=1
   (( start_col + W + 2 > term_cols )) && start_col=$(( term_cols - W - 2 ))
   (( start_col < 1 )) && start_col=1
 
-  # Step 2-4: save cursor, move down + overwrite with colored
-  # content per row at the anchored column, restore cursor. Works as
-  # long as the popup stays within the visible screen — MAX_VIS above
-  # clamps to $LINES so we don't trigger a mid-render scroll that
-  # would invalidate the saved cursor pos.
+  # Save cursor, move down + overwrite each row at the anchored column,
+  # restore cursor. Stays within the visible screen: MAX_VIS clamps to
+  # $LINES so we don't trigger a mid-render scroll that would invalidate
+  # the saved cursor position.
   local move=$'\e[B\e['${start_col}'G'
   local buf=$'\e7'
   for (( i=1; i<=${#colored}; i++ )); do
@@ -444,9 +462,17 @@ __nerv_insert_selected() {
     post="${after#$rest}"
   fi
 
-  # Build full BUFFER and place CURSOR right after the insertion+space.
-  BUFFER="${pre}${insertion} ${post# }"
-  CURSOR=$(( ${#pre} + ${#insertion} + 1 ))
+  # Trailing separator: a completed token gets a space so the next arg
+  # can be typed — EXCEPT a directory (`apps/`) or a `requiresSeparator`
+  # option (`--color=`), where the user drills deeper with no gap. Fig
+  # parity: `cd apps/` leaves the cursor flush so the next Tab lists
+  # `apps/mobile/…` instead of forcing a backspace.
+  local sep=" "
+  [[ "$insertion" == */ || "$insertion" == *= ]] && sep=""
+
+  # Build full BUFFER and place CURSOR right after the insertion+sep.
+  BUFFER="${pre}${insertion}${sep}${post# }"
+  CURSOR=$(( ${#pre} + ${#insertion} + ${#sep} ))
 
   # Frecency: record the accept in the background so the next
   # completion request can boost it. Fire-and-forget — never
@@ -548,15 +574,18 @@ __nerv_complete() {
   fi
 
   __NERV_ITEMS=("${rlines[@]}")
-  # Default selection depends on whether a token is being filtered:
-  #   `z ` (trailing space, empty token) → sentinel (Immediately
-  #        execute) is the sensible default, so Enter runs the command.
-  #   `z ad` (partial token)             → the user is homing in on a
-  #        match, so highlight the first real item (`ade-front`), not
-  #        the sentinel. Mirrors the ghost's mid-token gate.
-  if [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' ]]; then
+  __nerv_measure_items   # size the box once; show_popup reads the cache
+  # The "Immediately execute" sentinel shows ONLY at a segment boundary —
+  # LBUFFER ends in whitespace or `/` (`z `, `cd apps/`), i.e. the user is
+  # browsing, not filtering. There it's the default selection so Enter
+  # runs the command. Once the user types into a token (`z ad`), the
+  # sentinel disappears entirely and the first real match is highlighted,
+  # so Tab/Enter picks it. Mirrors the ghost's mid-token gate.
+  if [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' || "$LBUFFER" == */ ]]; then
+    __NERV_HAS_SENTINEL=1
     __NERV_SELECTED=0
   else
+    __NERV_HAS_SENTINEL=0
     __NERV_SELECTED=1
   fi
   if [[ -n "$hist_ghost" ]]; then
@@ -647,18 +676,23 @@ __nerv_line_finish() {
 }
 zle -N accept-line __nerv_line_finish
 
-# Tab: cycle DOWN through popup items (Fig-style). Enter accepts.
-# Single-item popup short-circuits — cycling 1→1 is useless, so we
-# insert immediately (the user clearly wants that one suggestion).
-# Outside popup: defer to zsh's expand-or-complete.
+# Tab: accept the highlighted item — insert it. When the sentinel is
+# selected (browsing, SELECTED==0), Tab instead dives into the list
+# (moves to the first item) so a second Tab accepts it. Use arrows /
+# Shift-Tab to move the highlight without accepting. Outside a popup:
+# defer to zsh's expand-or-complete.
 #
-# Only checks __NERV_ITEMS, NOT __NERV_ACTIVE: cursor-movement
-# keys don't clear ITEMS but may leave ACTIVE stale, and we'd
-# rather accept than appear no-op.
+# Only checks __NERV_ITEMS, NOT __NERV_ACTIVE: cursor-movement keys
+# don't clear ITEMS but may leave ACTIVE stale, and we'd rather accept
+# than appear no-op.
 __nerv_accept() {
   if (( ${#__NERV_ITEMS} > 0 )); then
-    __nerv_cycle_next
-    __nerv_show_popup "${__NERV_ITEMS[@]}"
+    if (( __NERV_SELECTED >= 1 )); then
+      __nerv_insert_selected
+    else
+      __nerv_cycle_next
+      __nerv_show_popup "${__NERV_ITEMS[@]}"
+    fi
   else
     zle expand-or-complete
   fi
@@ -734,9 +768,10 @@ __nerv_page_up() {
   if (( __NERV_ACTIVE && ${#__NERV_ITEMS} > 0 )) && [[ -n "$BUFFER" ]]; then
     local REPLY; __nerv_max_vis
     (( __NERV_SELECTED -= REPLY ))
-    # Floor at the sentinel (0), not the first item — Page-Up should be
-    # able to return to "Immediately execute".
-    (( __NERV_SELECTED < 0 )) && __NERV_SELECTED=0
+    # Floor at the sentinel (0) when present so Page-Up can return to
+    # "Immediately execute"; otherwise floor at the first item (1).
+    local floor=$(( __NERV_HAS_SENTINEL ? 0 : 1 ))
+    (( __NERV_SELECTED < floor )) && __NERV_SELECTED=$floor
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle up-line-or-history
@@ -804,7 +839,21 @@ __nerv_pre_redraw() {
     region_highlight+=("${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) fg=242, memo=nerv_ghost")
   fi
 }
-zle -N zle-line-pre-redraw __nerv_pre_redraw
+# Chain into the pre-redraw hook via add-zle-hook-widget instead of
+# `zle -N zle-line-pre-redraw` — the latter REPLACES the special widget,
+# clobbering zsh-syntax-highlighting's own pre-redraw hook so command
+# text loses its colour (valid-command green → default white). Hooking
+# lets both run; registering after other plugins means our ghost paint
+# lands on top of their region_highlight rather than being overwritten.
+zle -N __nerv_pre_redraw
+if autoload -Uz add-zle-hook-widget 2>/dev/null && \
+   add-zle-hook-widget line-pre-redraw __nerv_pre_redraw 2>/dev/null; then
+  :
+else
+  # Fallback for a zsh without add-zle-hook-widget (< 5.3): bind
+  # directly. Rare on our 5.8+ floor, but keep the ghost working.
+  zle -N zle-line-pre-redraw __nerv_pre_redraw
+fi
 
 __nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
 zle -N __nerv_dismiss

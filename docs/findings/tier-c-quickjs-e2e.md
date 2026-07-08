@@ -1,10 +1,86 @@
-# Finding — Tier C (quickjs) e2e recovery rate = 0%
+# Finding — Tier C (quickjs) recovery: 0% → 32% (machinery fixed)
 
-**Date**: 2026-06-06 (decision recorded 2026-06-07)
+**Date**: 2026-06-06 (0% baseline) · **2026-07-07 update: machinery fixed, 32%**
+**Status**: 🔧 **re-opened and largely fixed**. The three 0%-era root causes are
+resolved; the executor now runs closures for real. Remaining ceiling is closure
+**lexical scope** (module-level helpers the converter doesn't capture), not the
+runtime. Still `--features quickjs` opt-in.
+
+## 2026-07-07 update — machinery works
+
+The 0% was an unfinished executor, not an rquickjs limit. Fixed, all within
+rquickjs (+0.78 MB, no deno_core, no invariant break):
+
+- **async/Promise** — `Sandbox::eval_resolved` drives the job queue
+  (`Promise::finish`) and unwraps the settled value.
+- **`__awaiter`/`__generator`** — tslib shims injected via `install_ts_helpers`.
+- **host bindings** — real `executeShellCommand` (polymorphic string **and**
+  `{command,args}` object) + `executeCommand`, spawning `sh -c` in the client
+  cwd (200 ms cap, same trust as a Tier B `script`). Plus `console` / `process`
+  / `environmentVariables` shims.
+- **converter** — `captureClosureSource` now passes the real
+  `(tokens, executeShellCommand, generatorContext)` instead of a stub.
+
+**Measured on the 473-closure corpus** (`tests/measure_tierc.rs`, cwd=None, no
+cloud creds). The earlier "435 timeouts" were a misdiagnosis — the classifier
+mapped every `Error::Exception` to Timeout; they were actually JS throws.
+
+Recovery climbed as each blocker was addressed:
+
+| Step | settled | note |
+|------|---------|------|
+| machinery only (async + shims) | 150 (32%) | dominant residual: undefined module-level helpers |
+| + module-scope prelude | 220 (47%) | capture each `.ts` module's top-level helpers |
+| + strip `export` from prelude | 272 (58%) | QuickJS script-mode rejects `export` |
+| + enrich generatorContext | 293 (62%) | `context.environmentVariables` etc. |
+| + `@fig/autocomplete-generators` prelude | 295 (62%) | shared `keyValue`/`valueList`/… library |
+
+**Final: 295/473 settle (62%)**, `ok_ge1=78 (16%)`. `ran` undercounts real-world
+recovery: ~212 `empty` ran cleanly but had no data **in this sandbox** (missing
+CLIs / no creds / cwd=None); on a real shell they return results.
+
+### Module-scope bundling (done)
+
+`captureModulePrelude` slices each spec `.ts` file's top-level helper
+declarations (everything before `completionSpec`), strips `import`/`export`,
+transpiles TS→JS, and `captureClosureSource` prepends it (set per file via the
+`CURRENT_PRELUDE` save/restore, mirroring `AWS_SERVICE_HINT`). A global
+`FIG_GENERATORS_PRELUDE` serialises the shared `@fig/autocomplete-generators`
+exports. Gzip collapses the repeated preludes, so the shipped cache barely grows.
+
+### Function-form `script` synthesis (done) — the big lever
+
+Many generators use `script: (tokens) => [...cmd]` + `postProcess: (out) =>
+Suggestion[]` (aws `s3://`, ssh, file listings). The converter couldn't reduce
+the function to a static array, so it emitted an inert `{type:script,
+script:[]}` marker — 652 dead generators. Now `synthesizeScriptSource` wraps the
+`script` + `postProcess` function bodies into a Tier C `custom` source that, in
+the sandbox, calls `script(tokens)` → `executeShellCommand` → `postProcess(out)`.
+The module-scope preludes resolve their helpers.
+
+The engine's Tier C arm is also **separator-aware**: for a `s3://` / `dir/`
+token it matches + inserts against the segment after the last `/` (the closure
+already owns the leading path), so `aws s3 ls s3://<tab>` completes to
+`s3://<bucket>/`.
+
+**Corpus grew 473 → 1125 custom sources** (the 652 revived function-form
+scripts). Recovery with real creds/CLIs present: **922/1125 settle (82%),
+ok_ge1 = 693 (62%)** — real bucket/host/path completions, not just "ran".
+
+### Remaining ceiling (deferred)
+
+Residual failures reference helpers the top-level slice can't reach: defined
+**inside** the spec object, in version subdirs (`az/2.53.0/…`), or pulled
+through **transitive imports** of local modules. Recovering them needs a real
+bundler pass (esbuild the whole module tree per spec) — a larger lever with
+diminishing returns. Tier C is now a genuinely useful opt-in.
+
+---
+
+## Original 0% finding (2026-06-06)
+
 **Branch**: feat/m1-batch-v3
-**Status**: ✅ **decided — defer**. `--features quickjs` scaffold stays, but
-production ships with it **OFF / not bundled** (opt-in only). Re-open when the
-root causes below are addressed. Recorded in PLAN §0.2 (JS generator) + CLAUDE.md §3.
+**Status**: ✅ **decided — defer** (superseded by the 2026-07-07 update above).
 
 ## TL;DR
 

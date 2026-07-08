@@ -36,7 +36,7 @@
 - ✅ M0-5: `parseArguments.ts` → `nerv-engine::spec_parser` Rust 포팅 (chunks 1-5, 174 test) — types + static helpers + state machine + token classifier + matcher
 - ✅ M0-6: `loadSpec.ts` → `nerv-engine::spec_loader` + JSON 직렬화 + `build-specs` 바이너리 + `nerv-engine::complete` 파이프라인 + daemon wire-up. TS→JSON 변환 자체는 M1 (또는 외부 node 스크립트). hand-rolled fixture (git, echo, docker, kubectl) + 24 integration test 통과
 - ✅ M0-7: ZLE → CLI → UDS → 실엔진 wire-up + latency bench. IPC p95 0.052 ms, CLI cold-start p95 4.07 ms (25 ms 예산 대비 16%). `_nerv.zsh` widget 포맷 호환 확인
-- ⏳ M0-8: Apple Developer ID 서명/공증 빈 바이너리 e2e (**No-Go 차단 요건**) — `scripts/sign-notarize-e2e.sh` 로 **서명 단계 green** (Lemon Cloud Developer ID cert, hardened runtime + timestamp). 공증만 잔여: notarytool credential (`nerv-notary` keychain profile 또는 `NOTARY_KEY`/`NOTARY_KEY_ID`/`NOTARY_ISSUER` env) 확보 후 스크립트 재실행
+- ✅ M0-8: **배포 서명 정책 = Homebrew-only (공증 요건 폐기, 2026-07-04)** — `brew install` 은 quarantine xattr 미부착 → Gatekeeper 경고 없음 → Developer ID 공증 불필요. arm64 실행 서명은 Rust/linker 의 **ad-hoc**(`adhoc,linker-signed`) 로 충족, 유료 Apple 계정 불필요. `scripts/sign-notarize-e2e.sh` 는 직접-tarball + 공증을 나중에 추가할 때 쓸 opt-in 스캐폴드로 보존. 직접-다운로드 사용자만 `xattr -dr com.apple.quarantine` 안내
 
 **보너스 진척 (M0 산출물 외 — M1 0-10주차 작업 대부분 선행 완료)**:
 - ✅ CLI 5/5 표면 완성: `nerv init` / `start` / `stop` / `spec list` / `doctor` / `uninstall` (uninstall-spec.md §4 8-step atomic 포함)
@@ -62,11 +62,22 @@
 - ✅ **yarn-shorthand**: root args generator 를 subcommand emit 에 머지. `yarn web<Tab>` → `web:start/web:build:dev/...` (package.json scripts) + `yarn add` 같은 실제 subcommand 도 유지. additive merge + dedupe.
 - ✅ **cwd-aware IPC**: `Request::Complete.cwd: Option<String>` 추가. CLI bridge 가 `std::env::current_dir()` 채움. 데몬은 자기 cwd 대신 클라이언트 cwd 사용. `cd` 마다 daemon 재시작 불필요.
 - ✅ **UTF-8 char boundary 클램프**: `cursor` 가 multibyte (한글/CJK/emoji) 중간에 떨어질 때 `clamp_cursor_to_char_boundary` 로 직전 boundary 까지 감소. `'ㅊㅇ .'` 입력 시 패닉 → empty 응답.
-- ✅ **inline ghost text**: top 제안 trailing 부분을 `POSTDISPLAY` 에 dim grey 로 표시. Right-arrow (line 끝일 때만) 로 accept. LBUFFER 끝이 공백이거나 prefix 비면 ghost off — "토큰 타이핑 중" 시그널 일치.
+- ✅ **inline ghost text**: top 제안 trailing 부분을 `POSTDISPLAY` 에 dim grey 로 표시. Right-arrow (line 끝일 때만) 로 accept. LBUFFER 끝이 공백이거나 prefix 비면 ghost off — "토큰 타이핑 중" 시그널 일치. **(2026-07 갱신: 히스토리 매치가 있으면 그게 우선, 이 spec 토큰 ghost 는 fallback — 아래 dogfood UX 배치 참조.)**
 - ✅ **frecency ranking**: per-spec usage TSV (`~/Library/Caches/nerv/frecency.tsv`). 데몬이 `Request::RecordAccept` 받아 in-memory + opportunistic flush. score = `(count-1) / (1+age_days)` — single pick = no boost, 2+ picks 부터. daemon post-sort 가 alpha 결과를 boost-first 로 재정렬. `NERV_FRECENCY_FILE=-` 로 테스트 격리.
 - ✅ 에러 UX shell-side: E1 widget hint, E2 doctor table, E3 zsh<5.8 check, E4 widget conflict 감지, **E5 spec schema mismatch**
 - ✅ **E5 spec schema 버전 게이트** (error-states §3.5): `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2` + `check_schema(dir) -> {Ok/Missing/Mismatch}`). build-specs 가 `manifest.json` (schema_version) 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` 차단 (missing=관대, 구버전 호환). CLI bridge 가 schema reason 감지 → exit 3 → `_nerv.zsh` E5 회색 1줄 (`__NERV_E5_SHOWN`). doctor red row. 5 manifest unit + 1 daemon e2e (`schema_mismatch_disables_completion`).
 - ✅ **widget UX**: sliding window (`MAX_VIS = min(LINES-6, 10)`), footer 카운터 `[k/total]` 항상 표시, 우측 border 정렬 (off-by-2 fix), Tab/Shift-Tab/Arrow 모두 wrap-cycle, precmd 에서 self-insert/accept-line/backward-delete/space 재바인딩 (Q/oh-my-zsh/fzf-tab hijack 방지), description 매행 → footer 단일 라인 (Fig style).
+- ✅ **dogfood UX 배치 (2026-07-03/04, PR #13)** — 내부 dogfooding 실전 피드백으로 위젯/엔진 UX 대량 수정. 전부 `_nerv.zsh` (ZLE) + 일부 `nerv-engine`, e2e 5종 (`scripts/e2e-zle-{popup,pagekeys,enter,history}.py`) + 유닛:
+  - **`↩ Immediately execute` 센티넬** (Fig parity): 팝업 첫 행 = sentinel, `__NERV_SELECTED=0` 이 sentinel / `1..N` 이 항목. Enter@sentinel=라인 실행, Enter@항목=삽입. Tab/화살표/Page 가 sentinel↔항목 순환. **기본 선택은 토큰 상태 의존**: 빈 토큰 (`z `, trailing space) → sentinel (Enter=실행), 부분 입력 (`z ad`) → 첫 매치 (`ade-front` 하이라이트). 이전 `__NERV_NAVIGATED`/segment-boundary 휴리스틱 대체.
+  - **히스토리 인라인 ghost** (zsh-autosuggestions/Fig 방식): `__nerv_history_ghost` 가 `${history[(r)${(b)LBUFFER}*]}` 로 최신 매칭 명령 → REPLY (키스트로크 경로 fork 없음). spec 팝업 유무 무관 표시 (bare command `pwd` → ` pbcopy`). **히스토리 우선**, 없으면 spec 토큰 ghost fallback. grey 는 pre-redraw region_highlight sync (`memo=nerv_ghost`) 가 처리.
+  - **Fig arg hints**: `emit_subcommands` 가 `arg_hint()` (optional `[name]` / required `<name>` / variadic `...`) 를 `display` 에 append (`push [remote] [branch]`). `insertion` 은 bare 유지. 위젯이 힌트 부분 (` [`/` <` 이후) 을 dim 색으로.
+  - **no-op 완성 제거**: `complete()` 가 `insertion == prefix` (이미 친 토큰) 제안 drop. `git status` 완전 입력 시 `status` 재추천 X. 빈 prefix 는 전부 유지.
+  - **zoxide 이름 매치 우선**: `rank_zoxide_matches` — 이름-prefix > 이름-substring > path-only, 각 그룹 frecency 순 보존, priority 인코딩. `z enc` → `encl` 최상위 (path-only `app`/`apps` 위). 이전 alpha 재정렬 버그 수정.
+  - **p10k 앵커 가드**: `__nerv_cursor_col` 이 full-width filler prompt (powerlevel10k) 로 col≈COLUMNS 산출 시 좌측 폴백 (박스 far-right 방지).
+  - **inline ghost grey**: `POSTDISPLAY` 를 pre-redraw 훅에서 `region_highlight fg=242 memo=nerv_ghost` 로 동기화 (이전엔 기본색).
+  - **빈 버퍼 화살표 → history**: 화살표/Page 에 `[[ -n "$BUFFER" ]]` 가드 + precmd stale 상태 리셋. stale 팝업 재표시 방지.
+  - **팝업 flicker 제거**: `zle -R` 예약은 첫 표시/행수 변경 시만 (`__NERV_RESERVED` 추적), 그 외 printf in-place 덮어쓰기. 매 keystroke blank 프레임 제거.
+  - **엔진**: cargo `-p` 완성 회복 (ts-to-json `detectCargoMetadataPackages` → `script_with_json_path`) + `ScriptWithJsonPath` raw-stdout 버그 (`cached_script_raw`, aws 591 spec 영향).
 - ✅ SIGPIPE → SIG_DFL: `nerv spec list | head` panic 제거
 - ✅ **CI 확장**: rust 1.85 핀 + `brew install protobuf` (nerv-proto build.rs 회피) + `build-specs-smoke` (plain+gzip vs 9 fixture) + `ts-to-json` (bun convert:one + JSON sanity) job. **ARM64-only** 매트릭스 (macos-13 queue 너무 길어서 drop).
 - ✅ **release.yml 워크플로**: `v*.*.*` tag push → macos-14 빌드 + tarball (sha256) + GitHub Release 생성. `gh release create … --clobber` 로 idempotent.
@@ -80,7 +91,7 @@
   - `filterStrategy` (27 spec) — `"substring"` 지원, `"fuzzy"` 는 mode=Prefix 시 prefix downgrade / mode=Fuzzy 시 서브시퀀스
   - `getQueryTerm` (0 spec but infra ready) — `cargo search "tokio,serde"` 같은 delim split. 현재 Fig spec 은 closure form 만 쓰지만 M1 회복 시 사용 예정
 - ✅ **smart description fallback**: cd/z 같은 folder-only emit 의 footer 가 모두 "dir" 이던 문제. `dir_summary` 가 read_dir 1회로 `n items` / `empty` / `1 item` 출력. dotfile 제외, 200 entries cap (latency bound). 50µs/dir 추정.
-- ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. case-insensitive 서브시퀀스 (`git chk` → `checkout`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. 서브커맨드/옵션/제너레이터 출력 전부 동일하게 게이트. 매칭 알고리즘: `nerv-engine::complete::matches_filter` + `matches_name`.
+- ✅ **fuzzy matching opt-in** (M1): `~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"` 로 활성화. **3자 이상** case-insensitive 서브시퀀스 (`git chk` → `checkout`); 1-2자·all-dots 는 prefix 유지(`git ps`→prefix, push 안 뜸 / `aws --profile l`→`lemon`). 데몬 부팅 시 1회 로드 (재시작 필요). per-arg `filterStrategy: "substring"` 은 mode 무관 우선. zoxide 제외한 서브커맨드/옵션/제너레이터 출력 전부 `mode_match` 게이트. 매칭 알고리즘: `nerv-engine::complete::mode_match` (`matches_filter`/`matches_name` 공용).
 - ✅ **Homebrew tap 인프라**: `packaging/homebrew/nerv.rb` Formula 템플릿 (ARM-only `aarch64-apple-darwin`, `brew services` 통합). `.github/workflows/homebrew-bump.yml` 가 GitHub release 발행 시 자동으로 `nerv-sh/homebrew-tap` 의 Formula 를 버전+sha256 갱신. 사용자 액션: tap repo 생성 + `HOMEBREW_TAP_TOKEN` PAT secret 추가.
 - ✅ **icon glyph width contract**: `sanitize_icon` 이 `unicode-width` 로 non-ASCII glyph display width == 2 강제 (이전 ≤4 byte gate 만으로는 ambiguous-width `⚠` / Latin-extended `à` 통과 → 1-cell 밀림). ASCII = width 1, non-ASCII = width 2 외 거부. 위젯 측은 "non-ASCII = 2 cells" 가정 그대로 유지 — contract 가 엔진에서 보장.
 - ✅ **흡수 crate 브랜드 strip (active surface)**:
@@ -109,7 +120,7 @@
 **폐기된 v0.5 산출물**: M0-2 자작 transpile, `build/spec-transpile/` (loadSpec 포팅이 대체).
 
 **진행중 옵션**:
-- M0-8: 서명/공증 (Apple Developer 계정 + 인프라 필요)
+- ~~M0-8: 서명/공증~~ → **폐기 (2026-07-04)**: Homebrew-only 배포로 공증 불필요. Developer ID 공증은 직접-tarball 배포 추가 시 opt-in
 - aws 624 script-fn 회복 (closure 가 token 에 의존 → rquickjs M1 필요. closure body 자체는 직렬화 가능. 단 deno_core 금지). **2026-06-13 정밀 분석**: aws 1844 gen 중 1095 (60%) 이미 작동 (template 415 / script_with_json_path 591 / aws_list 89), 남은 624 = ~17개 distinct bespoke 클로저 (filesystem/조건분기) 의 다중 참조 — clean recognizer 불가, rquickjs-bound 확정. 상세 = `docs/findings/aws-closure-recovery-ceiling.md`
 - ✅ **bash + fish 지원 (PTY 경로 MVP)**: `nerv init {bash,fish}` → `shell-integrations/{bash/_nerv-pty.bash,fish/_nerv-pty.fish}`. 둘 다 ZLE 없음 → PTY opt-in (`NERV_PTY=1`) 전용. inner 가 OSC 697 (`Shell={bash,fish}` 필수 — `can_send_edit_buffer` 게이트, bash 첫 e2e 실패의 root cause) + StartPrompt/EndPrompt/NewCmd prompt wrap. bash=PROMPT_COMMAND, fish=`--on-event fish_prompt` 이벤트 + fish_prompt 함수 wrap. **PreExec 구현**: fish=`--on-event fish_preexec` (clean event), bash=gated DEBUG trap (2-guard: `_NERV_PTY_PROMPT_SHOWN` 가 첫 precmd 까지 empty → startup 발화 차단; `_NERV_PTY_PREEXEC_DONE` 가 커맨드당 1회 보장, precmd 가 reset). ghost+preexec e2e PASS (`scripts/e2e-pty-{bash,fish}.py`). `init_block` shell 파라미터화 + fish `| source` 문법 (POSIX `eval` 아님). cli `PtyShell` enum (export 문법 native: bash `export` / fish `set -gx`). **fish 주의**: fish 4.x 터미널 capability 쿼리(XTGETTCAP/DA/OSC11) 응답 대기 (실 터미널 OK, e2e harness 는 emulate) + fish 자체 grey autosuggestion 과 공존
 - Linux / Windows 지원 (큼)
@@ -124,12 +135,14 @@
 
 | 영역 | 불변식 | 근거 |
 |------|--------|------|
-| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). fuzzy 활성 시 case-insensitive 서브시퀀스. 데몬 부팅 시 1회 로드 — config 변경엔 재시작 필요 | PLAN §5.1 / `nerv-engine/src/config.rs` / `nerv-engine/src/complete.rs::matches_filter` |
+| 매칭 알고리즘 | **기본 prefix** — `git co` ≠ `checkout` (`c-h-` 시작). **fuzzy 는 opt-in** (`~/.config/nerv/nerv.toml` 의 `[matching] mode = "fuzzy"`). fuzzy 활성 시 **3자 이상만** case-insensitive 서브시퀀스 — 1-2자(`l`/`ps`) + all-dots(`.`/`..`)는 prefix 유지 (한글자 서브시퀀스가 전부 매칭돼 실히트 파묻힘). 게이트 = `mode_match`. **zoxide(`z`)는 자체 fuzzy 경로 — 이 게이트 미적용** (`z mz`→muzly 2자 축약 유지). 데몬 부팅 시 1회 로드 — config 변경엔 재시작 필요 | PLAN §5.1 / `nerv-engine/src/config.rs` / `nerv-engine/src/complete.rs::mode_match` |
+| generator 정렬 | `Generator::Template` 출력(`aws configure list-profiles`→`default` 먼저, `git branch` 체크아웃순)은 **소스 순서 유지** — alpha 재정렬 금지. source index 를 descending priority(`1000-idx`)로 인코딩해 `sort_by_priority_then_alpha` 의 alpha tie-break 무력화. frecency 는 그 위로 부양 | `nerv-engine/src/complete.rs` Template arm |
 | 매칭 알고리즘 | 빈 prefix 는 모두 매치 (`git ⎵` 케이스) | first-5-min §1단계 |
 | 마커 블록 | `# >>> nerv >>>` ~ `# <<< nerv <<<` 는 **고정 문자열**. `fig_integrations` 흡수 시 marker 교체 필수 (Q 의 `# Fig pre block` 잔존 금지) | uninstall-spec §3 / `nerv-shell::MARKER_*` |
 | 경로 | `~/Library/Caches/nerv/`, `~/Library/Logs/nerv/`, `~/.config/nerv/` — `directories` 크레이트 사용 X (docs 가 contract). `fig_util` / `fig_log` / `fig_settings` 흡수 시 Q 기본 경로 (`~/.config/q/`, `~/Library/Caches/amzn/`) 전부 nerv 경로로 재배선 | uninstall-spec §2 / `nerv-engine/src/paths.rs` |
 | ANSI | alternate screen 진입 X, true color X, OSC 8/52 X — raw cursor save/restore + line clearing 만. **`fig_desktop` webview UI 흡수 금지** | terminal-compat §3 / §6 |
-| Popup 렌더 | `zle -R "" "${plain[@]}"` 로 공간 reserve + `printf '\e7…\e8'` 로 colored overlay. **`zle -R "" "${colored[@]}"` 금지** (zle 가 ANSI escape 해석 X — literal `^[[…m` 출력). MAX_VIS 은 `LINES-6` 으로 clamp (popup 화면 넘어가면 save/restore 깨짐) | `shell-integrations/zsh/_nerv.zsh` |
+| Popup 렌더 | `zle -R "" "${plain[@]}"` 로 공간 reserve + `printf '\e7…\e8'` 로 colored overlay. **`zle -R "" "${colored[@]}"` 금지** (zle 가 ANSI escape 해석 X — literal `^[[…m` 출력). MAX_VIS 은 `LINES-8` 로 clamp (sentinel 행 + 4 chrome 포함, popup 화면 넘어가면 save/restore 깨짐). **flicker 방지: `zle -R` 재예약은 첫 표시/행수 변경 시만** (`__NERV_RESERVED`), 그 외 printf in-place — 매 keystroke 재예약 금지 (blank 프레임 flicker) | `shell-integrations/zsh/_nerv.zsh` |
+| 위젯 Enter/센티넬 | 팝업 첫 행 = `↩ Immediately execute` sentinel. `__NERV_SELECTED=0`=sentinel(Enter=라인 실행), `1..N`=항목(Enter=삽입). 기본 선택: 빈 토큰(trailing space)→0, 부분 입력→1. **인라인 ghost 는 히스토리 우선** (`__nerv_history_ghost`), 없으면 spec 토큰. `complete()` 가 `insertion==prefix` no-op 제안 drop. 이 계약 바꾸면 dogfood UX 회귀 — e2e-zle-{enter,history} 로 검증 | `shell-integrations/zsh/_nerv.zsh` / `nerv-engine/src/complete.rs` |
 | 에러 톤 | `[nerv] <문제> — <조치>` 영문 한 줄, 사과/완곡어구 금지, 회색만 사용 | error-states §4 |
 | CLI 표면 | v1.0 명령은 5개 (`init / doctor / start / stop / spec list / uninstall`) — 추가 금지. `q_cli` 흡수 금지 (chat/login/translate 잔존 금지) | PLAN §9 |
 | 비목표 | AI / 텔레메트리 / 자체업데이트 / `nerv config` / `spec list --changes` 코드 자체를 두지 않음. **흡수 시 `fig_api_client`/`fig_auth`/`fig_telemetry*`/`amzn-*`/`semantic_search_client` 의존 0** | PLAN §4 비목표 |
