@@ -631,34 +631,74 @@ fn check_shell_hook(r: &mut DoctorReport) {
 }
 
 /// E1: nervd running.
+///
+/// Ground truth is whether the daemon answers on its UDS socket — that is
+/// exactly the E1 trigger the ZLE widget sees (`connect(2)` succeeds + a
+/// `Ping` is answered), per error-states.md §3.1. The PID file is a
+/// secondary artifact: a daemon started outside `nerv start` (or one whose
+/// PID file was cleaned up while it kept serving) is alive without one, so a
+/// PID-file-only check reports a false "not running" and sends the user to
+/// spawn a duplicate. Probe the socket first; use the PID file only for the
+/// diagnostic detail and to distinguish a stale PID from a clean absence.
 fn check_daemon(r: &mut DoctorReport) {
-    let Some(pid_path) = paths::pid_path() else {
-        r.push(DoctorLevel::Err, "daemon", "HOME unset".into(), None);
+    let pid = paths::pid_path().and_then(|p| read_pid(&p));
+    let responds = paths::socket_path()
+        .map(|s| daemon_responds_at(&s))
+        .unwrap_or(false);
+    if responds {
+        let detail = match pid {
+            Some(pid) => format!("nervd running (pid {pid})"),
+            None => "nervd running".into(),
+        };
+        r.push(DoctorLevel::Ok, "daemon", detail, None);
         return;
-    };
-    let Some(pid) = read_pid(&pid_path) else {
-        r.push(
+    }
+    // Socket silent — fall back to the PID file for a precise message.
+    match pid {
+        Some(pid) if process_alive(pid) => r.push(
             DoctorLevel::Err,
             "daemon",
-            "nervd not running".into(),
-            Some("run: nerv start".into()),
-        );
-        return;
-    };
-    if process_alive(pid) {
-        r.push(
-            DoctorLevel::Ok,
-            "daemon",
-            format!("nervd running (pid {pid})"),
-            None,
-        );
-    } else {
-        r.push(
+            format!("nervd process alive (pid {pid}) but socket unresponsive"),
+            Some("run: nerv stop && nerv start".into()),
+        ),
+        Some(pid) => r.push(
             DoctorLevel::Err,
             "daemon",
             format!("stale PID file (pid {pid} not alive)"),
             Some("run: nerv start".into()),
-        );
+        ),
+        None => r.push(
+            DoctorLevel::Err,
+            "daemon",
+            "nervd not running".into(),
+            Some("run: nerv start".into()),
+        ),
+    }
+}
+
+/// Synchronous liveness probe: connect to the daemon's UDS socket at `sock`
+/// and send a `Ping`, returning true iff it answers with a `pong`. Short
+/// timeouts keep `nerv doctor` snappy when the socket file is present but
+/// nothing is listening.
+fn daemon_responds_at(sock: &std::path::Path) -> bool {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let Ok(mut stream) = UnixStream::connect(sock) else {
+        return false;
+    };
+    let timeout = Some(std::time::Duration::from_millis(500));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    if stream.write_all(b"{\"method\":\"ping\"}\n").is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 128];
+    match stream.read(&mut buf) {
+        Ok(n) if n > 0 => std::str::from_utf8(&buf[..n])
+            .map(|s| s.contains("pong"))
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -1446,6 +1486,65 @@ mod tests {
         // u32::MAX - 1 is rejected by some kernels as invalid; expect
         // false either way (the kill syscall returns -1 / ESRCH).
         assert!(!process_alive(probe));
+    }
+
+    /// A missing socket file means the daemon is not listening — probe
+    /// returns false without erroring (the common "not started" case).
+    #[cfg(unix)]
+    #[test]
+    fn daemon_responds_at_false_when_no_socket() {
+        let sock =
+            std::path::PathBuf::from(format!("/tmp/nerv-doctor-none-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        assert!(!daemon_responds_at(&sock));
+    }
+
+    /// A live daemon answers a `Ping` with a `pong` — regression for the
+    /// PID-file-only false negative (daemon serving without a PID file).
+    #[cfg(unix)]
+    #[test]
+    fn daemon_responds_at_true_on_pong() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let sock =
+            std::path::PathBuf::from(format!("/tmp/nerv-doctor-pong-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"{\"kind\":\"pong\",\"version\":\"0.1.0\"}\n");
+            }
+        });
+        assert!(daemon_responds_at(&sock));
+        let _ = handle.join();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A socket that accepts but answers with something other than a
+    /// `pong` (e.g. a foreign process) must read as "not the daemon".
+    #[cfg(unix)]
+    #[test]
+    fn daemon_responds_at_false_on_non_pong() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let sock = std::path::PathBuf::from(format!(
+            "/tmp/nerv-doctor-garbage-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"nope\n");
+            }
+        });
+        assert!(!daemon_responds_at(&sock));
+        let _ = handle.join();
+        let _ = std::fs::remove_file(&sock);
     }
 
     /// `strip_zsh_hooks` cycles through .zshrc, .zshenv, .zprofile,
