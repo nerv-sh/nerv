@@ -702,6 +702,33 @@ fn daemon_responds_at(sock: &std::path::Path) -> bool {
     }
 }
 
+/// Ask the daemon for its PID over the socket: send a `Ping` and parse the
+/// `pid` out of the `pong` reply. Returns None if nothing answers, the reply
+/// isn't a pong, or it carries no usable pid (an older daemon predating the
+/// `pid` field decodes it as 0 via `#[serde(default)]` — those are stoppable
+/// only through the PID file). Lets `nerv stop` / `uninstall` terminate a live
+/// daemon whose PID file is missing or stale.
+fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(sock).ok()?;
+    let timeout = Some(std::time::Duration::from_millis(500));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    stream.write_all(b"{\"method\":\"ping\"}\n").ok()?;
+    let mut buf = [0u8; 256];
+    let n = stream.read(&mut buf).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&buf[..n]).ok()?;
+    if v.get("kind")?.as_str()? != "pong" {
+        return None;
+    }
+    match v.get("pid")?.as_u64()? {
+        0 => None, // older daemon (serde default) — no usable pid
+        p => Some(p as u32),
+    }
+}
+
 /// E2 + E5: specs loaded + parse errors.
 fn check_specs(r: &mut DoctorReport) {
     let specs_dir = match std::env::var_os("NERV_SPECS_DIR")
@@ -832,15 +859,26 @@ fn cmd_stop() -> anyhow::Result<()> {
     use std::time::Duration;
 
     let pid_path = paths::pid_path().context("HOME unset")?;
-    let Some(pid) = read_pid(&pid_path) else {
-        println!("nervd not running");
-        return Ok(());
+    let file_pid = read_pid(&pid_path);
+
+    // Resolve the daemon PID: prefer the PID file, but fall back to asking
+    // the daemon over its socket. A live daemon whose PID file was removed
+    // (or that was started outside `nerv start`) is still stoppable.
+    let pid = match file_pid {
+        Some(pid) if process_alive(pid) => pid,
+        _ => match paths::socket_path().and_then(|s| daemon_pid_via_socket(&s)) {
+            Some(pid) => pid,
+            None => {
+                if file_pid.is_some() {
+                    let _ = fs::remove_file(&pid_path);
+                    println!("nervd not running (stale PID file removed)");
+                } else {
+                    println!("nervd not running");
+                }
+                return Ok(());
+            }
+        },
     };
-    if !process_alive(pid) {
-        let _ = fs::remove_file(&pid_path);
-        println!("nervd not running (stale PID file removed)");
-        return Ok(());
-    }
 
     #[cfg(unix)]
     {
@@ -1083,14 +1121,23 @@ fn stop_daemon_for_uninstall(log: &mut UninstallLog) -> bool {
         log.warn("daemon", "HOME unset");
         return false;
     };
-    let Some(pid) = read_pid(&pid_path) else {
-        log.ok("daemon", "not running".into());
-        return true;
+    // Prefer the PID file; fall back to the socket so a live daemon with a
+    // missing/stale PID file is still stopped — uninstall must leave zero
+    // trace (uninstall-spec.md §4), and a surviving daemon is a trace.
+    let file_pid = read_pid(&pid_path);
+    let pid = match file_pid {
+        Some(pid) if process_alive(pid) => pid,
+        _ => match paths::socket_path().and_then(|s| daemon_pid_via_socket(&s)) {
+            Some(pid) => pid,
+            None => {
+                match file_pid {
+                    Some(pid) => log.ok("daemon", format!("stale pid {pid} ignored")),
+                    None => log.ok("daemon", "not running".into()),
+                }
+                return true;
+            }
+        },
     };
-    if !process_alive(pid) {
-        log.ok("daemon", format!("stale pid {pid} ignored"));
-        return true;
-    }
 
     #[cfg(unix)]
     {
@@ -1560,6 +1607,65 @@ mod tests {
         assert!(!daemon_responds_at(&sock));
         let _ = handle.join();
         let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A one-shot `pong` server for the `daemon_pid_via_socket` tests:
+    /// accepts one connection, ignores the request, replies with `reply`.
+    #[cfg(unix)]
+    fn pong_server(tag: &str, reply: &'static str) -> std::path::PathBuf {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+        let sock = std::path::PathBuf::from(format!(
+            "/tmp/nerv-pidsock-{tag}-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        sock
+    }
+
+    /// `daemon_pid_via_socket` extracts the daemon PID from a `pong` so
+    /// `nerv stop` / `uninstall` can signal a daemon with no PID file.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_pid_via_socket_extracts_pid() {
+        let sock = pong_server(
+            "pid",
+            "{\"kind\":\"pong\",\"version\":\"0.1.0\",\"pid\":4242}\n",
+        );
+        assert_eq!(daemon_pid_via_socket(&sock), Some(4242));
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A pong from an older daemon (no `pid`, decoded as 0) or with an
+    /// explicit 0 yields None — not a usable target to signal.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_pid_via_socket_none_without_usable_pid() {
+        let no_pid = pong_server("nopid", "{\"kind\":\"pong\",\"version\":\"0.1.0\"}\n");
+        assert_eq!(daemon_pid_via_socket(&no_pid), None);
+        let _ = std::fs::remove_file(&no_pid);
+
+        let zero = pong_server(
+            "zero",
+            "{\"kind\":\"pong\",\"version\":\"0.1.0\",\"pid\":0}\n",
+        );
+        assert_eq!(daemon_pid_via_socket(&zero), None);
+        let _ = std::fs::remove_file(&zero);
+
+        let missing = std::path::PathBuf::from(format!(
+            "/tmp/nerv-pidsock-missing-{}.sock",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(daemon_pid_via_socket(&missing), None);
     }
 
     /// `strip_zsh_hooks` cycles through .zshrc, .zshenv, .zprofile,
