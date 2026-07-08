@@ -149,11 +149,28 @@ runtime scope, and no bundler rebinds a factory parameter.
    just its public exports. Recovers sibling-helper refs.
 2. *Expensive half* — capture family generators at the **factory-call
    expression** (`keyValue({...})`) instead of the leaf closure, so the sandbox
-   re-invokes the factory and rebuilds the parameter scope. Requires reading the
-   spec's source AST (the converter currently only imports the runtime module,
-   which exposes the produced `{trigger,custom}` object — it can't see which
-   factory call produced it). Both halves are needed for the dominant bucket;
-   either alone recovers little.
+   re-invokes the factory and rebuilds the parameter scope. Requires knowing the
+   factory args (the converter currently only imports the runtime module, which
+   exposes the produced `{trigger,custom}` object — it can't see which factory
+   call produced it). Both halves are needed for the dominant bucket; either
+   alone recovers little.
+
+**The expensive half is blocked by the Bun toolchain (2026-07-08 spike).** The
+natural way to get the factory args is to intercept `@fig/autocomplete-generators`
+at convert time and tag each produced object with `{name, args}`. Four
+interception mechanisms were tried against Bun 1.3.11; all fail:
+
+| mechanism | failure |
+|-----------|---------|
+| `bun:test` `mock.module` | no-op outside the test runner (`bun run`) |
+| `Bun.plugin` onLoad transform of `index.js` | breaks the `__exportStar` named-export static analysis → `keyValueList not found` |
+| onLoad transform of leaf `src/*.js` | rewrite makes the CJS module async → `index.js`'s `require()` throws |
+| onResolve → virtual ESM wrapper | onResolve never fires for the bare specifier resolved via `NODE_PATH` |
+
+The only remaining route is AST-parsing each spec's source to extract the
+factory-call expression and correlate it back to the runtime generator — hard
+when a spec has multiple factory calls, and still niche-only in payoff. Left as
+future work.
 
 **Decision: defer.** The payoff specs are niche (dscl / nx / chezmoi / asdf /
 meteor) plus cargo's `ai` generator — which calls a GPT endpoint, an explicit
