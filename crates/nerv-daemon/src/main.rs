@@ -154,6 +154,7 @@ async fn handle_connection(
         let resp = match serde_json::from_str::<Request>(trimmed) {
             Ok(Request::Ping) => Response::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
+                pid: std::process::id(),
             },
             Ok(Request::Complete { line, cursor, cwd }) => match schema_block.as_ref() {
                 // E5: schema mismatch disables all completion; the reason
