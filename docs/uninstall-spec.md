@@ -75,7 +75,7 @@ eval "$(/opt/homebrew/bin/nerv init zsh --shell-script)"
    c. 살아있으면 SIGKILL → 1초 대기
    d. nervd.sock 파일 삭제
 3. shell hook 제거:
-   a. 모든 알려진 zsh init 파일 스캔 — ~/.zshrc, ~/.zshenv, ~/.zprofile, ~/.zlogin
+   a. 모든 알려진 셸 init 파일 스캔 — zsh: ~/.zshrc, ~/.zshenv, ~/.zprofile, ~/.zlogin / bash: ~/.bashrc, ~/.bash_profile, ~/.profile / fish: ~/.config/fish/config.fish. `nerv init {zsh,bash,fish}` 가 동일 마커 블록을 emit 하므로 셋 다 제거 대상 (bash/fish hook 잔존 시 nerv 부재에도 셸 시작마다 `eval "$(nerv …)"` → command-not-found 에러 — §114 위반).
    b. 마커 블록 (시작~종료 마커 포함) 추출
    c. 블록 1개씩 모두 제거 (여러 개 발견 시 모두)
    d. 마커 블록만 제거된 결과를 atomic write (임시파일 → rename)
