@@ -119,13 +119,49 @@ already owns the leading path), so `aws s3 ls s3://<tab>` completes to
 scripts). Recovery with real creds/CLIs present: **922/1125 settle (82%),
 ok_ge1 = 693 (62%)** — real bucket/host/path completions, not just "ran".
 
-### Remaining ceiling (deferred)
+### Remaining ceiling — esbuild disproven (2026-07-08)
 
-Residual failures reference helpers the top-level slice can't reach: defined
-**inside** the spec object, in version subdirs (`az/2.53.0/…`), or pulled
-through **transitive imports** of local modules. Recovering them needs a real
-bundler pass (esbuild the whole module tree per spec) — a larger lever with
-diminishing returns. Tier C is now a genuinely useful opt-in.
+The earlier hypothesis ("needs a per-spec esbuild module-tree bundler") is
+**wrong**, disproven by `measure_undefined_scope`. Of the 203 residual failures,
+166 are `'X' is not defined` and **all 166 have `X` absent from the captured
+source** (`declared-in-src = 0`). They split as:
+
+| bucket | count | identifiers | real fix |
+|--------|-------|-------------|----------|
+| factory params | 67 | `separator`(50), `keywords`(17) | factory-call-level capture (see below) |
+| generators-lib private helpers | 75 | `getSuggestions`(36), `suggestOptions`(18), `lastIndexOf`(14), `getConfigLines`(7) | port the module-private helpers into the prelude |
+| single niche spec | 17 | `map` (all nx) | per-spec |
+| QuickJS builtin gap | 3 | `Intl` | enable the `Intl` feature in the rquickjs build |
+| bespoke per-spec | 4 | `npmSearchGenerator`, `getDenoConfig`, `isPlatform` | per-spec |
+
+**Why esbuild can't help.** These aren't missing `import`s — a bundler resolves
+import graphs. They are *runtime closure variables*. The converter captures a
+**leaf arrow** via `fn.toString()` (e.g. `keyValue({separator:":"})`'s inner
+`trigger`/`custom`), which drops the enclosing activation record: `separator` /
+`keywords` were bound when the factory ran, and `lastIndexOf` / `getSuggestions`
+are module-private siblings the `Object.entries(figGenerators)` prelude (public
+exports only) never captured. No `toString()`-based capture can reconstruct a
+runtime scope, and no bundler rebinds a factory parameter.
+
+**The real fix is a two-part converter rearchitecture, not a bundler:**
+1. *Cheap half* — extend `FIG_GENERATORS_PRELUDE` to also emit the module's
+   private helpers (`lastIndexOf`, `getSuggestions`, `getConfigLines`, …), not
+   just its public exports. Recovers sibling-helper refs.
+2. *Expensive half* — capture family generators at the **factory-call
+   expression** (`keyValue({...})`) instead of the leaf closure, so the sandbox
+   re-invokes the factory and rebuilds the parameter scope. Requires reading the
+   spec's source AST (the converter currently only imports the runtime module,
+   which exposes the produced `{trigger,custom}` object — it can't see which
+   factory call produced it). Both halves are needed for the dominant bucket;
+   either alone recovers little.
+
+**Decision: defer.** The payoff specs are niche (dscl / nx / chezmoi / asdf /
+meteor) plus cargo's `ai` generator — which calls a GPT endpoint, an explicit
+nerv non-goal (CLAUDE.md: no AI). aws, the one high-traffic spec, is already at
+92% and shipped. Real-usage completions come from Tier A/B + Rust-native
+recognizers. The converter rearchitecture is high effort against near-zero
+user value; not worth it now. `measure_undefined_scope` is kept as the gate if
+this is ever revisited.
 
 ---
 

@@ -84,6 +84,76 @@ fn measure_recovery() {
     }
 }
 
+/// Categorise `'X' is not defined` failures: is `X` actually declared as a
+/// top-level name in the captured source (→ a scope/concatenation bug we can
+/// fix by hoisting) or absent entirely (→ a lexical var captured from an
+/// enclosing runtime scope, or a missing import — the former is unfixable by
+/// any bundler since `fn.toString()` drops the closure environment)? This is
+/// the discriminating fact for whether an esbuild module-bundler is worth it.
+#[test]
+#[ignore]
+fn measure_undefined_scope() {
+    let raw =
+        std::fs::read_to_string("/tmp/tierc_sources.json").expect("run the python extractor first");
+    let items: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let arr = items.as_array().unwrap();
+    let budget = Duration::from_millis(200);
+    let (mut declared, mut absent, mut other_err) = (0usize, 0usize, 0usize);
+    let mut absent_ids: BTreeMap<String, usize> = BTreeMap::new();
+    let mut absent_examples: Vec<(String, String)> = Vec::new();
+    for it in arr {
+        let stem = it["stem"].as_str().unwrap_or("x");
+        let src = it["src"].as_str().unwrap_or("");
+        let tokens = vec![stem.to_string(), "a".to_string()];
+        let Err(e) = nerv_engine::tier_c::execute_debug(src, &tokens, None, budget) else {
+            continue;
+        };
+        // Parse "'ID' is not defined" out of the error string.
+        let Some(id) = e
+            .split_once('\'')
+            .and_then(|(_, r)| r.split_once('\''))
+            .map(|(id, _)| id.to_string())
+            .filter(|_| e.contains("is not defined"))
+        else {
+            other_err += 1;
+            continue;
+        };
+        // Is `id` declared at the top level of the captured source?
+        let decl = [
+            format!("function {id}"),
+            format!("const {id}"),
+            format!("let {id}"),
+            format!("var {id}"),
+            format!("globalThis.{id} ="),
+        ]
+        .iter()
+        .any(|pat| src.contains(pat.as_str()));
+        if decl {
+            declared += 1;
+        } else {
+            absent += 1;
+            *absent_ids.entry(id.clone()).or_default() += 1;
+            if absent_examples.len() < 6 {
+                absent_examples.push((stem.to_string(), id));
+            }
+        }
+    }
+    println!("\n=== undefined-identifier failure scope ===");
+    println!("declared-in-src (hoist/scope bug, fixable): {declared}");
+    println!("absent-from-src (lexical loss OR missing import): {absent}");
+    println!("other errors (non 'not defined'): {other_err}");
+    println!("\n--- top absent identifiers ---");
+    let mut v: Vec<_> = absent_ids.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    for (id, c) in v.into_iter().take(15) {
+        println!("{c:4}  {id}");
+    }
+    println!("\n--- absent examples (stem, id) ---");
+    for (stem, id) in &absent_examples {
+        println!("  {stem}: {id}");
+    }
+}
+
 /// Stage-by-stage latency of the Tier C hot path. The question the perf
 /// plan hinges on: where does the per-keystroke cost go, and is it inside
 /// the 25ms input budget? Shell exec is stubbed to a no-op so we isolate
