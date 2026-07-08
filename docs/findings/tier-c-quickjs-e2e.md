@@ -1,10 +1,62 @@
-# Finding — Tier C (quickjs) recovery: 0% → 32% (machinery fixed)
+# Finding — Tier C (quickjs) recovery: 0% → 82% (shipped by default)
 
-**Date**: 2026-06-06 (0% baseline) · **2026-07-07 update: machinery fixed, 32%**
-**Status**: 🔧 **re-opened and largely fixed**. The three 0%-era root causes are
-resolved; the executor now runs closures for real. Remaining ceiling is closure
-**lexical scope** (module-level helpers the converter doesn't capture), not the
-runtime. Still `--features quickjs` opt-in.
+**Date**: 2026-06-06 (0% baseline) · **2026-07-07: machinery fixed, 82%** ·
+**2026-07-08: latency measured, shipped in release binary**
+**Status**: ✅ **shipped by default**. The three 0%-era root causes are resolved;
+the executor runs closures for real (82% settle, aws 746/749). A 2026-07-08
+latency measurement confirmed the JS machinery is 2-3ms (inside the 25ms budget),
+and revealed the release binary shipped *without* `--features quickjs` — so the
+recovery never reached users. `release.yml` now builds
+`--features nerv-cli/quickjs,nerv-daemon/quickjs` (+0.78MB). Remaining ceiling is
+closure **lexical scope** (module-level helpers the converter doesn't capture) —
+a niche-tool tail, deferred (needs a per-spec esbuild bundler).
+
+## 2026-07-08 update — latency measured, shipped
+
+Two questions gated the ship decision; a `measure_tierc.rs` run answered both.
+
+**1. Perf — is the per-keystroke JS cost inside budget?** Stage timing (avg over
+50 iters, shell stubbed no-op to isolate JS from the already-SHELL_CACHE'd
+subprocess):
+
+| stem | Sandbox::new | ts-helpers | host shim | tokens | eval (closure+prelude) | TOTAL |
+|------|------|------|------|------|------|-------|
+| cargo | 174µs | 295µs | 181µs | 8µs | 2078µs | **2.7ms** |
+| npm | 176µs | 296µs | 185µs | 8µs | 1809µs | **2.5ms** |
+| nx | 181µs | 303µs | 187µs | 10µs | 2479µs | **3.2ms** |
+| gh | 172µs | 289µs | 179µs | 8µs | 1513µs | **2.2ms** |
+
+The earlier "warm 8ms" included the (cached) shell round-trip. Pure JS machinery
+is **2-3ms** — comfortably inside the 25ms input budget. The token-independent
+setup (new + helpers + shim = ~0.65ms) *could* be amortised via Runtime reuse,
+but the dominant cost is `eval` (per-call, unavoidable) and the total is already
+in budget. **No perf work needed** — a result cache keyed on tokens would miss on
+every keystroke anyway, and the residual is token-independent.
+
+**2. Function — do the specs users actually use work?** Per-stem recovery
+(cwd=None, no creds — undercounts real-world; `empty` mostly = ran-clean-no-data):
+
+| stem | settled/total | ok_ge1 | note |
+|------|------|------|------|
+| aws | 746/749 | 615 | dominant corpus, essentially complete |
+| npm | 25/29 | 0 | ran clean, needs real npm |
+| meteor/trivy/dscl/st2 | full | — | niche, work |
+| **cargo** | **0/44** | 0 | all fail — `'lastIndexOf' is not defined` etc. |
+| chezmoi/nx/asdf/esbuild/deno/pnpm/swift/dotnet | 0-few/N | 0 | broken tail |
+
+The broken 18% is **niche tools** whose closures reference module-level helpers
+the prelude slice can't reach (`'separator'`, `'getSuggestions'`, `'map'`,
+`'keywords'` not defined). The specs a typical user hits (git/docker/kubectl/gh/
+npm/cargo core) are recovered by **Tier A/B + Rust-native recognizers**, not Tier
+C — so the tail is low priority. cargo's important completions (`-p <pkg>`, subs)
+come from native `detectCargoMetadataPackages`; only its bespoke Tier C tail
+fails, and that soft-fails to the next generator.
+
+**Decision (2026-07-08): ship Tier C in the release binary.** Perf is in budget,
+aws recovery is the biggest available functional win, and it only reaches users
+if compiled in. Reverses the 2026-06-07 "default-OFF, unbundled" decision (which
+was correct when execution was 0%). Closing the niche tail needs a per-spec
+esbuild bundler — a larger lever with diminishing returns, deferred.
 
 ## 2026-07-07 update — machinery works
 
