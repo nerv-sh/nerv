@@ -478,6 +478,16 @@ pub fn complete_in(
         };
     }
 
+    // Scope to the command under the cursor, not the whole line. On a
+    // compound line like `git checkout main && git p` the user is completing
+    // the *last* segment (`git p` → push/pull), not re-parsing the entire
+    // line as one `git` invocation. The shell_parser tree is quote-aware, so
+    // a `&&`/`|`/`;` inside a string (`echo "a && b" && git p`) does NOT
+    // split — a naive `rfind("&&")` would get that wrong.
+    let seg_start = command_segment_start(&line[..cursor]).min(cursor);
+    let line = &line[seg_start..];
+    let cursor = cursor - seg_start;
+
     let tokens = tokenize(&line[..cursor]);
 
     if tokens.is_empty() {
@@ -673,6 +683,30 @@ fn cursor_in_open_quote(text: &str) -> bool {
         }
     }
     state != Q::None
+}
+
+/// Byte offset where the command under the cursor begins. On a compound line
+/// the completion should target the last command segment, e.g. `git a && git b`
+/// → the `git b` slice. Delegates to the quote-aware `shell_parser` tree so
+/// separators inside quotes (`echo "a && b" && git c`) don't false-split.
+/// Returns 0 for a simple command (whole prefix is one segment) or when no
+/// command node is found (bare assignment, subshell — left as-is, same as
+/// before this scoping existed).
+fn command_segment_start(prefix: &str) -> usize {
+    rightmost_command_start(&crate::shell_parser::parse(prefix)).unwrap_or(0)
+}
+
+fn rightmost_command_start(node: &crate::shell_parser::Node) -> Option<usize> {
+    use crate::shell_parser::NodeKind;
+    match node.kind {
+        NodeKind::Command => Some(node.span.start),
+        // Recurse into composition/wrapper nodes. `AssignmentList` covers the
+        // env-prefix form (`FOO=bar git b`) — its trailing Command child wins.
+        NodeKind::Program | NodeKind::List | NodeKind::Pipeline | NodeKind::AssignmentList => {
+            node.children.iter().rev().find_map(rightmost_command_start)
+        }
+        _ => None,
+    }
 }
 
 fn tokenize(text: &str) -> Vec<Annotation> {
@@ -3820,6 +3854,27 @@ region = us-east-1
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].text, "git");
         assert_eq!(toks[1].text, "status");
+    }
+
+    #[test]
+    fn command_segment_start_scopes_to_last_command() {
+        // Simple command — whole prefix is one segment.
+        assert_eq!(command_segment_start("git p"), 0);
+        // Compound: complete the segment after the separator.
+        assert_eq!(command_segment_start("git checkout main && git p"), 21);
+        assert_eq!(command_segment_start("ls && git p"), 6);
+        assert_eq!(command_segment_start("echo hi; git p"), 9);
+        assert_eq!(command_segment_start("git a | git p"), 8);
+        // Quote-aware: the `&&` *inside* the string must NOT split. A naive
+        // rfind("&&") would return the wrong offset here.
+        let quoted = r#"echo "a && b" && git p"#;
+        assert_eq!(command_segment_start(quoted), quoted.rfind("git").unwrap());
+        // Env-prefix: the trailing Command child of the assignment list wins.
+        assert_eq!(command_segment_start("FOO=bar git p"), 8);
+        // Trailing operator: fresh (empty) right-hand command, so the slice
+        // lands just past `&&` (whitespace-only tail) — the left command is
+        // NOT re-listed.
+        assert!(command_segment_start("git status && ") >= "git status &&".len());
     }
 
     #[test]
