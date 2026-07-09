@@ -46,7 +46,22 @@ Run `nerv doctor` to verify the install.
 > Gatekeeper will warn once — clear the quarantine flag with
 > `xattr -dr com.apple.quarantine <path-to-nerv>`.
 
-To leave:
+## Turn it off
+
+Stop the daemon — completions go quiet, everything stays installed:
+
+```sh
+nerv stop
+brew services stop nerv   # only if you started it as a service
+```
+
+The widget is still loaded, so the next keystroke prints a one-line hint that
+the daemon isn't running. To keep it out of new shells entirely, comment out
+the `eval` line inside the `# >>> nerv >>>` block in `~/.zshrc`, then
+`exec zsh`. Uncomment to re-enable. Re-running `nerv init zsh` rewrites that
+block and turns it back on.
+
+To leave for good:
 
 ```sh
 nerv uninstall
