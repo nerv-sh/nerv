@@ -1689,6 +1689,16 @@ fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<V
     if script.is_empty() {
         return None;
     }
+    // Well-known recovery: `aws configure list-profiles` cold-starts the aws
+    // CLI (~1s — past the 800ms generator timeout → the popup intermittently
+    // came up empty, exactly the "aws --profile shows nothing" report). The
+    // command only reads names out of ~/.aws, so do that directly: instant and
+    // deterministic, no subprocess. Same pattern as ssh_hosts / package.json.
+    if let [a, b, c] = script {
+        if a == "aws" && b == "configure" && c == "list-profiles" {
+            return aws_profiles();
+        }
+    }
     let capped = cap_git_history(script);
     let bin = capped.first()?;
     let args = &capped[1..];
@@ -2465,6 +2475,47 @@ fn ssh_hosts() -> Option<Vec<String>> {
     Some(hosts.into_iter().collect())
 }
 
+/// Profile names as `aws configure list-profiles` reports them, read straight
+/// from `~/.aws/{config,credentials}`. Recovers the CLI generator without the
+/// ~1s cold-start spawn (see [`execute_template_generator`]).
+fn aws_profiles() -> Option<Vec<String>> {
+    let home = std::env::var_os("HOME")?;
+    let aws_dir = std::path::PathBuf::from(home).join(".aws");
+    let config = std::fs::read_to_string(aws_dir.join("config")).unwrap_or_default();
+    let credentials = std::fs::read_to_string(aws_dir.join("credentials")).unwrap_or_default();
+    let out = parse_aws_profiles(&config, &credentials);
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// The `[…]` section name of an ini line, trimmed, or `None`.
+fn ini_section(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .map(str::trim)
+}
+
+/// Merge profile names from the two AWS shared files, first-seen order.
+/// `config` uses `[default]` + `[profile NAME]` (other section kinds —
+/// `[sso-session …]`, `[services …]` — are not profiles); `credentials` uses
+/// bare `[NAME]`.
+fn parse_aws_profiles(config: &str, credentials: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    // config `[default]` / `[profile NAME]`; then credentials `[NAME]`.
+    let config_names = config.lines().filter_map(|line| match ini_section(line)? {
+        "default" => Some("default"),
+        section => section.strip_prefix("profile ").map(str::trim),
+    });
+    let cred_names = credentials.lines().filter_map(ini_section);
+    for name in config_names.chain(cred_names) {
+        if !name.is_empty() && seen.insert(name.to_string()) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 fn ssh_hosts_from_known(path: &std::path::Path, out: &mut std::collections::BTreeSet<String>) {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return;
@@ -3039,6 +3090,32 @@ mod tests {
         let r2 = complete("mycli --prof", "mycli --prof".len(), &reg);
         let got2: Vec<&str> = r2.items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(got2, vec!["--profile"], "partial flag lists the option");
+    }
+
+    #[test]
+    fn parse_aws_profiles_merges_config_and_credentials() {
+        // config: [default] + [profile NAME]; non-profile sections ignored.
+        let config = "\
+[default]
+region = us-east-1
+[profile lemon]
+[sso-session corp]
+[profile zeph]
+[services s]
+";
+        // credentials: bare [NAME]; `lemon` dedups against config.
+        let credentials = "\
+[lemon]
+[keys-only]
+";
+        let got = super::parse_aws_profiles(config, credentials);
+        assert_eq!(
+            got,
+            vec!["default", "lemon", "zeph", "keys-only"],
+            "config order first, credentials-only appended, deduped, non-profile sections dropped"
+        );
+        // Empty inputs → empty (aws_profiles maps this to None → fall through).
+        assert!(super::parse_aws_profiles("", "").is_empty());
     }
 
     #[test]
