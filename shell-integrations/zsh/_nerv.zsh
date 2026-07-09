@@ -689,12 +689,25 @@ __nerv_accept() {
   if (( ${#__NERV_ITEMS} > 0 )); then
     if (( __NERV_SELECTED >= 1 )); then
       __nerv_insert_selected
+      # Chain: after accepting a flag (`--profile `) or subcommand, re-run
+      # completion so its argument list (the profiles) pops up immediately —
+      # the user shouldn't have to type a throwaway character to see the next
+      # step. Bypass the dedup guard. No-op popup-wise when nothing follows.
+      __NERV_PREV_LBUFFER=$'\x00'
+      __nerv_complete
     else
       __nerv_cycle_next
       __nerv_show_popup "${__NERV_ITEMS[@]}"
     fi
   else
-    zle expand-or-complete
+    # No live popup. The user pressed Tab expecting completion to fire
+    # (universal shell habit), or a prior keystroke's popup desynced away.
+    # Re-run the query once — bypass the dedup guard so an unchanged
+    # LBUFFER still re-completes — and only defer to zsh's
+    # expand-or-complete when nerv genuinely has nothing (filenames, etc).
+    __NERV_PREV_LBUFFER=$'\x00'
+    __nerv_complete
+    (( ${#__NERV_ITEMS} > 0 )) || zle expand-or-complete
   fi
 }
 zle -N __nerv_accept
