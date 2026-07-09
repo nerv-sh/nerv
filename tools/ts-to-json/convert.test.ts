@@ -1,11 +1,30 @@
 import { describe, expect, test } from "bun:test";
 import {
+  curatedExtensions,
   detectAwsJsonPath,
   detectAwsListCustom,
   detectCargoMetadataPackages,
   detectFilepathsGenerator,
   enrichK8sNamespaces,
 } from "./convert";
+
+describe("curatedExtensions", () => {
+  test("injects git flow (loadSpec git-flow) at the top level", () => {
+    const got = curatedExtensions("git", new Set(), 0);
+    expect(got).toHaveLength(1);
+    expect(got[0]).toMatchObject({ name: "flow", loadSpec: "git-flow" });
+  });
+
+  test("skips a name the spec already declares", () => {
+    const got = curatedExtensions("git", new Set(["flow"]), 0);
+    expect(got).toHaveLength(0);
+  });
+
+  test("only applies at depth 0, and only to known specs", () => {
+    expect(curatedExtensions("git", new Set(), 1)).toHaveLength(0);
+    expect(curatedExtensions("other", new Set(), 0)).toHaveLength(0);
+  });
+});
 
 describe("detectAwsJsonPath", () => {
   test("captures parent_key + id_field from canonical aws postProcess", () => {
