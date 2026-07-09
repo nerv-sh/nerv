@@ -553,6 +553,44 @@ pub fn complete_in(
         }
     }
 
+    // Exact complete option name, no trailing space: advance to its argument
+    // values rather than re-suggesting the flag itself (which the no-op drop
+    // below strips to nothing, leaving an empty popup). Fig parity —
+    // `aws --profile` + Tab surfaces the same profiles as `aws --profile ␣`,
+    // instead of forcing the user to type the space first. Gated on:
+    //   - exact name match (partial `--prof` still lists options normally),
+    //   - the option takes an argument,
+    //   - NOT requiresSeparator (those surface as `--opt=`; the arg follows
+    //     the `=`, handled by the normal option path),
+    //   - the arg actually yields candidates (else fall through so an empty
+    //     generator doesn't swallow the option list).
+    if prefix_is_option {
+        if let Some(opt) =
+            crate::spec_parser::find_option_inherited(spec_ref, &result.subcommand_path, &prefix)
+        {
+            if opt.names.iter().any(|n| n == &prefix)
+                && !opt.requires_separator
+                && !opt.args.is_empty()
+            {
+                let mut items =
+                    emit_candidates_for_arg(&opt.args[0], "", cwd, Some(opt), mode, &tokens);
+                if !items.is_empty() {
+                    // The widget replaces the whole current token (`--profile`)
+                    // with `insertion`, so the flag must ride along or it gets
+                    // dropped — `aws lemon` instead of `aws --profile lemon`.
+                    // `display` stays the bare value shown in the popup.
+                    for it in &mut items {
+                        it.insertion = format!("{prefix} {}", it.insertion);
+                    }
+                    return CompleteResult {
+                        items,
+                        reason: None,
+                    };
+                }
+            }
+        }
+    }
+
     let mut items = if prefix_is_option {
         emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
     } else if prefer_subcommands {
@@ -2951,6 +2989,56 @@ mod tests {
         let r = SpecRegistry::empty();
         r.insert(spec);
         r
+    }
+
+    #[test]
+    fn exact_option_with_arg_advances_to_values_without_space() {
+        // Fig parity: typing a complete flag that takes an argument and
+        // pressing Tab (no trailing space) surfaces the argument's values,
+        // not the flag itself — which the no-op drop would otherwise strip to
+        // an empty popup. `mycli --profile` + Tab → profile names, same as
+        // `mycli --profile ␣`.
+        let mk = |name: &str| crate::spec_parser::RawSuggestion {
+            name: name.into(),
+            ..Default::default()
+        };
+        let spec = Subcommand {
+            name: "mycli".into(),
+            options: vec![Opt {
+                names: vec!["--profile".into()],
+                args: vec![Arg {
+                    suggestions: vec![mk("default"), mk("lemon"), mk("zeph")],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let reg = registry_with(spec);
+        // Exact option name, no trailing space → advance to the arg values.
+        let r = complete("mycli --profile", "mycli --profile".len(), &reg);
+        // `display` is the bare value shown in the popup...
+        let mut disp: Vec<&str> = r.items.iter().map(|s| s.display.as_str()).collect();
+        disp.sort();
+        assert_eq!(
+            disp,
+            vec!["default", "lemon", "zeph"],
+            "popup shows bare argument values"
+        );
+        // ...but `insertion` carries the flag so the widget (which replaces
+        // the whole `--profile` token) yields `--profile <value>`.
+        let mut ins: Vec<&str> = r.items.iter().map(|s| s.insertion.as_str()).collect();
+        ins.sort();
+        assert_eq!(
+            ins,
+            vec!["--profile default", "--profile lemon", "--profile zeph"],
+            "insertion keeps the flag so the buffer isn't corrupted"
+        );
+        // Partial option name is still being typed → list the option, do
+        // NOT advance (user may be heading for `--profiles`).
+        let r2 = complete("mycli --prof", "mycli --prof".len(), &reg);
+        let got2: Vec<&str> = r2.items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(got2, vec!["--profile"], "partial flag lists the option");
     }
 
     #[test]
