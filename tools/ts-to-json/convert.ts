@@ -1057,6 +1057,37 @@ const MAX_DEPTH = 2;
 // — the heuristic Fig itself uses to prefer the "modern" branch.
 const GENERATE_SPEC_ALLOW = new Set(["z"]);
 
+// Curated top-level extensions for specs whose `generateSpec` discovers
+// installed plugins at runtime (git → `git help -a` external commands). We
+// don't run that closure at build time — it depends on what's installed on the
+// build machine and would be non-deterministic — so the well-known `loadSpec`
+// extensions are injected statically here. The `loadSpec` inlining in
+// `convertSpec` then pulls in each extension's subtree (e.g. git-flow.ts), so
+// `git flow feature start …` completes. Only applied at the top level
+// (depth 0) and keyed by the spec's primary name.
+const EXTENSION_SUBCOMMANDS: Record<string, any[]> = {
+  git: [
+    {
+      name: "flow",
+      description: "Extensions to follow Vincent Driessen's branching model",
+      loadSpec: "git-flow",
+    },
+  ],
+};
+
+// Curated extensions to splice into a spec's subcommands. Only at the top
+// level (depth 0), and never shadowing a name the spec already declares.
+export const curatedExtensions = (
+  primary: string,
+  declaredNames: Set<string>,
+  depth: number,
+): any[] =>
+  depth === 0
+    ? (EXTENSION_SUBCOMMANDS[primary] ?? []).filter(
+        (e) => !declaredNames.has(e.name),
+      )
+    : [];
+
 const tryResolveGenerateSpec = async (
   s: FigSpec | any,
   fallbackName?: string,
@@ -1128,7 +1159,13 @@ const convertSpec = async (
   const primary = allNames[0] ?? fallbackName ?? "";
   const aliases = allNames.slice(1);
   const subcommands: NervSpec[] = [];
-  for (const sc of s.subcommands ?? []) {
+  // Inject curated plugin subcommands (e.g. git → flow) at the top level.
+  // Skip any whose name a real subcommand already declares.
+  const declared = new Set<string>(
+    (s.subcommands ?? []).flatMap((sc: any) => namesOf(sc.name)),
+  );
+  const extras = curatedExtensions(primary, declared, ctx.depth);
+  for (const sc of [...(s.subcommands ?? []), ...extras]) {
     subcommands.push(await convertSpec(sc, ctx));
   }
   return {

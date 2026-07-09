@@ -553,6 +553,44 @@ pub fn complete_in(
         }
     }
 
+    // Exact complete option name, no trailing space: advance to its argument
+    // values rather than re-suggesting the flag itself (which the no-op drop
+    // below strips to nothing, leaving an empty popup). Fig parity —
+    // `aws --profile` + Tab surfaces the same profiles as `aws --profile ␣`,
+    // instead of forcing the user to type the space first. Gated on:
+    //   - exact name match (partial `--prof` still lists options normally),
+    //   - the option takes an argument,
+    //   - NOT requiresSeparator (those surface as `--opt=`; the arg follows
+    //     the `=`, handled by the normal option path),
+    //   - the arg actually yields candidates (else fall through so an empty
+    //     generator doesn't swallow the option list).
+    if prefix_is_option {
+        if let Some(opt) =
+            crate::spec_parser::find_option_inherited(spec_ref, &result.subcommand_path, &prefix)
+        {
+            if opt.names.iter().any(|n| n == &prefix)
+                && !opt.requires_separator
+                && !opt.args.is_empty()
+            {
+                let mut items =
+                    emit_candidates_for_arg(&opt.args[0], "", cwd, Some(opt), mode, &tokens);
+                if !items.is_empty() {
+                    // The widget replaces the whole current token (`--profile`)
+                    // with `insertion`, so the flag must ride along or it gets
+                    // dropped — `aws lemon` instead of `aws --profile lemon`.
+                    // `display` stays the bare value shown in the popup.
+                    for it in &mut items {
+                        it.insertion = format!("{prefix} {}", it.insertion);
+                    }
+                    return CompleteResult {
+                        items,
+                        reason: None,
+                    };
+                }
+            }
+        }
+    }
+
     let mut items = if prefix_is_option {
         emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
     } else if prefer_subcommands {
@@ -1651,6 +1689,16 @@ fn execute_template_generator(script: &[String], cwd: Option<&Path>) -> Option<V
     if script.is_empty() {
         return None;
     }
+    // Well-known recovery: `aws configure list-profiles` cold-starts the aws
+    // CLI (~1s — past the 800ms generator timeout → the popup intermittently
+    // came up empty, exactly the "aws --profile shows nothing" report). The
+    // command only reads names out of ~/.aws, so do that directly: instant and
+    // deterministic, no subprocess. Same pattern as ssh_hosts / package.json.
+    if let [a, b, c] = script {
+        if a == "aws" && b == "configure" && c == "list-profiles" {
+            return aws_profiles();
+        }
+    }
     let capped = cap_git_history(script);
     let bin = capped.first()?;
     let args = &capped[1..];
@@ -2427,6 +2475,47 @@ fn ssh_hosts() -> Option<Vec<String>> {
     Some(hosts.into_iter().collect())
 }
 
+/// Profile names as `aws configure list-profiles` reports them, read straight
+/// from `~/.aws/{config,credentials}`. Recovers the CLI generator without the
+/// ~1s cold-start spawn (see [`execute_template_generator`]).
+fn aws_profiles() -> Option<Vec<String>> {
+    let home = std::env::var_os("HOME")?;
+    let aws_dir = std::path::PathBuf::from(home).join(".aws");
+    let config = std::fs::read_to_string(aws_dir.join("config")).unwrap_or_default();
+    let credentials = std::fs::read_to_string(aws_dir.join("credentials")).unwrap_or_default();
+    let out = parse_aws_profiles(&config, &credentials);
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// The `[…]` section name of an ini line, trimmed, or `None`.
+fn ini_section(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .map(str::trim)
+}
+
+/// Merge profile names from the two AWS shared files, first-seen order.
+/// `config` uses `[default]` + `[profile NAME]` (other section kinds —
+/// `[sso-session …]`, `[services …]` — are not profiles); `credentials` uses
+/// bare `[NAME]`.
+fn parse_aws_profiles(config: &str, credentials: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    // config `[default]` / `[profile NAME]`; then credentials `[NAME]`.
+    let config_names = config.lines().filter_map(|line| match ini_section(line)? {
+        "default" => Some("default"),
+        section => section.strip_prefix("profile ").map(str::trim),
+    });
+    let cred_names = credentials.lines().filter_map(ini_section);
+    for name in config_names.chain(cred_names) {
+        if !name.is_empty() && seen.insert(name.to_string()) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
 fn ssh_hosts_from_known(path: &std::path::Path, out: &mut std::collections::BTreeSet<String>) {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return;
@@ -2951,6 +3040,82 @@ mod tests {
         let r = SpecRegistry::empty();
         r.insert(spec);
         r
+    }
+
+    #[test]
+    fn exact_option_with_arg_advances_to_values_without_space() {
+        // Fig parity: typing a complete flag that takes an argument and
+        // pressing Tab (no trailing space) surfaces the argument's values,
+        // not the flag itself — which the no-op drop would otherwise strip to
+        // an empty popup. `mycli --profile` + Tab → profile names, same as
+        // `mycli --profile ␣`.
+        let mk = |name: &str| crate::spec_parser::RawSuggestion {
+            name: name.into(),
+            ..Default::default()
+        };
+        let spec = Subcommand {
+            name: "mycli".into(),
+            options: vec![Opt {
+                names: vec!["--profile".into()],
+                args: vec![Arg {
+                    suggestions: vec![mk("default"), mk("lemon"), mk("zeph")],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let reg = registry_with(spec);
+        // Exact option name, no trailing space → advance to the arg values.
+        let r = complete("mycli --profile", "mycli --profile".len(), &reg);
+        // `display` is the bare value shown in the popup...
+        let mut disp: Vec<&str> = r.items.iter().map(|s| s.display.as_str()).collect();
+        disp.sort();
+        assert_eq!(
+            disp,
+            vec!["default", "lemon", "zeph"],
+            "popup shows bare argument values"
+        );
+        // ...but `insertion` carries the flag so the widget (which replaces
+        // the whole `--profile` token) yields `--profile <value>`.
+        let mut ins: Vec<&str> = r.items.iter().map(|s| s.insertion.as_str()).collect();
+        ins.sort();
+        assert_eq!(
+            ins,
+            vec!["--profile default", "--profile lemon", "--profile zeph"],
+            "insertion keeps the flag so the buffer isn't corrupted"
+        );
+        // Partial option name is still being typed → list the option, do
+        // NOT advance (user may be heading for `--profiles`).
+        let r2 = complete("mycli --prof", "mycli --prof".len(), &reg);
+        let got2: Vec<&str> = r2.items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(got2, vec!["--profile"], "partial flag lists the option");
+    }
+
+    #[test]
+    fn parse_aws_profiles_merges_config_and_credentials() {
+        // config: [default] + [profile NAME]; non-profile sections ignored.
+        let config = "\
+[default]
+region = us-east-1
+[profile lemon]
+[sso-session corp]
+[profile zeph]
+[services s]
+";
+        // credentials: bare [NAME]; `lemon` dedups against config.
+        let credentials = "\
+[lemon]
+[keys-only]
+";
+        let got = super::parse_aws_profiles(config, credentials);
+        assert_eq!(
+            got,
+            vec!["default", "lemon", "zeph", "keys-only"],
+            "config order first, credentials-only appended, deduped, non-profile sections dropped"
+        );
+        // Empty inputs → empty (aws_profiles maps this to None → fall through).
+        assert!(super::parse_aws_profiles("", "").is_empty());
     }
 
     #[test]
