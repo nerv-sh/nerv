@@ -497,6 +497,18 @@ pub fn complete_in(
         };
     }
 
+    // Wrapper commands (`sudo docker r`, `env FOO=1 git p`, `watch -n1
+    // kubectl …`) have no spec of their own — complete the command they
+    // run instead of returning "no spec for sudo".
+    let wrap_start = wrapped_command_start(&tokens).min(cursor);
+    let line = &line[wrap_start..];
+    let cursor = cursor - wrap_start;
+    let tokens = if wrap_start > 0 {
+        tokenize(&line[..cursor])
+    } else {
+        tokens
+    };
+
     let prefix = current_prefix(&line[..cursor]);
     let binary = tokens[0].text.as_str();
 
@@ -716,6 +728,43 @@ fn rightmost_command_start(node: &crate::shell_parser::Node) -> Option<usize> {
             node.children.iter().rev().find_map(rightmost_command_start)
         }
         _ => None,
+    }
+}
+
+/// Leading commands that run *another* command: none of them has a spec
+/// of its own in the shipped set, so `sudo docker r` used to resolve to
+/// "no spec for sudo" and an empty popup. Completion targets the wrapped
+/// command instead.
+const WRAPPER_COMMANDS: &[&str] = &[
+    "sudo", "doas", "env", "nice", "nohup", "time", "watch", "xargs", "command", "builtin", "exec",
+];
+
+/// Byte offset of the command a leading wrapper chain runs, or 0 when
+/// there is nothing to strip. Skips the wrapper word, its `-`-leading
+/// flags (`watch -n1`), and env assignments (`env FOO=1`), repeating for
+/// chains (`sudo env FOO=1 git`). A flag that takes a separate value
+/// (`sudo -u root git`) leaves the value in place — the spec lookup for
+/// `root` just misses, which is no worse than the wrapper miss it
+/// replaces. Returns 0 while the cursor is still inside the wrapper zone
+/// (`sudo -u |`) so behavior there is unchanged.
+fn wrapped_command_start(tokens: &[Annotation]) -> usize {
+    let is_wrapper_operand = |t: &str| {
+        t.starts_with('-')
+            || t.split_once('=').is_some_and(|(k, _)| {
+                !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    };
+    let mut idx = 0;
+    while idx < tokens.len() && WRAPPER_COMMANDS.contains(&tokens[idx].text.as_str()) {
+        idx += 1;
+        while idx < tokens.len() && is_wrapper_operand(&tokens[idx].text) {
+            idx += 1;
+        }
+    }
+    if idx == 0 || idx >= tokens.len() {
+        0
+    } else {
+        tokens[idx].span.start
     }
 }
 
@@ -4239,6 +4288,34 @@ region = us-east-1
         };
         let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix, &[]);
         assert_eq!(out[0].insertion, "--color");
+    }
+
+    #[test]
+    fn wrapped_command_start_strips_wrappers() {
+        let t = |s: &str| tokenize(s);
+        assert_eq!(wrapped_command_start(&t("git p")), 0);
+        assert_eq!(wrapped_command_start(&t("sudo docker r")), 5);
+        assert_eq!(wrapped_command_start(&t("env FOO=1 git p")), 10);
+        assert_eq!(wrapped_command_start(&t("sudo env FOO=1 git p")), 15);
+        assert_eq!(wrapped_command_start(&t("watch -n1 kubectl get")), 10);
+        // Cursor still inside the wrapper zone — nothing to strip yet.
+        assert_eq!(wrapped_command_start(&t("sudo")), 0);
+        assert_eq!(wrapped_command_start(&t("sudo -u")), 0);
+        // Separate-value flag: the value is taken as the command — a miss,
+        // but no worse than the wrapper miss. Documents the heuristic.
+        assert_eq!(wrapped_command_start(&t("sudo -u root git p")), 8);
+    }
+
+    #[test]
+    fn sudo_wrapped_command_completes_end_to_end() {
+        let reg = registry_with(git_min());
+        let line = "sudo git st";
+        let r = complete(line, line.len(), &reg);
+        assert!(
+            r.items.iter().any(|s| s.insertion == "status"),
+            "expected git status through sudo, got: {:?}",
+            r.items.iter().map(|s| &s.display).collect::<Vec<_>>()
+        );
     }
 
     #[test]
