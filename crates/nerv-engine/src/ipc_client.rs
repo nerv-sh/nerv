@@ -38,3 +38,24 @@ pub async fn query(req: &Request) -> Result<Response> {
     reader.read_line(&mut resp_line).await?;
     Ok(serde_json::from_str(resp_line.trim())?)
 }
+
+/// Blocking twin of [`query`] for one-shot callers with no runtime.
+///
+/// The CLI bridge (`nerv _complete`) runs once per keystroke; building a
+/// tokio runtime for a single UDS roundtrip dominated its cold-start.
+/// Same framing, same socket, same one-line contract — only the IO layer
+/// differs, so the wire format still has a single home in this module.
+pub fn query_sync(req: &Request) -> Result<Response> {
+    use std::io::{BufRead, Write};
+    let sock_path = paths::socket_path().ok_or_else(|| anyhow!("HOME unset; no socket path"))?;
+    let mut stream = std::os::unix::net::UnixStream::connect(&sock_path)?;
+
+    let mut json = serde_json::to_string(req)?;
+    json.push('\n');
+    stream.write_all(json.as_bytes())?;
+
+    let mut reader = std::io::BufReader::new(stream);
+    let mut resp_line = String::new();
+    reader.read_line(&mut resp_line)?;
+    Ok(serde_json::from_str(resp_line.trim())?)
+}
