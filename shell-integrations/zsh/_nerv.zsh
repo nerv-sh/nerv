@@ -54,6 +54,11 @@ typeset -gi __NERV_WIDTH=46
 typeset -gi __NERV_PASTING=0
 typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 
+# $aliases assoc (used to expand `alias g=git` before the engine call)
+# lives in zsh/parameter; interactive shells usually have it, but load
+# explicitly so a minimal rc doesn't leave the table missing.
+zmodload -F zsh/parameter p:aliases 2>/dev/null
+
 __nerv_reset_state() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=0
@@ -478,8 +483,11 @@ __nerv_insert_selected() {
   # completion request can boost it. Fire-and-forget — never
   # block on the IPC, never surface its errors to the user.
   # `${BUFFER%% *}` peels the first word — the spec the user
-  # invoked (e.g. `git`, `cd`).
-  local spec_name="${BUFFER%% *}"
+  # invoked (e.g. `git`, `cd`). Resolve a leading alias the same way
+  # the completion request did, so `g checkout` records under `git`
+  # (the daemon boosts by the spec name of the line it completed).
+  local REPLY; __nerv_expand_alias_line "$BUFFER"
+  local spec_name="${REPLY%% *}"
   if [[ -n "$spec_name" && -n "$insertion" ]]; then
     ( "$__NERV_BIN" _record "$spec_name" "$insertion" >/dev/null 2>&1 & ) >/dev/null 2>&1
   fi
@@ -498,6 +506,26 @@ __nerv_insert_selected() {
   zle reset-prompt 2>/dev/null
   zle redisplay 2>/dev/null
   return 0
+}
+
+# Expand a leading alias so the engine sees the real command: with
+# `alias g=git` the spec lookup for `g push` finds nothing, so rewrite
+# the line to `git push` before the IPC call. Sets REPLY to the
+# rewritten line (input unchanged when nothing applies). Only plain
+# word-list bodies are substituted — a body with shell metacharacters
+# (pipes, subshells, quoting, separators) would need a real parse, so
+# it's left alone and the engine sees the original line. One level
+# deep on purpose: chained aliases resolve on the next request anyway.
+__nerv_expand_alias_line() {
+  local line="$1"
+  REPLY="$line"
+  [[ "$line" == *" "* ]] || return 0
+  local first="${line%% *}"
+  (( ${+aliases[$first]} )) || return 0
+  local body="${aliases[$first]}"
+  [[ -z "$body" || "$body" == "$first" || "$body" == "$first "* ]] && return 0
+  [[ "$body" == *[\;\|\&\<\>\(\)\`\$\"\']* ]] && return 0
+  REPLY="${body}${line#"$first"}"
 }
 
 # ---------------------------------------------------------------------------
@@ -537,8 +565,14 @@ __nerv_complete() {
     return
   fi
 
+  # Resolve a leading alias (g=git, cat=bat) so the spec lookup hits.
+  # RBUFFER is empty here (gate above), so the cursor sits at the end
+  # of whatever line we send — use the expanded length, not $CURSOR.
+  __nerv_expand_alias_line "$LBUFFER"
+  local send_line="$REPLY"
+
   local resp
-  resp=$("$__NERV_BIN" _complete "$LBUFFER" $CURSOR 2>/dev/null)
+  resp=$("$__NERV_BIN" _complete "$send_line" ${#send_line} 2>/dev/null)
   local rc=$?
   if (( rc != 0 )); then
     if [[ -n "${NERV_DEBUG:-}" ]]; then
