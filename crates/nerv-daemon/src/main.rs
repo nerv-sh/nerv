@@ -162,14 +162,34 @@ async fn handle_connection(
                 Some(reason) => Response::Empty {
                     reason: Some(reason.clone()),
                 },
-                None => engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref(), mode),
+                // complete_in is synchronous and can block for hundreds of
+                // ms (cold spec parse, generator subprocess). Run it on the
+                // blocking pool so one slow completion doesn't stall every
+                // other connection on the 2-thread runtime.
+                None => {
+                    let registry = registry.clone();
+                    let frecency = frecency.clone();
+                    tokio::task::spawn_blocking(move || {
+                        engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref(), mode)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Response::Error {
+                        message: format!("completion task failed: {e}"),
+                    })
+                }
             },
             Ok(Request::DoctorAutorun) => Response::Empty {
                 reason: Some("doctor-autorun-stub".to_string()),
             },
             Ok(Request::RecordAccept { spec, insertion }) => {
-                frecency.record(&spec, &insertion);
-                frecency.flush_if_dirty();
+                // flush_if_dirty rewrites the TSV on disk — keep the file
+                // IO off the async workers alongside the in-memory record.
+                let frecency = frecency.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    frecency.record(&spec, &insertion);
+                    frecency.flush_if_dirty();
+                })
+                .await;
                 Response::Empty {
                     reason: Some("recorded".to_string()),
                 }
