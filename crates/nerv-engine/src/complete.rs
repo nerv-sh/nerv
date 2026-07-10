@@ -1242,6 +1242,32 @@ fn emit_candidates_for_arg(
     // lines as candidates. Skipped under NERV_NO_GENERATORS=1 (tests,
     // sandboxed environments).
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
+        // Parallel prewarm: the dispatch loop below is sequential, so an
+        // arg carrying several cold Template generators used to stall the
+        // popup N×800ms (one timeout budget per subprocess, summed). Warm
+        // every cold entry concurrently first — the loop then reads warm
+        // cache hits, and the stall is the slowest generator, not the sum.
+        let cold: Vec<&Vec<String>> = arg
+            .generators
+            .iter()
+            .filter_map(|g| match g {
+                crate::spec_parser::Generator::Template { script }
+                    if !generator_cache_fresh(script, cwd) =>
+                {
+                    Some(script)
+                }
+                _ => None,
+            })
+            .collect();
+        if cold.len() > 1 {
+            std::thread::scope(|s| {
+                for script in cold {
+                    s.spawn(move || {
+                        let _ = cached_template_generator(script, cwd);
+                    });
+                }
+            });
+        }
         for g in &arg.generators {
             match g {
                 crate::spec_parser::Generator::Template { script } => {
@@ -1718,6 +1744,16 @@ fn cached_generator_lines(
 fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
     let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
     cached_generator_lines(key, || execute_template_generator(script, cwd))
+}
+
+/// True when [`GENERATOR_CACHE`] holds a TTL-fresh entry for
+/// `(script, cwd)` — used to pick which generators need a prewarm.
+fn generator_cache_fresh(script: &[String], cwd: Option<&Path>) -> bool {
+    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
+    GENERATOR_CACHE.lock().is_ok_and(|c| {
+        c.get(&key)
+            .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
+    })
 }
 
 /// TTL-memo for the in-process native generators (man / ssh / history /
@@ -3816,6 +3852,34 @@ region = us-east-1
             "cache hit must replay first result"
         );
         assert_eq!(calls.get(), 1, "compute ran again within TTL");
+    }
+
+    #[test]
+    fn multiple_cold_generators_run_concurrently() {
+        // Two cold 400ms generators on one arg must cost ~max, not ~sum —
+        // the prewarm runs them on parallel threads with a shared wall.
+        use std::time::Instant;
+        let slow = |tag: &str| crate::spec_parser::Generator::Template {
+            script: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!("sleep 0.4; echo prewarm-{tag}"),
+            ],
+        };
+        let arg = Arg {
+            generators: vec![slow("a"), slow("b")],
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        let elapsed = t0.elapsed();
+        assert_eq!(out.len(), 2, "both generators must contribute: {out:?}");
+        // Serial would be ≥800ms; allow generous slack for slow CI while
+        // still catching a regression back to sequential execution.
+        assert!(
+            elapsed.as_millis() < 750,
+            "expected concurrent cold generators, took {elapsed:?}"
+        );
     }
 
     #[test]
