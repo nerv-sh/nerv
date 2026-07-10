@@ -462,6 +462,12 @@ pub struct ParserResult {
     /// instead of the surrounding subcommand's positional args.
     /// `None` everywhere else.
     pub active_option_arg: Option<(String, usize)>,
+    /// Options already consumed at the *current* subcommand level
+    /// (cleared on each subcommand descend, mirroring the matcher's
+    /// own repeat-rejection scope). `complete` uses this with
+    /// [`can_consume_option`] to stop re-suggesting a non-repeatable
+    /// flag the user already typed (`docker run --rm --<tab>`).
+    pub consumed_options: Vec<Opt>,
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +975,7 @@ pub fn parse_arguments(spec: &Spec, tokens: &[Annotation], cursor: usize) -> Par
         cursor_context,
         subcommand_path: state.subcommand_path,
         active_option_arg,
+        consumed_options: state.consumed_options,
     }
 }
 

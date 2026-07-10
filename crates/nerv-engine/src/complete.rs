@@ -602,7 +602,13 @@ pub fn complete_in(
     }
 
     let mut items = if prefix_is_option {
-        emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
+        emit_options_with_ancestors(
+            current,
+            &ancestor_refs,
+            &prefix,
+            mode,
+            &result.consumed_options,
+        )
     } else if prefer_subcommands {
         // yarn-style shorthand: `yarn web` should match both yarn
         // subcommands (none start with "web") and the root args
@@ -620,9 +626,13 @@ pub fn complete_in(
     } else {
         match result.cursor_context {
             CursorContext::Subcommand => emit_subcommands(current, &prefix, mode),
-            CursorContext::OptionName => {
-                emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
-            }
+            CursorContext::OptionName => emit_options_with_ancestors(
+                current,
+                &ancestor_refs,
+                &prefix,
+                mode,
+                &result.consumed_options,
+            ),
             CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd, mode, &tokens),
             CursorContext::Done => vec![],
         }
@@ -973,11 +983,16 @@ fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Sug
 /// ancestor options whose `is_persistent` flag is set (Fig parity).
 /// `ancestors` is leaf → root order of the chain ABOVE `node`;
 /// pass an empty slice for a root-level emit.
+/// `consumed` is the parser's already-typed option list for the current
+/// level: a non-repeatable flag the user already typed is not offered
+/// again (the parser would reject it anyway — same `can_consume_option`
+/// rule the matcher applies).
 fn emit_options_with_ancestors(
     node: &Subcommand,
     ancestors: &[&Subcommand],
     prefix: &str,
     mode: MatchMode,
+    consumed: &[crate::spec_parser::Opt],
 ) -> Vec<Suggestion> {
     let emit = |opt: &crate::spec_parser::Opt| -> Vec<Suggestion> {
         // Fig parity: when `requiresSeparator` is set and the option
@@ -1000,12 +1015,15 @@ fn emit_options_with_ancestors(
     let mut out: Vec<Suggestion> = node
         .options
         .iter()
-        .filter(|o| !o.hidden)
+        .filter(|o| !o.hidden && crate::spec_parser::can_consume_option(o, consumed))
         .flat_map(&emit)
         .collect();
     for sc in ancestors {
         for opt in &sc.options {
             if !opt.is_persistent || opt.hidden {
+                continue;
+            }
+            if !crate::spec_parser::can_consume_option(opt, consumed) {
                 continue;
             }
             // Don't double-emit if leaf already declared the same flag.
@@ -4127,7 +4145,7 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix, &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].insertion, "--color=");
         assert_eq!(out[0].display, "--color", "display stays clean");
@@ -4147,7 +4165,7 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--f", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--f", MatchMode::Prefix, &[]);
         assert_eq!(out[0].insertion, "--flag");
     }
 
@@ -4163,8 +4181,65 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix, &[]);
         assert_eq!(out[0].insertion, "--color");
+    }
+
+    #[test]
+    fn emit_drops_consumed_non_repeatable_keeps_repeatable() {
+        let rm = Opt {
+            names: vec!["--rm".into()],
+            ..Default::default()
+        };
+        let volume = Opt {
+            names: vec!["-v".into(), "--volume".into()],
+            is_repeatable: true,
+            ..Default::default()
+        };
+        let node = Subcommand {
+            name: "run".into(),
+            options: vec![rm.clone(), volume.clone()],
+            ..Default::default()
+        };
+        let consumed = [rm, volume];
+        let out = emit_options_with_ancestors(&node, &[], "-", MatchMode::Prefix, &consumed);
+        let names: Vec<&str> = out.iter().map(|s| s.display.as_str()).collect();
+        assert!(
+            !names.contains(&"--rm"),
+            "already-typed non-repeatable flag re-offered: {names:?}"
+        );
+        assert!(
+            names.contains(&"-v"),
+            "repeatable flag must survive: {names:?}"
+        );
+    }
+
+    #[test]
+    fn typed_non_repeatable_flag_not_resuggested_end_to_end() {
+        let spec = Subcommand {
+            name: "docker".into(),
+            subcommands: vec![Subcommand {
+                name: "run".into(),
+                options: vec![
+                    Opt {
+                        names: vec!["--rm".into()],
+                        ..Default::default()
+                    },
+                    Opt {
+                        names: vec!["--detach".into()],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let reg = registry_with(spec);
+        let line = "docker run --rm --";
+        let r = complete(line, line.len(), &reg);
+        let names: Vec<&str> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert!(names.contains(&"--detach"), "{names:?}");
+        assert!(!names.contains(&"--rm"), "typed flag re-offered: {names:?}");
     }
 
     #[test]
@@ -4520,7 +4595,7 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--a", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--a", MatchMode::Prefix, &[]);
         assert_eq!(out[0].icon, None, "fig:// URL must not leak");
     }
 
