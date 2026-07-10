@@ -36,6 +36,11 @@ def log(msg):
     print(f"[e2e-enter] {msg}", flush=True)
 
 
+def strip_ansi(raw):
+    """Drop CSI sequences + save/restore so text assertions see plain bytes."""
+    return re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[78]", b"", raw)
+
+
 def pump(fd, seconds):
     out = b""
     deadline = time.time() + seconds
@@ -173,7 +178,14 @@ def main():
         os.write(master, b"\t")  # Tab accepts the highlighted item
         out4 = pump(master, 1.5)
         kill(master, proc)
-        tab_inserted = b"git checkout" in out4
+        # Tab-chaining opens the next-level popup right after the insert,
+        # so the buffer repaint interleaves SGR per character and paints
+        # only the not-yet-echoed remainder over the grey ghost
+        # ("heckout" after the typed "git c") — a contiguous raw
+        # b"git checkout" no longer appears. Match the ANSI-stripped
+        # repaint instead; either form proves the insert landed.
+        plain4 = strip_ansi(out4)
+        tab_inserted = b"git checkout" in plain4 or b"heckout" in plain4
         log(f"case4 tab_inserted_checkout={tab_inserted}")
 
         if (
