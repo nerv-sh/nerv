@@ -1170,7 +1170,9 @@ fn emit_candidates_for_arg(
         arg.template,
         Some(crate::spec_parser::TemplateKind::History)
     ) {
-        if let Some(entries) = shell_history_entries() {
+        if let Some(entries) =
+            cached_native_generator("<nerv:history>", None, shell_history_entries)
+        {
             out.extend(
                 entries
                     .into_iter()
@@ -1266,7 +1268,9 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::SshHosts => {
-                    if let Some(hosts) = ssh_hosts() {
+                    if let Some(hosts) =
+                        cached_native_generator("<nerv:ssh-hosts>", None, ssh_hosts)
+                    {
                         out.extend(
                             hosts
                                 .into_iter()
@@ -1283,7 +1287,9 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::MakefileTargets => {
-                    if let Some(targets) = makefile_targets(cwd) {
+                    if let Some(targets) =
+                        cached_native_generator("<nerv:makefile>", cwd, || makefile_targets(cwd))
+                    {
                         out.extend(
                             targets
                                 .into_iter()
@@ -1300,7 +1306,9 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::ManPages => {
-                    if let Some(pages) = man_pages() {
+                    if let Some(pages) =
+                        cached_native_generator("<nerv:man-pages>", None, man_pages)
+                    {
                         out.extend(
                             pages
                                 .into_iter()
@@ -1625,11 +1633,13 @@ type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Cached wrapper around [`execute_template_generator`]. Returns
-/// the cached value on TTL-fresh hit, otherwise runs the generator
-/// and inserts the result.
-fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
-    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
+/// TTL-memo through [`GENERATOR_CACHE`]: fresh hit → cached lines,
+/// otherwise run `compute` and insert. Shared by the subprocess
+/// template path and the in-process native generators below.
+fn cached_generator_lines(
+    key: GeneratorCacheKey,
+    compute: impl FnOnce() -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
     if let Ok(cache) = GENERATOR_CACHE.lock() {
         if let Some((stamp, lines)) = cache.get(&key) {
             if stamp.elapsed() < GENERATOR_CACHE_TTL {
@@ -1637,7 +1647,7 @@ fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Ve
             }
         }
     }
-    let lines = execute_template_generator(script, cwd)?;
+    let lines = compute()?;
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
@@ -1651,6 +1661,28 @@ fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Ve
         cache.insert(key, (std::time::Instant::now(), lines.clone()));
     }
     Some(lines)
+}
+
+/// Cached wrapper around [`execute_template_generator`]. Returns
+/// the cached value on TTL-fresh hit, otherwise runs the generator
+/// and inserts the result.
+fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
+    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
+    cached_generator_lines(key, || execute_template_generator(script, cwd))
+}
+
+/// TTL-memo for the in-process native generators (man / ssh / history /
+/// makefile). These don't spawn a subprocess but still walk the
+/// filesystem — `man_pages` alone touches thousands of dirents across
+/// MANPATH — and they used to re-run on *every keystroke*. Keyed under a
+/// synthetic argv tag (angle brackets can't collide with a real command).
+fn cached_native_generator(
+    tag: &str,
+    cwd: Option<&Path>,
+    compute: impl FnOnce() -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let key: GeneratorCacheKey = (vec![tag.to_string()], cwd.map(Path::to_path_buf));
+    cached_generator_lines(key, compute)
 }
 
 /// Run a Tier B template generator script and return its stdout lines.
@@ -3711,6 +3743,30 @@ region = us-east-1
             a, b,
             "same argv in different cwd must not share a cache entry"
         );
+    }
+
+    #[test]
+    fn native_generator_memoizes_within_ttl() {
+        // man/ssh/history/makefile walk the filesystem in-process; before
+        // the memo they re-ran on every keystroke. Second call inside the
+        // TTL must return the cached lines without invoking compute.
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let compute = || {
+            calls.set(calls.get() + 1);
+            Some(vec!["alpha".to_string(), "beta".to_string()])
+        };
+        let a = cached_native_generator("<nerv:test-memo-uniq>", None, compute);
+        let b = cached_native_generator("<nerv:test-memo-uniq>", None, || {
+            calls.set(calls.get() + 1);
+            Some(vec!["SHOULD-NOT-RUN".to_string()])
+        });
+        assert_eq!(
+            a.as_deref(),
+            b.as_deref(),
+            "cache hit must replay first result"
+        );
+        assert_eq!(calls.get(), 1, "compute ran again within TTL");
     }
 
     #[test]
