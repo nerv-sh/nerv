@@ -272,7 +272,6 @@ GitHub Actions의 macOS runner 에서 iTerm2/Terminal.app 을 headless 로 띄�
 M0 / 매 마이너 릴리즈마다 다음 체크리스트:
 
 - 설치 → `git c<Tab>` 추천 표시 → Tab 채택 → 정상 종료
-- `?` 키 → 인라인 도움말
 - 화면 하단 스크롤 시나리오
 - 한글 입력이 섞인 라인 (예: `git commit -m "한글 ⎵"`) 에서 cursor 어긋남 없는지
 - Esc 로 팝업 닫기
