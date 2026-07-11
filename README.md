@@ -20,16 +20,9 @@ cloud attached is now a local daemon and a zsh widget.
 
 **Press a key, see the next token. That's it.**
 
-```text
-❯ git checkout                    ← you typed "git che" — the rest is grey ghost, → accepts
-      ╭────────────────────────────────────────────╮
-      │ checkout <branch>                          │
-      │ cherry <commit>                            │
-      │ cherry-pick <commit>                       │
-      ├────────────────────────────────────────────┤
-      │ Switch branches or restore working…  [1/3] │
-      ╰────────────────────────────────────────────╯
-```
+<p align="center">
+  <img src="docs/assets/demo.gif" width="740" alt="nerv in action: typing git che shows ghost text and a popup, Right-arrow accepts, live git branches complete from the repo, and npm run lists package.json scripts">
+</p>
 
 ## Highlights
 
