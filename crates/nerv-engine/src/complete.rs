@@ -1017,7 +1017,7 @@ fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Sug
             Suggestion {
                 insertion: sc.name.clone(),
                 display,
-                description: sc.description.clone(),
+                description: sc.description.as_deref().map(String::from),
                 kind: SuggestionKind::Subcommand,
                 priority: sc.priority,
                 icon: sanitize_icon(sc.icon.as_deref()),
@@ -1054,7 +1054,7 @@ fn emit_options_with_ancestors(
             .map(|n| Suggestion {
                 insertion: if needs_eq { format!("{n}=") } else { n.clone() },
                 display: n.clone(),
-                description: opt.description.clone(),
+                description: opt.description.as_deref().map(String::from),
                 kind: SuggestionKind::Flag,
                 priority: opt.priority,
                 icon: sanitize_icon(opt.icon.as_deref()),
@@ -1181,7 +1181,7 @@ fn emit_candidates_for_arg(
                 Suggestion {
                     insertion: format!("{insert_prefix}{base}"),
                     display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
-                    description: s.description.clone(),
+                    description: s.description.as_deref().map(String::from),
                     kind: SuggestionKind::Argument,
                     priority: s.priority,
                     icon: sanitize_icon(s.icon.as_deref()),
