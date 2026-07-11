@@ -26,7 +26,7 @@
 
 **M0 흡수 스파이크 (v0.6 재정의)** — 산출물 8개 중 7개 완료:
 
-- ✅ M0-9 (v0.5 산출물): `withfig/autocomplete` subtree pin (`aef52acf…`, 1,484 TS spec, ISC)
+- ✅ M0-9 (v0.5 산출물): `withfig/autocomplete` subtree pin (`aef52acf…`, 1,484 TS spec, MIT)
 - ✅ cargo workspace 스캐폴딩 (16 active crates, 503 workspace test 통과)
 - ✅ NOTICE / LICENSE / `.github/workflows/{ci,upstream-monitor}.yml`
 - ✅ M0-1: `vendor/aws-autocomplete/` subtree add + NOTICE Apache+MIT
@@ -260,7 +260,7 @@ shell-integrations/bash/_nerv-pty.bash # bash PTY bootstrap (PTY 전용, Shell=b
 shell-integrations/fish/_nerv-pty.fish # fish PTY bootstrap (PTY 전용, Shell=fish 마커 필수)
 tools/ts-to-json/                    # bun-based TS→JSON 변환 (M1 entry; 715 spec 자동 변환)
 packaging/homebrew/nerv.rb           # Homebrew Formula 템플릿 (auto-bumped on release)
-vendor/withfig-autocomplete/         # subtree, ISC, pin = aef52acf… (TS specs 1,484)
+vendor/withfig-autocomplete/         # subtree, MIT, pin = aef52acf… (TS specs 1,484)
 vendor/aws-autocomplete/             # M0-1 subtree, Apache+MIT, 미수정 mirror (drift 감지)
 vendor-patches/{upstream,self}/      # cherry-pick 보관소 (M1)
 docs/                                # 위 §2 6종 + reference/ (TS 포팅 참조본)
