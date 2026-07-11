@@ -45,6 +45,14 @@ use std::sync::{Arc, RwLock};
 /// the eager `load_dir` scan (doctor, short-lived) is exempt.
 const SPEC_CACHE_CAP: usize = 16;
 
+/// Soft byte budget for positive entries, measured in decompressed
+/// source-JSON bytes (the parsed tree runs roughly 2× that). The count
+/// cap alone is blind to size — 16 cloud-scale specs would be GBs
+/// resident (aws alone is 122MB of JSON). Eviction drops LRU entries
+/// while EITHER bound is exceeded; the newest entry always survives, so
+/// a single oversized spec still completes.
+const SPEC_CACHE_BYTE_BUDGET: usize = 200 << 20;
+
 pub struct SpecRegistry {
     dir: Option<PathBuf>,
     cache: RwLock<HashMap<String, CacheEntry>>,
@@ -91,6 +99,9 @@ struct CacheEntry {
     /// `None` for negative entries OR parse failures (don't keep
     /// retrying a broken file every keystroke).
     spec: Option<Arc<Spec>>,
+    /// Decompressed source-JSON length — the cheap footprint proxy the
+    /// byte budget sums. 0 for negative entries and hand-inserted specs.
+    bytes: usize,
     /// Registry tick at last access, for LRU eviction. Bumped on every
     /// cache hit — atomic so it mutates under the shared read lock.
     tick: AtomicU64,
@@ -162,6 +173,9 @@ impl SpecRegistry {
                         CacheEntry {
                             mtime,
                             spec: Some(Arc::new(spec)),
+                            // On-disk length (compressed for .gz) — close
+                            // enough for a path that never evicts anyway.
+                            bytes: path.metadata().map(|m| m.len() as usize).unwrap_or(0),
                             tick: AtomicU64::new(tick),
                         },
                     );
@@ -205,7 +219,7 @@ impl SpecRegistry {
                 // Mtime advanced (or file gone) — fall through to reload.
             }
         }
-        let (mtime, spec) = self.load_from_disk(name);
+        let (mtime, spec, bytes) = self.load_from_disk(name);
         if let Ok(mut cache) = self.cache.write() {
             let tick = self.next_tick();
             cache.insert(
@@ -213,6 +227,7 @@ impl SpecRegistry {
                 CacheEntry {
                     mtime,
                     spec: spec.clone(),
+                    bytes,
                     tick: AtomicU64::new(tick),
                 },
             );
@@ -226,14 +241,24 @@ impl SpecRegistry {
         self.next_tick.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Drop least-recently-used *positive* entries until at most
-    /// [`SPEC_CACHE_CAP`] remain. Negative entries (byte-free) never count
-    /// or evict. The just-inserted entry holds the highest tick, so it is
-    /// never the victim — the in-flight completion keeps its spec.
+    /// Drop least-recently-used *positive* entries until both bounds hold:
+    /// at most [`SPEC_CACHE_CAP`] entries AND at most
+    /// [`SPEC_CACHE_BYTE_BUDGET`] summed source bytes. Negative entries
+    /// (byte-free) never count or evict. The just-inserted entry holds the
+    /// highest tick, so it is never the victim — the in-flight completion
+    /// keeps its spec even when it alone busts the byte budget.
     fn evict_overflow(&self, cache: &mut HashMap<String, CacheEntry>) {
         loop {
             let positive = cache.values().filter(|e| e.spec.is_some()).count();
-            if positive <= SPEC_CACHE_CAP {
+            let bytes: usize = cache
+                .values()
+                .filter(|e| e.spec.is_some())
+                .map(|e| e.bytes)
+                .sum();
+            if positive <= SPEC_CACHE_CAP && bytes <= SPEC_CACHE_BYTE_BUDGET {
+                break;
+            }
+            if positive <= 1 {
                 break;
             }
             let victim = cache
@@ -265,25 +290,29 @@ impl SpecRegistry {
         None
     }
 
-    fn load_from_disk(&self, name: &str) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>) {
+    fn load_from_disk(
+        &self,
+        name: &str,
+    ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
         let Some(dir) = self.dir.as_ref() else {
-            return (None, None);
+            return (None, None, 0);
         };
         // Prefer plain JSON for human inspection; fall back to gzipped
         // form (build-time compressed cache).
-        let plain = dir.join(format!("{name}.json"));
-        if plain.exists() {
-            let mtime = plain.metadata().and_then(|m| m.modified()).ok();
-            let spec = load_spec_file(&plain).ok().map(Arc::new);
-            return (mtime, spec);
+        for path in [
+            dir.join(format!("{name}.json")),
+            dir.join(format!("{name}.json.gz")),
+        ] {
+            if path.exists() {
+                let mtime = path.metadata().and_then(|m| m.modified()).ok();
+                let (spec, bytes) = match crate::spec_loader::load_spec_file_with_size(&path) {
+                    Ok((spec, bytes)) => (Some(Arc::new(spec)), bytes),
+                    Err(_) => (None, 0),
+                };
+                return (mtime, spec, bytes);
+            }
         }
-        let gz = dir.join(format!("{name}.json.gz"));
-        if gz.exists() {
-            let mtime = gz.metadata().and_then(|m| m.modified()).ok();
-            let spec = load_spec_file(&gz).ok().map(Arc::new);
-            return (mtime, spec);
-        }
-        (None, None)
+        (None, None, 0)
     }
 
     /// Move every queued FS-watcher invalidation into the cache:
@@ -323,6 +352,9 @@ impl SpecRegistry {
                 CacheEntry {
                     mtime: None,
                     spec: Some(Arc::new(spec)),
+                    // Hand-built specs (tests, code) have no source file;
+                    // they don't count toward the byte budget.
+                    bytes: 0,
                     tick: AtomicU64::new(tick),
                 },
             );
@@ -5118,6 +5150,55 @@ region = us-east-1
             reg.lookup(&format!("spec{}", total - 1)).is_some(),
             "most-recent entry must survive"
         );
+    }
+
+    /// The byte budget evicts LRU entries even when the entry COUNT is
+    /// under the cap — 16 cloud-scale specs would otherwise be GBs.
+    #[test]
+    fn byte_budget_evicts_oldest_before_count_cap() {
+        let reg = SpecRegistry::empty();
+        let mut cache = HashMap::new();
+        // Three 80MB (source bytes) entries: sum 240MB > 200MB budget,
+        // count 3 « SPEC_CACHE_CAP.
+        for i in 0..3 {
+            cache.insert(
+                format!("cloud{i}"),
+                CacheEntry {
+                    mtime: None,
+                    spec: Some(Arc::new(Spec {
+                        name: format!("cloud{i}"),
+                        ..Default::default()
+                    })),
+                    bytes: 80 << 20,
+                    tick: AtomicU64::new(reg.next_tick()),
+                },
+            );
+        }
+        reg.evict_overflow(&mut cache);
+        assert!(!cache.contains_key("cloud0"), "oldest must evict on bytes");
+        assert!(cache.contains_key("cloud1") && cache.contains_key("cloud2"));
+    }
+
+    /// A single spec bigger than the whole budget still completes — the
+    /// newest entry is never the victim.
+    #[test]
+    fn byte_budget_never_evicts_sole_entry() {
+        let reg = SpecRegistry::empty();
+        let mut cache = HashMap::new();
+        cache.insert(
+            "megacloud".to_string(),
+            CacheEntry {
+                mtime: None,
+                spec: Some(Arc::new(Spec {
+                    name: "megacloud".into(),
+                    ..Default::default()
+                })),
+                bytes: 300 << 20,
+                tick: AtomicU64::new(reg.next_tick()),
+            },
+        );
+        reg.evict_overflow(&mut cache);
+        assert!(cache.contains_key("megacloud"));
     }
 
     /// A spec the user keeps completing against must never evict, even as

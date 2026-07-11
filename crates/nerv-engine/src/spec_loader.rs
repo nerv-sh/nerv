@@ -54,6 +54,13 @@ pub enum SpecLoadError {
 /// distinguishing it from generic I/O so callers can fall back to
 /// the embedded default cache without log noise.
 pub fn load_spec_file(path: &Path) -> Result<Spec, SpecLoadError> {
+    load_spec_file_with_size(path).map(|(spec, _)| spec)
+}
+
+/// [`load_spec_file`] variant that also returns the decompressed
+/// source-JSON length — the registry's cheap proxy for the parsed
+/// tree's heap footprint (its byte-budget eviction sums these).
+pub fn load_spec_file_with_size(path: &Path) -> Result<(Spec, usize), SpecLoadError> {
     if !path.exists() {
         return Err(SpecLoadError::NotFound(path.display().to_string()));
     }
@@ -77,7 +84,7 @@ pub fn load_spec_file(path: &Path) -> Result<Spec, SpecLoadError> {
             source: e,
         })?
     };
-    parse_spec_str(&text, path)
+    parse_spec_str(&text, path).map(|spec| (spec, text.len()))
 }
 
 /// Parse a spec from an in-memory JSON string. Useful for tests
