@@ -63,7 +63,9 @@ Run once a day, ideally mid-session when the cache is warm:
 - [ ] Type a 3-deep subcommand you use (`git`, `docker`, `kubectl`, `aws`) —
       completion + ghost + popup all appear, no lag.
 - [ ] `cd <Tab>` in a big dir — popup paginates, `[k/N]` counter correct.
-- [ ] Accept a ghost (Right-arrow at EOL) — it lands, frecency floats it next time.
+- [ ] Accept a ghost (Right-arrow at EOL) — it lands; frecency floats it
+      from the **second** accept (a single pick deliberately doesn't boost —
+      `frecency.rs` score gate `count >= 2`).
 - [ ] No stray `^[[…m` / box chrome left on the line after Esc or accept.
 - [ ] Note any command where completion was **wrong** or **missing** → §4.
 

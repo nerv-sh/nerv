@@ -45,6 +45,14 @@ use std::sync::{Arc, RwLock};
 /// the eager `load_dir` scan (doctor, short-lived) is exempt.
 const SPEC_CACHE_CAP: usize = 16;
 
+/// Soft byte budget for positive entries, measured in decompressed
+/// source-JSON bytes (the parsed tree runs roughly 2× that). The count
+/// cap alone is blind to size — 16 cloud-scale specs would be GBs
+/// resident (aws alone is 122MB of JSON). Eviction drops LRU entries
+/// while EITHER bound is exceeded; the newest entry always survives, so
+/// a single oversized spec still completes.
+const SPEC_CACHE_BYTE_BUDGET: usize = 200 << 20;
+
 pub struct SpecRegistry {
     dir: Option<PathBuf>,
     cache: RwLock<HashMap<String, CacheEntry>>,
@@ -91,6 +99,9 @@ struct CacheEntry {
     /// `None` for negative entries OR parse failures (don't keep
     /// retrying a broken file every keystroke).
     spec: Option<Arc<Spec>>,
+    /// Decompressed source-JSON length — the cheap footprint proxy the
+    /// byte budget sums. 0 for negative entries and hand-inserted specs.
+    bytes: usize,
     /// Registry tick at last access, for LRU eviction. Bumped on every
     /// cache hit — atomic so it mutates under the shared read lock.
     tick: AtomicU64,
@@ -162,6 +173,9 @@ impl SpecRegistry {
                         CacheEntry {
                             mtime,
                             spec: Some(Arc::new(spec)),
+                            // On-disk length (compressed for .gz) — close
+                            // enough for a path that never evicts anyway.
+                            bytes: path.metadata().map(|m| m.len() as usize).unwrap_or(0),
                             tick: AtomicU64::new(tick),
                         },
                     );
@@ -205,7 +219,7 @@ impl SpecRegistry {
                 // Mtime advanced (or file gone) — fall through to reload.
             }
         }
-        let (mtime, spec) = self.load_from_disk(name);
+        let (mtime, spec, bytes) = self.load_from_disk(name);
         if let Ok(mut cache) = self.cache.write() {
             let tick = self.next_tick();
             cache.insert(
@@ -213,6 +227,7 @@ impl SpecRegistry {
                 CacheEntry {
                     mtime,
                     spec: spec.clone(),
+                    bytes,
                     tick: AtomicU64::new(tick),
                 },
             );
@@ -226,14 +241,24 @@ impl SpecRegistry {
         self.next_tick.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Drop least-recently-used *positive* entries until at most
-    /// [`SPEC_CACHE_CAP`] remain. Negative entries (byte-free) never count
-    /// or evict. The just-inserted entry holds the highest tick, so it is
-    /// never the victim — the in-flight completion keeps its spec.
+    /// Drop least-recently-used *positive* entries until both bounds hold:
+    /// at most [`SPEC_CACHE_CAP`] entries AND at most
+    /// [`SPEC_CACHE_BYTE_BUDGET`] summed source bytes. Negative entries
+    /// (byte-free) never count or evict. The just-inserted entry holds the
+    /// highest tick, so it is never the victim — the in-flight completion
+    /// keeps its spec even when it alone busts the byte budget.
     fn evict_overflow(&self, cache: &mut HashMap<String, CacheEntry>) {
         loop {
             let positive = cache.values().filter(|e| e.spec.is_some()).count();
-            if positive <= SPEC_CACHE_CAP {
+            let bytes: usize = cache
+                .values()
+                .filter(|e| e.spec.is_some())
+                .map(|e| e.bytes)
+                .sum();
+            if positive <= SPEC_CACHE_CAP && bytes <= SPEC_CACHE_BYTE_BUDGET {
+                break;
+            }
+            if positive <= 1 {
                 break;
             }
             let victim = cache
@@ -265,25 +290,29 @@ impl SpecRegistry {
         None
     }
 
-    fn load_from_disk(&self, name: &str) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>) {
+    fn load_from_disk(
+        &self,
+        name: &str,
+    ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
         let Some(dir) = self.dir.as_ref() else {
-            return (None, None);
+            return (None, None, 0);
         };
         // Prefer plain JSON for human inspection; fall back to gzipped
         // form (build-time compressed cache).
-        let plain = dir.join(format!("{name}.json"));
-        if plain.exists() {
-            let mtime = plain.metadata().and_then(|m| m.modified()).ok();
-            let spec = load_spec_file(&plain).ok().map(Arc::new);
-            return (mtime, spec);
+        for path in [
+            dir.join(format!("{name}.json")),
+            dir.join(format!("{name}.json.gz")),
+        ] {
+            if path.exists() {
+                let mtime = path.metadata().and_then(|m| m.modified()).ok();
+                let (spec, bytes) = match crate::spec_loader::load_spec_file_with_size(&path) {
+                    Ok((spec, bytes)) => (Some(Arc::new(spec)), bytes),
+                    Err(_) => (None, 0),
+                };
+                return (mtime, spec, bytes);
+            }
         }
-        let gz = dir.join(format!("{name}.json.gz"));
-        if gz.exists() {
-            let mtime = gz.metadata().and_then(|m| m.modified()).ok();
-            let spec = load_spec_file(&gz).ok().map(Arc::new);
-            return (mtime, spec);
-        }
-        (None, None)
+        (None, None, 0)
     }
 
     /// Move every queued FS-watcher invalidation into the cache:
@@ -323,6 +352,9 @@ impl SpecRegistry {
                 CacheEntry {
                     mtime: None,
                     spec: Some(Arc::new(spec)),
+                    // Hand-built specs (tests, code) have no source file;
+                    // they don't count toward the byte budget.
+                    bytes: 0,
                     tick: AtomicU64::new(tick),
                 },
             );
@@ -478,6 +510,16 @@ pub fn complete_in(
         };
     }
 
+    // Scope to the command under the cursor, not the whole line. On a
+    // compound line like `git checkout main && git p` the user is completing
+    // the *last* segment (`git p` → push/pull), not re-parsing the entire
+    // line as one `git` invocation. The shell_parser tree is quote-aware, so
+    // a `&&`/`|`/`;` inside a string (`echo "a && b" && git p`) does NOT
+    // split — a naive `rfind("&&")` would get that wrong.
+    let seg_start = command_segment_start(&line[..cursor]).min(cursor);
+    let line = &line[seg_start..];
+    let cursor = cursor - seg_start;
+
     let tokens = tokenize(&line[..cursor]);
 
     if tokens.is_empty() {
@@ -486,6 +528,18 @@ pub fn complete_in(
             reason: Some("empty input".into()),
         };
     }
+
+    // Wrapper commands (`sudo docker r`, `env FOO=1 git p`, `watch -n1
+    // kubectl …`) have no spec of their own — complete the command they
+    // run instead of returning "no spec for sudo".
+    let wrap_start = wrapped_command_start(&tokens).min(cursor);
+    let line = &line[wrap_start..];
+    let cursor = cursor - wrap_start;
+    let tokens = if wrap_start > 0 {
+        tokenize(&line[..cursor])
+    } else {
+        tokens
+    };
 
     let prefix = current_prefix(&line[..cursor]);
     let binary = tokens[0].text.as_str();
@@ -592,7 +646,13 @@ pub fn complete_in(
     }
 
     let mut items = if prefix_is_option {
-        emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
+        emit_options_with_ancestors(
+            current,
+            &ancestor_refs,
+            &prefix,
+            mode,
+            &result.consumed_options,
+        )
     } else if prefer_subcommands {
         // yarn-style shorthand: `yarn web` should match both yarn
         // subcommands (none start with "web") and the root args
@@ -610,9 +670,13 @@ pub fn complete_in(
     } else {
         match result.cursor_context {
             CursorContext::Subcommand => emit_subcommands(current, &prefix, mode),
-            CursorContext::OptionName => {
-                emit_options_with_ancestors(current, &ancestor_refs, &prefix, mode)
-            }
+            CursorContext::OptionName => emit_options_with_ancestors(
+                current,
+                &ancestor_refs,
+                &prefix,
+                mode,
+                &result.consumed_options,
+            ),
             CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd, mode, &tokens),
             CursorContext::Done => vec![],
         }
@@ -673,6 +737,67 @@ fn cursor_in_open_quote(text: &str) -> bool {
         }
     }
     state != Q::None
+}
+
+/// Byte offset where the command under the cursor begins. On a compound line
+/// the completion should target the last command segment, e.g. `git a && git b`
+/// → the `git b` slice. Delegates to the quote-aware `shell_parser` tree so
+/// separators inside quotes (`echo "a && b" && git c`) don't false-split.
+/// Returns 0 for a simple command (whole prefix is one segment) or when no
+/// command node is found (bare assignment, subshell — left as-is, same as
+/// before this scoping existed).
+fn command_segment_start(prefix: &str) -> usize {
+    rightmost_command_start(&crate::shell_parser::parse(prefix)).unwrap_or(0)
+}
+
+fn rightmost_command_start(node: &crate::shell_parser::Node) -> Option<usize> {
+    use crate::shell_parser::NodeKind;
+    match node.kind {
+        NodeKind::Command => Some(node.span.start),
+        // Recurse into composition/wrapper nodes. `AssignmentList` covers the
+        // env-prefix form (`FOO=bar git b`) — its trailing Command child wins.
+        NodeKind::Program | NodeKind::List | NodeKind::Pipeline | NodeKind::AssignmentList => {
+            node.children.iter().rev().find_map(rightmost_command_start)
+        }
+        _ => None,
+    }
+}
+
+/// Leading commands that run *another* command: none of them has a spec
+/// of its own in the shipped set, so `sudo docker r` used to resolve to
+/// "no spec for sudo" and an empty popup. Completion targets the wrapped
+/// command instead.
+const WRAPPER_COMMANDS: &[&str] = &[
+    "sudo", "doas", "env", "nice", "nohup", "time", "watch", "xargs", "command", "builtin", "exec",
+];
+
+/// Byte offset of the command a leading wrapper chain runs, or 0 when
+/// there is nothing to strip. Skips the wrapper word, its `-`-leading
+/// flags (`watch -n1`), and env assignments (`env FOO=1`), repeating for
+/// chains (`sudo env FOO=1 git`). A flag that takes a separate value
+/// (`sudo -u root git`) leaves the value in place — the spec lookup for
+/// `root` just misses, which is no worse than the wrapper miss it
+/// replaces. Returns 0 while the cursor is still inside the wrapper zone
+/// (`sudo -u |`) so behavior there is unchanged.
+fn wrapped_command_start(tokens: &[Annotation]) -> usize {
+    let is_wrapper_operand = |t: &str| {
+        t.starts_with('-')
+            || t.split_once('=').is_some_and(|(k, _)| {
+                !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+    };
+    let mut idx = 0;
+    while idx < tokens.len() && WRAPPER_COMMANDS.contains(&tokens[idx].text.as_str()) {
+        idx += 1;
+        while idx < tokens.len() && is_wrapper_operand(&tokens[idx].text) {
+            idx += 1;
+        }
+    }
+    if idx == 0 || idx >= tokens.len() {
+        0
+    } else {
+        tokens[idx].span.start
+    }
 }
 
 fn tokenize(text: &str) -> Vec<Annotation> {
@@ -924,7 +1049,7 @@ fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Sug
             Suggestion {
                 insertion: sc.name.clone(),
                 display,
-                description: sc.description.clone(),
+                description: sc.description.as_deref().map(String::from),
                 kind: SuggestionKind::Subcommand,
                 priority: sc.priority,
                 icon: sanitize_icon(sc.icon.as_deref()),
@@ -939,11 +1064,16 @@ fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Sug
 /// ancestor options whose `is_persistent` flag is set (Fig parity).
 /// `ancestors` is leaf → root order of the chain ABOVE `node`;
 /// pass an empty slice for a root-level emit.
+/// `consumed` is the parser's already-typed option list for the current
+/// level: a non-repeatable flag the user already typed is not offered
+/// again (the parser would reject it anyway — same `can_consume_option`
+/// rule the matcher applies).
 fn emit_options_with_ancestors(
     node: &Subcommand,
     ancestors: &[&Subcommand],
     prefix: &str,
     mode: MatchMode,
+    consumed: &[crate::spec_parser::Opt],
 ) -> Vec<Suggestion> {
     let emit = |opt: &crate::spec_parser::Opt| -> Vec<Suggestion> {
         // Fig parity: when `requiresSeparator` is set and the option
@@ -956,7 +1086,7 @@ fn emit_options_with_ancestors(
             .map(|n| Suggestion {
                 insertion: if needs_eq { format!("{n}=") } else { n.clone() },
                 display: n.clone(),
-                description: opt.description.clone(),
+                description: opt.description.as_deref().map(String::from),
                 kind: SuggestionKind::Flag,
                 priority: opt.priority,
                 icon: sanitize_icon(opt.icon.as_deref()),
@@ -966,12 +1096,15 @@ fn emit_options_with_ancestors(
     let mut out: Vec<Suggestion> = node
         .options
         .iter()
-        .filter(|o| !o.hidden)
+        .filter(|o| !o.hidden && crate::spec_parser::can_consume_option(o, consumed))
         .flat_map(&emit)
         .collect();
     for sc in ancestors {
         for opt in &sc.options {
             if !opt.is_persistent || opt.hidden {
+                continue;
+            }
+            if !crate::spec_parser::can_consume_option(opt, consumed) {
                 continue;
             }
             // Don't double-emit if leaf already declared the same flag.
@@ -1080,7 +1213,7 @@ fn emit_candidates_for_arg(
                 Suggestion {
                     insertion: format!("{insert_prefix}{base}"),
                     display: s.display_name.clone().unwrap_or_else(|| s.name.clone()),
-                    description: s.description.clone(),
+                    description: s.description.as_deref().map(String::from),
                     kind: SuggestionKind::Argument,
                     priority: s.priority,
                     icon: sanitize_icon(s.icon.as_deref()),
@@ -1118,7 +1251,9 @@ fn emit_candidates_for_arg(
         arg.template,
         Some(crate::spec_parser::TemplateKind::History)
     ) {
-        if let Some(entries) = shell_history_entries() {
+        if let Some(entries) =
+            cached_native_generator("<nerv:history>", None, shell_history_entries)
+        {
             out.extend(
                 entries
                     .into_iter()
@@ -1139,6 +1274,32 @@ fn emit_candidates_for_arg(
     // lines as candidates. Skipped under NERV_NO_GENERATORS=1 (tests,
     // sandboxed environments).
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
+        // Parallel prewarm: the dispatch loop below is sequential, so an
+        // arg carrying several cold Template generators used to stall the
+        // popup N×800ms (one timeout budget per subprocess, summed). Warm
+        // every cold entry concurrently first — the loop then reads warm
+        // cache hits, and the stall is the slowest generator, not the sum.
+        let cold: Vec<&Vec<String>> = arg
+            .generators
+            .iter()
+            .filter_map(|g| match g {
+                crate::spec_parser::Generator::Template { script }
+                    if !generator_cache_fresh(script, cwd) =>
+                {
+                    Some(script)
+                }
+                _ => None,
+            })
+            .collect();
+        if cold.len() > 1 {
+            std::thread::scope(|s| {
+                for script in cold {
+                    s.spawn(move || {
+                        let _ = cached_template_generator(script, cwd);
+                    });
+                }
+            });
+        }
         for g in &arg.generators {
             match g {
                 crate::spec_parser::Generator::Template { script } => {
@@ -1214,7 +1375,9 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::SshHosts => {
-                    if let Some(hosts) = ssh_hosts() {
+                    if let Some(hosts) =
+                        cached_native_generator("<nerv:ssh-hosts>", None, ssh_hosts)
+                    {
                         out.extend(
                             hosts
                                 .into_iter()
@@ -1231,7 +1394,9 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::MakefileTargets => {
-                    if let Some(targets) = makefile_targets(cwd) {
+                    if let Some(targets) =
+                        cached_native_generator("<nerv:makefile>", cwd, || makefile_targets(cwd))
+                    {
                         out.extend(
                             targets
                                 .into_iter()
@@ -1248,7 +1413,9 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::ManPages => {
-                    if let Some(pages) = man_pages() {
+                    if let Some(pages) =
+                        cached_native_generator("<nerv:man-pages>", None, man_pages)
+                    {
                         out.extend(
                             pages
                                 .into_iter()
@@ -1573,11 +1740,13 @@ type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// Cached wrapper around [`execute_template_generator`]. Returns
-/// the cached value on TTL-fresh hit, otherwise runs the generator
-/// and inserts the result.
-fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
-    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
+/// TTL-memo through [`GENERATOR_CACHE`]: fresh hit → cached lines,
+/// otherwise run `compute` and insert. Shared by the subprocess
+/// template path and the in-process native generators below.
+fn cached_generator_lines(
+    key: GeneratorCacheKey,
+    compute: impl FnOnce() -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
     if let Ok(cache) = GENERATOR_CACHE.lock() {
         if let Some((stamp, lines)) = cache.get(&key) {
             if stamp.elapsed() < GENERATOR_CACHE_TTL {
@@ -1585,7 +1754,7 @@ fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Ve
             }
         }
     }
-    let lines = execute_template_generator(script, cwd)?;
+    let lines = compute()?;
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
@@ -1599,6 +1768,38 @@ fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Ve
         cache.insert(key, (std::time::Instant::now(), lines.clone()));
     }
     Some(lines)
+}
+
+/// Cached wrapper around [`execute_template_generator`]. Returns
+/// the cached value on TTL-fresh hit, otherwise runs the generator
+/// and inserts the result.
+fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
+    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
+    cached_generator_lines(key, || execute_template_generator(script, cwd))
+}
+
+/// True when [`GENERATOR_CACHE`] holds a TTL-fresh entry for
+/// `(script, cwd)` — used to pick which generators need a prewarm.
+fn generator_cache_fresh(script: &[String], cwd: Option<&Path>) -> bool {
+    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
+    GENERATOR_CACHE.lock().is_ok_and(|c| {
+        c.get(&key)
+            .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
+    })
+}
+
+/// TTL-memo for the in-process native generators (man / ssh / history /
+/// makefile). These don't spawn a subprocess but still walk the
+/// filesystem — `man_pages` alone touches thousands of dirents across
+/// MANPATH — and they used to re-run on *every keystroke*. Keyed under a
+/// synthetic argv tag (angle brackets can't collide with a real command).
+fn cached_native_generator(
+    tag: &str,
+    cwd: Option<&Path>,
+    compute: impl FnOnce() -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let key: GeneratorCacheKey = (vec![tag.to_string()], cwd.map(Path::to_path_buf));
+    cached_generator_lines(key, compute)
 }
 
 /// Run a Tier B template generator script and return its stdout lines.
@@ -3662,6 +3863,58 @@ region = us-east-1
     }
 
     #[test]
+    fn native_generator_memoizes_within_ttl() {
+        // man/ssh/history/makefile walk the filesystem in-process; before
+        // the memo they re-ran on every keystroke. Second call inside the
+        // TTL must return the cached lines without invoking compute.
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let compute = || {
+            calls.set(calls.get() + 1);
+            Some(vec!["alpha".to_string(), "beta".to_string()])
+        };
+        let a = cached_native_generator("<nerv:test-memo-uniq>", None, compute);
+        let b = cached_native_generator("<nerv:test-memo-uniq>", None, || {
+            calls.set(calls.get() + 1);
+            Some(vec!["SHOULD-NOT-RUN".to_string()])
+        });
+        assert_eq!(
+            a.as_deref(),
+            b.as_deref(),
+            "cache hit must replay first result"
+        );
+        assert_eq!(calls.get(), 1, "compute ran again within TTL");
+    }
+
+    #[test]
+    fn multiple_cold_generators_run_concurrently() {
+        // Two cold 400ms generators on one arg must cost ~max, not ~sum —
+        // the prewarm runs them on parallel threads with a shared wall.
+        use std::time::Instant;
+        let slow = |tag: &str| crate::spec_parser::Generator::Template {
+            script: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                format!("sleep 0.4; echo prewarm-{tag}"),
+            ],
+        };
+        let arg = Arg {
+            generators: vec![slow("a"), slow("b")],
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        let elapsed = t0.elapsed();
+        assert_eq!(out.len(), 2, "both generators must contribute: {out:?}");
+        // Serial would be ≥800ms; allow generous slack for slow CI while
+        // still catching a regression back to sequential execution.
+        assert!(
+            elapsed.as_millis() < 750,
+            "expected concurrent cold generators, took {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn generator_times_out_instead_of_hanging() {
         // A generator that would only emit after 2s must be killed at the
         // GENERATOR_TIMEOUT_MS bound and return None — never freeze the
@@ -3820,6 +4073,27 @@ region = us-east-1
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].text, "git");
         assert_eq!(toks[1].text, "status");
+    }
+
+    #[test]
+    fn command_segment_start_scopes_to_last_command() {
+        // Simple command — whole prefix is one segment.
+        assert_eq!(command_segment_start("git p"), 0);
+        // Compound: complete the segment after the separator.
+        assert_eq!(command_segment_start("git checkout main && git p"), 21);
+        assert_eq!(command_segment_start("ls && git p"), 6);
+        assert_eq!(command_segment_start("echo hi; git p"), 9);
+        assert_eq!(command_segment_start("git a | git p"), 8);
+        // Quote-aware: the `&&` *inside* the string must NOT split. A naive
+        // rfind("&&") would return the wrong offset here.
+        let quoted = r#"echo "a && b" && git p"#;
+        assert_eq!(command_segment_start(quoted), quoted.rfind("git").unwrap());
+        // Env-prefix: the trailing Command child of the assignment list wins.
+        assert_eq!(command_segment_start("FOO=bar git p"), 8);
+        // Trailing operator: fresh (empty) right-hand command, so the slice
+        // lands just past `&&` (whitespace-only tail) — the left command is
+        // NOT re-listed.
+        assert!(command_segment_start("git status && ") >= "git status &&".len());
     }
 
     #[test]
@@ -4072,7 +4346,7 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix, &[]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].insertion, "--color=");
         assert_eq!(out[0].display, "--color", "display stays clean");
@@ -4092,7 +4366,7 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--f", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--f", MatchMode::Prefix, &[]);
         assert_eq!(out[0].insertion, "--flag");
     }
 
@@ -4108,8 +4382,93 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--c", MatchMode::Prefix, &[]);
         assert_eq!(out[0].insertion, "--color");
+    }
+
+    #[test]
+    fn wrapped_command_start_strips_wrappers() {
+        let t = |s: &str| tokenize(s);
+        assert_eq!(wrapped_command_start(&t("git p")), 0);
+        assert_eq!(wrapped_command_start(&t("sudo docker r")), 5);
+        assert_eq!(wrapped_command_start(&t("env FOO=1 git p")), 10);
+        assert_eq!(wrapped_command_start(&t("sudo env FOO=1 git p")), 15);
+        assert_eq!(wrapped_command_start(&t("watch -n1 kubectl get")), 10);
+        // Cursor still inside the wrapper zone — nothing to strip yet.
+        assert_eq!(wrapped_command_start(&t("sudo")), 0);
+        assert_eq!(wrapped_command_start(&t("sudo -u")), 0);
+        // Separate-value flag: the value is taken as the command — a miss,
+        // but no worse than the wrapper miss. Documents the heuristic.
+        assert_eq!(wrapped_command_start(&t("sudo -u root git p")), 8);
+    }
+
+    #[test]
+    fn sudo_wrapped_command_completes_end_to_end() {
+        let reg = registry_with(git_min());
+        let line = "sudo git st";
+        let r = complete(line, line.len(), &reg);
+        assert!(
+            r.items.iter().any(|s| s.insertion == "status"),
+            "expected git status through sudo, got: {:?}",
+            r.items.iter().map(|s| &s.display).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn emit_drops_consumed_non_repeatable_keeps_repeatable() {
+        let rm = Opt {
+            names: vec!["--rm".into()],
+            ..Default::default()
+        };
+        let volume = Opt {
+            names: vec!["-v".into(), "--volume".into()],
+            is_repeatable: true,
+            ..Default::default()
+        };
+        let node = Subcommand {
+            name: "run".into(),
+            options: vec![rm.clone(), volume.clone()],
+            ..Default::default()
+        };
+        let consumed = [rm, volume];
+        let out = emit_options_with_ancestors(&node, &[], "-", MatchMode::Prefix, &consumed);
+        let names: Vec<&str> = out.iter().map(|s| s.display.as_str()).collect();
+        assert!(
+            !names.contains(&"--rm"),
+            "already-typed non-repeatable flag re-offered: {names:?}"
+        );
+        assert!(
+            names.contains(&"-v"),
+            "repeatable flag must survive: {names:?}"
+        );
+    }
+
+    #[test]
+    fn typed_non_repeatable_flag_not_resuggested_end_to_end() {
+        let spec = Subcommand {
+            name: "docker".into(),
+            subcommands: vec![Subcommand {
+                name: "run".into(),
+                options: vec![
+                    Opt {
+                        names: vec!["--rm".into()],
+                        ..Default::default()
+                    },
+                    Opt {
+                        names: vec!["--detach".into()],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let reg = registry_with(spec);
+        let line = "docker run --rm --";
+        let r = complete(line, line.len(), &reg);
+        let names: Vec<&str> = r.items.iter().map(|s| s.display.as_str()).collect();
+        assert!(names.contains(&"--detach"), "{names:?}");
+        assert!(!names.contains(&"--rm"), "typed flag re-offered: {names:?}");
     }
 
     #[test]
@@ -4465,7 +4824,7 @@ region = us-east-1
             }],
             ..Default::default()
         };
-        let out = emit_options_with_ancestors(&node, &[], "--a", MatchMode::Prefix);
+        let out = emit_options_with_ancestors(&node, &[], "--a", MatchMode::Prefix, &[]);
         assert_eq!(out[0].icon, None, "fig:// URL must not leak");
     }
 
@@ -4791,6 +5150,55 @@ region = us-east-1
             reg.lookup(&format!("spec{}", total - 1)).is_some(),
             "most-recent entry must survive"
         );
+    }
+
+    /// The byte budget evicts LRU entries even when the entry COUNT is
+    /// under the cap — 16 cloud-scale specs would otherwise be GBs.
+    #[test]
+    fn byte_budget_evicts_oldest_before_count_cap() {
+        let reg = SpecRegistry::empty();
+        let mut cache = HashMap::new();
+        // Three 80MB (source bytes) entries: sum 240MB > 200MB budget,
+        // count 3 « SPEC_CACHE_CAP.
+        for i in 0..3 {
+            cache.insert(
+                format!("cloud{i}"),
+                CacheEntry {
+                    mtime: None,
+                    spec: Some(Arc::new(Spec {
+                        name: format!("cloud{i}"),
+                        ..Default::default()
+                    })),
+                    bytes: 80 << 20,
+                    tick: AtomicU64::new(reg.next_tick()),
+                },
+            );
+        }
+        reg.evict_overflow(&mut cache);
+        assert!(!cache.contains_key("cloud0"), "oldest must evict on bytes");
+        assert!(cache.contains_key("cloud1") && cache.contains_key("cloud2"));
+    }
+
+    /// A single spec bigger than the whole budget still completes — the
+    /// newest entry is never the victim.
+    #[test]
+    fn byte_budget_never_evicts_sole_entry() {
+        let reg = SpecRegistry::empty();
+        let mut cache = HashMap::new();
+        cache.insert(
+            "megacloud".to_string(),
+            CacheEntry {
+                mtime: None,
+                spec: Some(Arc::new(Spec {
+                    name: "megacloud".into(),
+                    ..Default::default()
+                })),
+                bytes: 300 << 20,
+                tick: AtomicU64::new(reg.next_tick()),
+            },
+        );
+        reg.evict_overflow(&mut cache);
+        assert!(cache.contains_key("megacloud"));
     }
 
     /// A spec the user keeps completing against must never evict, even as

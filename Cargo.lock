@@ -1689,7 +1689,6 @@ dependencies = [
  "nerv-shell",
  "serde_json",
  "time",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]

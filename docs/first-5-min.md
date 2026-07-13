@@ -365,15 +365,19 @@ docs/scripts/teardown-first-5-min.sh
   well-known 패턴 recognizer (kubectl_resources / package_json_scripts /
   aws_list / filepaths 등). 4/7/12 단계가 이 경로로 실완성 격상 — JS
   엔진 없이.
-- **rquickjs Tier C (보류)**: scaffold 는 `--features quickjs` opt-in 으로
-  존재하나 2026-06-06 e2e 검증 결과 **캡처된 closure 473개 중 실행
-  성공 0건** (async 未await + `__awaiter` 미정의 + shell host-global
-  부재). 출시 바이너리 미동봉 결정 — `docs/findings/tier-c-quickjs-e2e.md`
-  참조. 재개 조건 = async Promise drain + host-global 주입.
+- **rquickjs Tier C (출하됨 — 2026-07-08 결정 번복)**: 2026-06-06 첫
+  e2e 는 실행률 0% 였으나 (async 未drain + `__awaiter` 미정의 + shell
+  stub), 2026-07-07 머신러리 3종 수정으로 **실행률 82% settle / aws
+  746/749 회복**. 릴리즈 빌드에 동봉 (`release.yml`
+  `--features nerv-cli/quickjs,nerv-daemon/quickjs`, +0.78MB; JS 실측
+  2-3ms < 25ms 예산). 잔존 tail (cargo closure / chezmoi / nx 등
+  module-level 헬퍼 미포착) 만 defer — `docs/findings/tier-c-quickjs-e2e.md`
+  §2026-07-08 참조.
 
-따라서 잔존 closure-form generator 의 회복 경로는 rquickjs 재개가
-아니라 **recognizer / enrichment 패턴 추가** 가 1순위 — 11단계가 그
-증명 (generator 가 아예 없던 upstream gap 을 enrichment 로 메움).
+잔존 closure-form generator 의 회복 경로는 여전히 **recognizer /
+enrichment 패턴 추가가 1순위** (Tier C 는 마지막 fallback — CLAUDE.md
+§4 JS 엔진 불변식) — 11단계가 그 증명 (generator 가 아예 없던
+upstream gap 을 enrichment 로 메움).
 
 M1 figterm opt-in (`NERV_PTY=1`) 도입 시 본 시나리오는 *figterm
 환경에서도 동일하게 통과* 해야 한다 (M1 dogfooding 검증).
