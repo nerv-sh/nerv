@@ -4,12 +4,16 @@
 
 <h1 align="center">Nerv</h1>
 
-> [Fig](https://fig.io)'s inline shell autocomplete, resurrected.
-> No login. No AI. No telemetry. No Electron. One small binary and your zsh.
+<p align="center">
+  <strong>IDE-grade autocomplete for your terminal.</strong><br>
+  No login. No AI. No telemetry. No Electron. Just one small binary and your zsh.
+</p>
 
-[![CI](https://github.com/nerv-sh/nerv/actions/workflows/ci.yml/badge.svg)](https://github.com/nerv-sh/nerv/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/nerv-sh/nerv?include_prereleases)](https://github.com/nerv-sh/nerv/releases)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/nerv-sh/nerv/actions/workflows/ci.yml"><img src="https://github.com/nerv-sh/nerv/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/nerv-sh/nerv/releases"><img src="https://img.shields.io/github/v/release/nerv-sh/nerv?include_prereleases" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License"></a>
+</p>
 
 Fig gave the terminal IDE-grade autocomplete: type `git ch` and the next token
 is just *there*. Then Fig was acquired, folded into Amazon Q, and the
@@ -17,7 +21,7 @@ experience got buried under a mandatory Builder ID login, AI chat, and a
 multi-hundred-megabyte bundle.
 
 Nerv digs it back out. It runs the actual Fig completion engine — the Rust
-codebase AWS preserved and open-sourced — plus the 1,400+ community-maintained
+codebase AWS preserved and open-sourced — plus 700+ of the community-maintained
 completion specs from [`withfig/autocomplete`](https://github.com/withfig/autocomplete),
 compiled to static JSON at build time. What shipped as a desktop app with a
 cloud attached is now a local daemon and a zsh widget.
