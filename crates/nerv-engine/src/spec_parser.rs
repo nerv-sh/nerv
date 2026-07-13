@@ -39,6 +39,76 @@ use std::ops::Range;
 /// named after the CLI itself (e.g. `git`, `docker`, `kubectl`).
 pub type Spec = Subcommand;
 
+/// Description interning — dedup at *deserialization* time.
+///
+/// Large converted specs repeat description strings heavily (measured:
+/// aws 54% duplicate occurrences ≈ 17MB of bytes, gcloud 86% ≈ 10MB),
+/// and every duplicate is its own small heap allocation. Deduping after
+/// the parse wouldn't lower the daemon's resident footprint — freed
+/// small blocks stay on resident pages — so the dedup has to happen
+/// before the duplicate is ever allocated: a thread-local pool scoped
+/// to one parse hands out shared `Arc<str>`s while serde walks the
+/// tree. The pool is dropped at scope end; sharing never leaks across
+/// specs, so evicting a spec frees all of its descriptions.
+pub(crate) mod intern {
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    thread_local! {
+        static POOL: RefCell<Option<HashSet<Arc<str>>>> = const { RefCell::new(None) };
+    }
+
+    /// Run `f` with an active intern pool on this thread. Nested use
+    /// keeps the outer pool.
+    pub fn scope<T>(f: impl FnOnce() -> T) -> T {
+        let fresh = POOL.with(|p| {
+            let mut b = p.borrow_mut();
+            if b.is_none() {
+                *b = Some(HashSet::new());
+                true
+            } else {
+                false
+            }
+        });
+        let out = f();
+        if fresh {
+            POOL.with(|p| *p.borrow_mut() = None);
+        }
+        out
+    }
+
+    /// Shared `Arc<str>` for `s` — pooled inside a [`scope`], a plain
+    /// one-off allocation outside (tests, hand-built specs).
+    pub fn intern(s: &str) -> Arc<str> {
+        POOL.with(|p| {
+            let mut b = p.borrow_mut();
+            match b.as_mut() {
+                Some(set) => match set.get(s) {
+                    Some(a) => a.clone(),
+                    None => {
+                        let a: Arc<str> = Arc::from(s);
+                        set.insert(a.clone());
+                        a
+                    }
+                },
+                None => Arc::from(s),
+            }
+        })
+    }
+
+    /// `deserialize_with` adapter for `Option<Arc<str>>` fields.
+    /// Borrows from the JSON buffer when possible, so a pool hit
+    /// allocates nothing at all.
+    pub fn de_opt<'de, D>(d: D) -> Result<Option<Arc<str>>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s: Option<std::borrow::Cow<'de, str>> = serde::Deserialize::deserialize(d)?;
+        Ok(s.map(|s| intern(&s)))
+    }
+}
+
 /// A subcommand node — recursive: subcommands contain subcommands.
 ///
 /// Layout mirrors the `@fig/autocomplete-types` `Subcommand` shape:
@@ -52,7 +122,9 @@ pub struct Subcommand {
     /// Alternative names that resolve to this same subcommand.
     pub aliases: Vec<String>,
     /// One-line description (rendered in the `?` help popup).
-    pub description: Option<String>,
+    /// `Arc<str>`: heavily duplicated across nodes — interned per parse.
+    #[serde(deserialize_with = "intern::de_opt")]
+    pub description: Option<std::sync::Arc<str>>,
     /// Nested subcommands. Searched in order; the first matching
     /// name (or alias) wins.
     pub subcommands: Vec<Subcommand>,
@@ -88,8 +160,9 @@ pub struct Subcommand {
 pub struct Opt {
     /// All names that select this option (e.g. `["-h", "--help"]`).
     pub names: Vec<String>,
-    /// One-line description.
-    pub description: Option<String>,
+    /// One-line description. Interned — see [`Subcommand::description`].
+    #[serde(deserialize_with = "intern::de_opt")]
+    pub description: Option<std::sync::Arc<str>>,
     /// Argument(s) consumed after the option. Empty for flag-only
     /// options (`--verbose`).
     pub args: Vec<Arg>,
@@ -131,8 +204,9 @@ pub struct Opt {
 pub struct Arg {
     /// Display name (e.g. `<file>`, `<branch>`, `<image>`).
     pub name: Option<String>,
-    /// One-line description.
-    pub description: Option<String>,
+    /// One-line description. Interned — see [`Subcommand::description`].
+    #[serde(deserialize_with = "intern::de_opt")]
+    pub description: Option<std::sync::Arc<str>>,
     /// Optional vs required.
     pub is_optional: bool,
     /// Consumes one-or-more rest tokens.
@@ -192,7 +266,7 @@ pub struct Arg {
 pub struct RawSuggestion {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    pub description: Option<std::sync::Arc<str>>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "displayName")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "insertValue")]
@@ -241,7 +315,7 @@ impl<'de> serde::Deserialize<'de> for RawSuggestion {
                 priority,
             } => Ok(RawSuggestion {
                 name: name.unwrap_or_default(),
-                description,
+                description: description.map(|s| intern::intern(&s)),
                 display_name,
                 insert_value,
                 icon,
@@ -462,6 +536,12 @@ pub struct ParserResult {
     /// instead of the surrounding subcommand's positional args.
     /// `None` everywhere else.
     pub active_option_arg: Option<(String, usize)>,
+    /// Options already consumed at the *current* subcommand level
+    /// (cleared on each subcommand descend, mirroring the matcher's
+    /// own repeat-rejection scope). `complete` uses this with
+    /// [`can_consume_option`] to stop re-suggesting a non-repeatable
+    /// flag the user already typed (`docker run --rm --<tab>`).
+    pub consumed_options: Vec<Opt>,
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +1049,7 @@ pub fn parse_arguments(spec: &Spec, tokens: &[Annotation], cursor: usize) -> Par
         cursor_context,
         subcommand_path: state.subcommand_path,
         active_option_arg,
+        consumed_options: state.consumed_options,
     }
 }
 

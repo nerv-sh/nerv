@@ -54,6 +54,13 @@ pub enum SpecLoadError {
 /// distinguishing it from generic I/O so callers can fall back to
 /// the embedded default cache without log noise.
 pub fn load_spec_file(path: &Path) -> Result<Spec, SpecLoadError> {
+    load_spec_file_with_size(path).map(|(spec, _)| spec)
+}
+
+/// [`load_spec_file`] variant that also returns the decompressed
+/// source-JSON length — the registry's cheap proxy for the parsed
+/// tree's heap footprint (its byte-budget eviction sums these).
+pub fn load_spec_file_with_size(path: &Path) -> Result<(Spec, usize), SpecLoadError> {
     if !path.exists() {
         return Err(SpecLoadError::NotFound(path.display().to_string()));
     }
@@ -77,15 +84,20 @@ pub fn load_spec_file(path: &Path) -> Result<Spec, SpecLoadError> {
             source: e,
         })?
     };
-    parse_spec_str(&text, path)
+    parse_spec_str(&text, path).map(|spec| (spec, text.len()))
 }
 
 /// Parse a spec from an in-memory JSON string. Useful for tests
 /// and for the build-spec binary's intermediate output.
 pub fn parse_spec_str(text: &str, origin: &Path) -> Result<Spec, SpecLoadError> {
-    serde_json::from_str::<Spec>(text).map_err(|e| SpecLoadError::Parse {
-        path: origin.display().to_string(),
-        source: e,
+    // Intern scope: duplicate description strings inside this one spec
+    // deserialize to shared Arc<str>s instead of separate allocations
+    // (aws: 54% duplicates ≈ 17MB). Pool dies with the scope.
+    crate::spec_parser::intern::scope(|| serde_json::from_str::<Spec>(text)).map_err(|e| {
+        SpecLoadError::Parse {
+            path: origin.display().to_string(),
+            source: e,
+        }
     })
 }
 
@@ -177,6 +189,26 @@ mod tests {
         assert!(json.contains("\"subcommands\""));
         assert!(json.contains("\"options\""));
         assert!(json.contains("\"template\": \"filepaths\""));
+    }
+
+    #[test]
+    fn descriptions_intern_within_one_parse() {
+        // aws-style duplication: identical description strings across
+        // nodes must share ONE allocation after the parse — this is the
+        // memory contract behind Option<Arc<str>> + intern::scope.
+        let json = r#"{"name":"x","subcommands":[
+            {"name":"a","description":"same text"},
+            {"name":"b","description":"same text"},
+            {"name":"c","options":[{"names":["-v"],"description":"same text"}]}
+        ]}"#;
+        let spec = parse_spec_str(json, Path::new("<test>")).unwrap();
+        let a = spec.subcommands[0].description.as_ref().unwrap();
+        let b = spec.subcommands[1].description.as_ref().unwrap();
+        let c = spec.subcommands[2].options[0].description.as_ref().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(a, b) && std::sync::Arc::ptr_eq(b, c),
+            "duplicate descriptions must share one allocation"
+        );
     }
 
     #[test]

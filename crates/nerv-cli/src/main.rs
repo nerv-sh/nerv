@@ -99,7 +99,6 @@ enum Shell {
 }
 
 fn main() -> anyhow::Result<()> {
-    init_tracing();
     // Rust's runtime ignores SIGPIPE by default, which turns
     // `nerv spec list | head` into a panic. Restore Unix default
     // so the CLI exits silently when its stdout closes mid-write.
@@ -107,6 +106,21 @@ fn main() -> anyhow::Result<()> {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+
+    // Per-keystroke hot path: the ZLE widget forks `nerv _complete <line>
+    // <cursor>` on every character. Dispatch it before init_tracing and the
+    // full clap tree build — neither buys anything for the bridge. A shape
+    // mismatch falls through to clap so error messages stay identical.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() == 4 && args[1] == "_complete" {
+            if let Ok(cursor) = args[3].parse::<usize>() {
+                return cmd_internal_complete(&args[2], cursor);
+            }
+        }
+    }
+
+    init_tracing();
 
     let cli = Cli::parse();
     match cli.command {
@@ -1337,11 +1351,7 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
             .and_then(|p| p.to_str().map(|s| s.to_string())),
     };
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()?;
-
-    match rt.block_on(nerv_engine::ipc_client::query(&req))? {
+    match nerv_engine::ipc_client::query_sync(&req)? {
         Response::Suggestions { items } => {
             for s in &items {
                 print_suggestion(s);
@@ -1404,11 +1414,8 @@ fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
         spec: spec.to_string(),
         insertion: insertion.to_string(),
     };
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()?;
     // We don't act on the ack body, just let the daemon record + close.
-    rt.block_on(nerv_engine::ipc_client::query(&req))?;
+    nerv_engine::ipc_client::query_sync(&req)?;
     Ok(())
 }
 
