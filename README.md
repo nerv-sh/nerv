@@ -1,4 +1,8 @@
-# Nerv
+<p align="center">
+  <img src="docs/assets/icon-1024.png" width="132" alt="Nerv">
+</p>
+
+<h1 align="center">Nerv</h1>
 
 > [Fig](https://fig.io)'s inline shell autocomplete, resurrected.
 > No login. No AI. No telemetry. No Electron. One small binary and your zsh.
