@@ -1,0 +1,29 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0C1019"/><stop offset="1" stop-color="#12161F"/>
+    </linearGradient>
+    <linearGradient id="acc" x1="380" y1="360" x2="640" y2="660" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF6AD5"/><stop offset="1" stop-color="#8B5CFF"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFA6E6" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FF6AD5" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="sq"><rect width="1024" height="1024" rx="228"/></clipPath>
+  </defs>
+  <g clip-path="url(#sq)">
+    <rect width="1024" height="1024" fill="url(#bg)"/>
+    <path d="M 400 372 L 400 648" stroke="url(#acc)" stroke-width="78" fill="none" stroke-linecap="round"/>
+    <path d="M 400 452 C 400 388 452 380 512 380 C 580 380 624 416 624 486 L 624 648"
+          stroke="url(#acc)" stroke-width="78" fill="none" stroke-linecap="round"/>
+    <g stroke="url(#acc)" stroke-width="22" stroke-linecap="round" fill="none">
+      <path d="M 400 648 L 322 700"/>
+      <path d="M 400 606 L 312 618"/>
+    </g>
+    <circle cx="624" cy="648" r="30" fill="#FFEAF8"/>
+    <circle cx="512" cy="384" r="150" fill="url(#halo)"/>
+    <circle cx="512" cy="384" r="46" fill="none" stroke="#FFA6E6" stroke-width="7" opacity="0.9"/>
+    <circle cx="512" cy="384" r="25" fill="#FFF2FB"/>
+  </g>
+</svg>
