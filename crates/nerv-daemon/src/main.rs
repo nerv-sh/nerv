@@ -13,8 +13,8 @@
 
 use anyhow::Context;
 use nerv_engine::{
-    FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, complete_in,
-    manifest, paths,
+    FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, Suggestion,
+    complete_in, manifest, paths,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -229,19 +229,36 @@ fn engine_complete(
     }
     // Extract the binary name once — frecency keys are per-spec.
     if let Some(spec_name) = line.split_whitespace().next() {
-        let mut scored: Vec<(f64, _)> = result
+        let mut scored: Vec<(f64, Suggestion)> = result
             .items
             .drain(..)
             .map(|s| (frecency.score(spec_name, &s.insertion), s))
             .collect();
-        // Sort by score DESC; preserve alpha for ties via stable
-        // sort on already-alpha-sorted engine output.
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        rank_completions(&mut scored);
         result.items = scored.into_iter().map(|(_, s)| s).collect();
     }
     Response::Suggestions {
         items: result.items,
     }
+}
+
+/// Order scored completion items for display. `.`/`..` are universal path
+/// primitives, not picks to be ranked — pin them to the very top (`.`
+/// before `..`) ahead of any frecency boost, so `open .` never buries
+/// them under a frecency-boosted `.DS_Store`. Everything else sorts by
+/// score DESC; the stable sort preserves the engine's incoming order
+/// (priority / exact-case) for score ties.
+fn rank_completions(scored: &mut [(f64, Suggestion)]) {
+    let dotnav_rank = |disp: &str| match disp {
+        "./" => 0u8,
+        "../" => 1,
+        _ => 2,
+    };
+    scored.sort_by(|a, b| {
+        dotnav_rank(a.1.display.as_str())
+            .cmp(&dotnav_rank(b.1.display.as_str()))
+            .then_with(|| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal))
+    });
 }
 
 async fn write_pid_file(path: &std::path::Path) -> anyhow::Result<()> {
@@ -280,4 +297,53 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sugg(display: &str) -> Suggestion {
+        Suggestion {
+            insertion: display.to_string(),
+            display: display.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn dotnav_pins_above_frecency_boost() {
+        // Regression: `open .` must lead with `./` then `../`, even when
+        // a real dotfile (`.DS_Store`) carries a strong frecency boost.
+        // The filepaths_at unit test passed while this was broken because
+        // the reorder happens here, after the engine returns.
+        let mut scored = vec![
+            (0.0, sugg("../")),
+            (0.0, sugg("./")),
+            (9.0, sugg(".DS_Store")), // frecency-boosted real entry
+            (0.0, sugg(".gitignore")),
+        ];
+        rank_completions(&mut scored);
+        let order: Vec<&str> = scored.iter().map(|(_, s)| s.display.as_str()).collect();
+        assert_eq!(order[0], "./", "current dir must lead");
+        assert_eq!(order[1], "../", "parent dir second");
+        // Boosted dotfile still beats the unboosted one — below dotnav.
+        assert_eq!(order[2], ".DS_Store");
+        assert_eq!(order[3], ".gitignore");
+    }
+
+    #[test]
+    fn non_dotnav_still_sorts_by_frecency() {
+        // No `.`/`..` present: pure frecency DESC, stable for ties.
+        let mut scored = vec![
+            (0.0, sugg("status")),
+            (5.0, sugg("checkout")),
+            (0.0, sugg("commit")),
+        ];
+        rank_completions(&mut scored);
+        let order: Vec<&str> = scored.iter().map(|(_, s)| s.display.as_str()).collect();
+        assert_eq!(order[0], "checkout"); // boosted floats up
+        assert_eq!(order[1], "status"); // ties keep incoming order
+        assert_eq!(order[2], "commit");
+    }
 }
