@@ -2969,6 +2969,25 @@ fn filepaths_at(
         };
         out.push((insertion, display, desc, icon));
     }
+    // Offer `.` and `..` once the user has typed a leading dot —
+    // `open .`, `idea .`, `cd ..`. read_dir never yields these two, and
+    // a bare `.`/`..` insertion would be dropped by the no-op filter
+    // (insertion == the typed token), so emit them with the directory
+    // trailing slash like any other dir (`./`, `../`): the slash keeps
+    // the insertion distinct from the token and lets `../foo` chain.
+    if filter.starts_with('.') {
+        for (name, desc) in [(".", "current directory"), ("..", "parent directory")] {
+            if !name.starts_with(filter) {
+                continue;
+            }
+            out.push((
+                format!("{dir_part}{name}/"),
+                format!("{name}/"),
+                Some(desc.to_string()),
+                Some("📁".to_string()),
+            ));
+        }
+    }
     out.sort_by(|a, b| a.1.cmp(&b.1));
     Some(out)
 }
@@ -5457,6 +5476,47 @@ region = us-east-1
         assert_eq!(by_name.get("file.txt"), Some(&Some("📄".into())));
         #[cfg(unix)]
         assert_eq!(by_name.get("link"), Some(&Some("🔗".into())));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn filepaths_offers_dot_and_dotdot_on_leading_dot() {
+        // `open .` / `idea .` / `cd ..` — `.` and `..` should complete
+        // to `./` and `../` (trailing slash keeps them distinct from the
+        // typed token, which the no-op filter would otherwise drop).
+        let tmp = std::env::temp_dir().join(format!("nerv-fp-dot-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(".hidden"), "x").unwrap();
+        let displays = |prefix: &str| -> Vec<String> {
+            filepaths_at(Some(&tmp), prefix, false)
+                .unwrap()
+                .into_iter()
+                .map(|(_, d, _, _)| d)
+                .collect()
+        };
+
+        // Empty prefix: no `.`/`..` noise, and dotfiles stay hidden.
+        let empty = displays("");
+        assert!(!empty.contains(&"./".to_string()));
+        assert!(!empty.contains(&"../".to_string()));
+
+        // Leading dot: both current and parent dir, plus the dotfile.
+        let dot = displays(".");
+        assert!(dot.contains(&"./".to_string()));
+        assert!(dot.contains(&"../".to_string()));
+        assert!(dot.contains(&".hidden".to_string()));
+
+        // `..`: parent only — `.` does not start with `..`.
+        let dotdot = displays("..");
+        assert!(dotdot.contains(&"../".to_string()));
+        assert!(!dotdot.contains(&"./".to_string()));
+
+        // Insertion carries the trailing slash (survives the no-op filter).
+        let rows = filepaths_at(Some(&tmp), ".", false).unwrap();
+        let dot_row = rows.iter().find(|(_, d, _, _)| d == "./").unwrap();
+        assert_eq!(dot_row.0, "./");
+        assert_eq!(dot_row.2, Some("current directory".to_string()));
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
