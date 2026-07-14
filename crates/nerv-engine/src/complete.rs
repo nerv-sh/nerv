@@ -1232,20 +1232,7 @@ fn emit_candidates_for_arg(
         Some(crate::spec_parser::TemplateKind::Filepaths) => Some(false),
         _ => None,
     } {
-        if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
-            out.extend(
-                paths
-                    .into_iter()
-                    .map(|(insertion, display, description, icon)| Suggestion {
-                        insertion,
-                        display,
-                        description,
-                        kind: SuggestionKind::Argument,
-                        priority: None,
-                        icon,
-                    }),
-            );
-        }
+        out.extend(filepath_suggestions(cwd, prefix, folders_only));
     }
     if matches!(
         arg.template,
@@ -1361,18 +1348,7 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::Filepaths { folders_only } => {
-                    if let Some(paths) = filepaths_at(cwd, prefix, *folders_only) {
-                        out.extend(paths.into_iter().map(
-                            |(insertion, display, description, icon)| Suggestion {
-                                insertion,
-                                display,
-                                description,
-                                kind: SuggestionKind::Argument,
-                                priority: None,
-                                icon,
-                            },
-                        ));
-                    }
+                    out.extend(filepath_suggestions(cwd, prefix, *folders_only));
                 }
                 crate::spec_parser::Generator::SshHosts => {
                     if let Some(hosts) =
@@ -1645,20 +1621,7 @@ fn emit_candidates_for_arg(
         let kind = infer_filepaths_kind(arg.name.as_deref())
             .or_else(|| infer_filepaths_kind_from_opt_names(enclosing_opt));
         if let Some(folders_only) = kind {
-            if let Some(paths) = filepaths_at(cwd, prefix, folders_only) {
-                out.extend(
-                    paths
-                        .into_iter()
-                        .map(|(insertion, display, description, icon)| Suggestion {
-                            insertion,
-                            display,
-                            description,
-                            kind: SuggestionKind::Argument,
-                            priority: None,
-                            icon,
-                        }),
-                );
-            }
+            out.extend(filepath_suggestions(cwd, prefix, folders_only));
         }
     }
 
@@ -2921,6 +2884,35 @@ fn man_path_roots() -> Vec<std::path::PathBuf> {
 /// directory prefix so `cd ./fo<Tab>` → `cd ./encl/`, not `encl/`.
 type FilepathRow = (String, String, Option<String>, Option<String>);
 
+/// Wrap `filepaths_at` output as ranked `Suggestion`s. The walker already
+/// orders rows exact-case first, then alphabetical; encode that position
+/// into `priority` (like the Template arm) so the global
+/// `sort_by_priority_then_alpha` preserves it instead of re-alphabetizing
+/// — otherwise uppercase `D` (0x44) would float above lowercase `d`,
+/// defeating the exact-case ranking. Shared by every filepath call site
+/// (template hint, `Generator::Filepaths`, and the smart fallback).
+fn filepath_suggestions(
+    cwd: Option<&std::path::Path>,
+    prefix: &str,
+    folders_only: bool,
+) -> Vec<Suggestion> {
+    filepaths_at(cwd, prefix, folders_only)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(
+            |(idx, (insertion, display, description, icon))| Suggestion {
+                insertion,
+                display,
+                description,
+                kind: SuggestionKind::Argument,
+                priority: Some(1_000u32.saturating_sub(idx as u32)),
+                icon,
+            },
+        )
+        .collect()
+}
+
 fn filepaths_at(
     cwd: Option<&std::path::Path>,
     prefix: &str,
@@ -2939,7 +2931,7 @@ fn filepaths_at(
         let Some(name) = name_os.to_str() else {
             continue;
         };
-        if !name.starts_with(filter) {
+        if !ci_starts_with(name, filter) {
             continue;
         }
         // Skip dotfiles unless user explicitly typed a leading dot.
@@ -2977,7 +2969,7 @@ fn filepaths_at(
     // the insertion distinct from the token and lets `../foo` chain.
     if filter.starts_with('.') {
         for (name, desc) in [(".", "current directory"), ("..", "parent directory")] {
-            if !name.starts_with(filter) {
+            if !ci_starts_with(name, filter) {
                 continue;
             }
             out.push((
@@ -2988,8 +2980,24 @@ fn filepaths_at(
             ));
         }
     }
-    out.sort_by(|a, b| a.1.cmp(&b.1));
+    // Case-insensitive matching (macOS's default filesystem is
+    // case-insensitive), but rank exact-case prefix hits first — `DE`
+    // floats `DEEP_LINKING.md` above `deep-linking/`, and `de` the
+    // reverse — then alphabetical within each group.
+    out.sort_by(|a, b| {
+        let a_exact = a.1.starts_with(filter);
+        let b_exact = b.1.starts_with(filter);
+        b_exact.cmp(&a_exact).then_with(|| a.1.cmp(&b.1))
+    });
     Some(out)
+}
+
+/// ASCII case-insensitive prefix test for filename completion. Non-ASCII
+/// bytes compare exactly, so UTF-8 names stay correct; only ASCII letters
+/// fold. The caller ranks exact-case hits ahead of case-folded ones.
+fn ci_starts_with(name: &str, filter: &str) -> bool {
+    let (nb, fb) = (name.as_bytes(), filter.as_bytes());
+    nb.len() >= fb.len() && nb.iter().zip(fb).all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 fn filepaths_desc(entry: &std::fs::DirEntry, is_dir: bool, is_symlink: bool) -> Option<String> {
@@ -5516,6 +5524,38 @@ region = us-east-1
         let dot_row = rows.iter().find(|(_, d, _, _)| d == "./").unwrap();
         assert_eq!(dot_row.0, "./");
         assert_eq!(dot_row.2, Some("current directory".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn filepaths_case_insensitive_but_exact_case_ranks_first() {
+        // macOS's default FS is case-insensitive, so `cat de` must reach
+        // `DEEP_LINKING.md` — but the case the user actually typed leads.
+        let tmp = std::env::temp_dir().join(format!("nerv-fp-ci-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::create_dir_all(tmp.join("deep-linking")).unwrap();
+        std::fs::write(tmp.join("DEEP_LINKING.md"), "x").unwrap();
+        let displays = |prefix: &str| -> Vec<String> {
+            filepaths_at(Some(&tmp), prefix, false)
+                .unwrap()
+                .into_iter()
+                .map(|(_, d, _, _)| d)
+                .collect()
+        };
+        let pos = |v: &[String], s: &str| v.iter().position(|d| d == s).unwrap();
+
+        // Lowercase query: both match; the lowercase dir ranks first.
+        let lower = displays("de");
+        assert!(lower.contains(&"deep-linking/".to_string()));
+        assert!(lower.contains(&"DEEP_LINKING.md".to_string()));
+        assert!(pos(&lower, "deep-linking/") < pos(&lower, "DEEP_LINKING.md"));
+
+        // Uppercase query: both match; the uppercase file ranks first.
+        let upper = displays("DE");
+        assert!(upper.contains(&"deep-linking/".to_string()));
+        assert!(upper.contains(&"DEEP_LINKING.md".to_string()));
+        assert!(pos(&upper, "DEEP_LINKING.md") < pos(&upper, "deep-linking/"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
