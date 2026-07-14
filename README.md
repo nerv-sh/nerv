@@ -99,6 +99,7 @@ Everything else is automatic:
 ❯ aws --profile <Tab>    # profiles from ~/.aws/config
 ❯ ssh <Tab>              # hosts from known_hosts + ssh config
 ❯ z <Tab>                # zoxide / zsh-z directory history
+❯ open .<Tab>            # ./ and ../ — for `open .`, `idea .`, `code .`
 ❯ sudo docker r<Tab>     # wrappers are looked through
 ❯ g ch<Tab>              # so are your aliases (alias g=git)
 ```
