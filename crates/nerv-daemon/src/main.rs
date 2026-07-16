@@ -209,6 +209,19 @@ async fn handle_connection(
     }
 }
 
+/// Max suggestions transported to the widget per keystroke. The ZLE
+/// popup only shows a ~10-row sliding window, but the widget receives
+/// *every* row over the socket, splits it into a zsh array, and scans
+/// it O(N) to size the box. At the 16 914 `brew install` formulae that
+/// scan alone is ~270ms per keystroke — the observed stutter. Capping
+/// after ranking is safe because `complete_in` already prefix-filters,
+/// so the cap never drops a row the user is typing toward; it only
+/// truncates broad empty/one-char browsing, where frecency has already
+/// floated any previously-picked entry into the kept head. 500 keeps
+/// the widget's split+measure ~6ms while covering typical prefixed
+/// result sets (e.g. `brew install a` = 442) with no truncation at all.
+const MAX_SUGGESTIONS: usize = 500;
+
 /// Dispatch a Complete request through the real engine pipeline.
 /// After the engine returns, apply a frecency boost so suggestions
 /// the user has accepted before float to the top of the list.
@@ -237,6 +250,9 @@ fn engine_complete(
         rank_completions(&mut scored);
         result.items = scored.into_iter().map(|(_, s)| s).collect();
     }
+    // Bound the transported list — see MAX_SUGGESTIONS. Ranking already
+    // ran, so this drops only the least-relevant tail.
+    result.items.truncate(MAX_SUGGESTIONS);
     Response::Suggestions {
         items: result.items,
     }
@@ -330,6 +346,27 @@ mod tests {
         // Boosted dotfile still beats the unboosted one — below dotnav.
         assert_eq!(order[2], ".DS_Store");
         assert_eq!(order[3], ".gitignore");
+    }
+
+    #[test]
+    fn transport_cap_keeps_ranked_head_drops_tail() {
+        // A huge candidate set (brew's 16k formulae) must not ship whole:
+        // the widget scans every row O(N) to size the popup, stuttering
+        // past a few hundred. Cap AFTER ranking so a frecency-boosted
+        // entry that sorts alphabetically late still survives into the
+        // kept head, and only the least-relevant tail is dropped.
+        let mut scored: Vec<(f64, Suggestion)> = (0..MAX_SUGGESTIONS + 50)
+            .map(|i| (0.0, sugg(&format!("pkg{i:05}"))))
+            .collect();
+        scored.push((9.0, sugg("zzz-frecency-boosted")));
+        rank_completions(&mut scored);
+        let mut items: Vec<Suggestion> = scored.into_iter().map(|(_, s)| s).collect();
+        items.truncate(MAX_SUGGESTIONS);
+        assert_eq!(items.len(), MAX_SUGGESTIONS, "list capped for transport");
+        assert_eq!(
+            items[0].display, "zzz-frecency-boosted",
+            "frecency survivor kept at head despite late alpha order"
+        );
     }
 
     #[test]
