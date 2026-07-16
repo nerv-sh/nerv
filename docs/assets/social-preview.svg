@@ -1,0 +1,44 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0C1019"/><stop offset="1" stop-color="#10141D"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FF6AD5" stop-opacity="0.26"/>
+      <stop offset="1" stop-color="#FF6AD5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="acc" x1="380" y1="360" x2="640" y2="660" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF6AD5"/><stop offset="1" stop-color="#8B5CFF"/>
+    </linearGradient>
+    <linearGradient id="word" x1="500" y1="230" x2="820" y2="330" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF6AD5"/><stop offset="1" stop-color="#A78BFA"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFA6E6" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#FF6AD5" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <ellipse cx="360" cy="320" rx="330" ry="300" fill="url(#glow)"/>
+
+  <g transform="translate(60,8) scale(0.6)">
+    <path d="M 400 372 L 400 648" stroke="url(#acc)" stroke-width="78" fill="none" stroke-linecap="round"/>
+    <path d="M 400 452 C 400 388 452 380 512 380 C 580 380 624 416 624 486 L 624 648"
+          stroke="url(#acc)" stroke-width="78" fill="none" stroke-linecap="round"/>
+    <g stroke="url(#acc)" stroke-width="22" stroke-linecap="round" fill="none">
+      <path d="M 400 648 L 322 700"/>
+      <path d="M 400 606 L 312 618"/>
+    </g>
+    <circle cx="624" cy="648" r="30" fill="#FFEAF8"/>
+    <circle cx="512" cy="384" r="150" fill="url(#halo)"/>
+    <circle cx="512" cy="384" r="46" fill="none" stroke="#FFA6E6" stroke-width="7" opacity="0.9"/>
+    <circle cx="512" cy="384" r="25" fill="#FFF2FB"/>
+  </g>
+
+  <text x="500" y="304" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="132" font-weight="800" letter-spacing="-5" fill="url(#word)">nerv</text>
+  <text x="506" y="372" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="32" font-weight="500" fill="#D6DCE6">IDE-grade autocomplete for your terminal.</text>
+  <text x="506" y="424" font-family="'SF Mono', Menlo, monospace"
+        font-size="21" font-weight="500" fill="#7C8698">no login · no AI · no telemetry · one binary + your zsh</text>
+</svg>
