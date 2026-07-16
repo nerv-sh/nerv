@@ -1679,16 +1679,20 @@ fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) ->
 }
 
 type GeneratorCacheKey = (Vec<String>, Option<PathBuf>);
-type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Vec<String>)>;
+type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Option<Vec<String>>)>;
 
 /// Process-wide cache for Tier B generator results.
 /// Key: `(script argv, spawn cwd)`. The cwd is part of the key because
 /// cwd-sensitive generators (`git branch -a`, …) produce different
 /// output per directory — keying on argv alone leaked one repo's
 /// branches into another (Fig #2101 / #2026 / #2268). Value:
-/// (insertion-time, captured stdout lines). TTL: 5s. Max entries: 64
-/// (oldest-evicted on overflow). Keeps per-keystroke completion calls
-/// from re-spawning the same shell command (e.g. `git branch --list`).
+/// (insertion-time, memoized outcome). The outcome is `Option` so a
+/// *miss* (`None`: generator timed out or errored) is cached too —
+/// otherwise a command that consistently overruns `GENERATOR_TIMEOUT_MS`
+/// (e.g. `brew outdated -q`, ~1.3s) re-spawns and blocks the daemon
+/// ~800ms on every keystroke. TTL: 5s. Max entries: 64 (oldest-evicted
+/// on overflow). Keeps per-keystroke completion calls from re-spawning
+/// the same shell command (e.g. `git branch --list`).
 static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
@@ -1711,13 +1715,17 @@ fn cached_generator_lines(
     compute: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<Vec<String>> {
     if let Ok(cache) = GENERATOR_CACHE.lock() {
-        if let Some((stamp, lines)) = cache.get(&key) {
+        if let Some((stamp, outcome)) = cache.get(&key) {
             if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return Some(lines.clone());
+                return outcome.clone();
             }
         }
     }
-    let lines = compute()?;
+    // Memoize the outcome including a miss (`None`): a generator that
+    // times out returns `None` every call, and without caching that it
+    // re-spawns and blocks ~800ms on every keystroke (see cache doc).
+    // Callers get back exactly what `compute` returned.
+    let outcome = compute();
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
@@ -1728,9 +1736,9 @@ fn cached_generator_lines(
                 cache.remove(&oldest);
             }
         }
-        cache.insert(key, (std::time::Instant::now(), lines.clone()));
+        cache.insert(key, (std::time::Instant::now(), outcome.clone()));
     }
-    Some(lines)
+    outcome
 }
 
 /// Cached wrapper around [`execute_template_generator`]. Returns
@@ -3911,6 +3919,27 @@ region = us-east-1
             "cache hit must replay first result"
         );
         assert_eq!(calls.get(), 1, "compute ran again within TTL");
+    }
+
+    #[test]
+    fn generator_miss_is_negatively_cached() {
+        // A generator that times out returns None. Without negative
+        // caching it re-spawned and blocked ~800ms every keystroke
+        // (`brew outdated -q` at ~1.3s never fits the 800ms budget).
+        // The miss must be memoized: compute runs once within the TTL.
+        use std::cell::Cell;
+        let calls = Cell::new(0);
+        let a = cached_native_generator("<nerv:test-negcache-uniq>", None, || {
+            calls.set(calls.get() + 1);
+            None
+        });
+        let b = cached_native_generator("<nerv:test-negcache-uniq>", None, || {
+            calls.set(calls.get() + 1);
+            None
+        });
+        assert!(a.is_none(), "miss must return None to the caller");
+        assert!(b.is_none(), "cached miss must still return None");
+        assert_eq!(calls.get(), 1, "timed-out generator re-ran within TTL");
     }
 
     #[test]
