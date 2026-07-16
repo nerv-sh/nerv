@@ -699,17 +699,19 @@ __nerv_line_finish() {
   # This is the Fig model: `cd ` / `z ` + Enter execute the command;
   # navigate down to a folder first to insert one.
   if (( __NERV_ACTIVE && __NERV_SELECTED >= 1 && ${#__NERV_ITEMS} > 0 )); then
-    # Dotnav pins (`./` `../`) are terminal navigation targets, not a
-    # token to drill into. Someone who typed `cd ..` and sees `../`
-    # wants to RUN it — not press Enter twice (insert `../`, then a
-    # second Enter to execute). Insert the pin and accept the line in
-    # the same keypress. Every other item stays insert-only (Tab, or a
-    # second Enter, to drill deeper into a real directory).
+    # Model: Enter runs, Tab drills. When the highlighted item is a
+    # directory (insertion ends in `/` — `../`, `cli/`, `src/`, …),
+    # picking it with Enter means "go there": insert it AND run the line
+    # in the same keypress, no second Enter. To descend further into
+    # subdirectories instead, use Tab — it inserts and re-opens the
+    # popup at the next level. Non-directory items (subcommands, flags,
+    # branches) stay insert-only: running e.g. bare `git checkout` on
+    # Enter would fire an incomplete command.
     local __idx=$__NERV_SELECTED
     (( __idx > ${#__NERV_ITEMS} )) && __idx=1
     local __ins="${__NERV_ITEMS[$__idx]%%	*}"
     __nerv_insert_selected
-    if [[ "$__ins" == "./" || "$__ins" == "../" ]]; then
+    if [[ "$__ins" == */ ]]; then
       __NERV_PREV_LBUFFER=""
       __NERV_SELECTED=0
       __NERV_ITEMS=()
