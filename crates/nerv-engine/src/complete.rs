@@ -1259,34 +1259,11 @@ fn emit_candidates_for_arg(
 
     // Tier B: spawn `Generator::Template` scripts and parse stdout
     // lines as candidates. Skipped under NERV_NO_GENERATORS=1 (tests,
-    // sandboxed environments).
+    // sandboxed environments). Each cold generator detaches to its own
+    // background populator (see cached_generator_lines), so multiple
+    // generators on one arg already run concurrently — no explicit
+    // prewarm pass needed.
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
-        // Parallel prewarm: the dispatch loop below is sequential, so an
-        // arg carrying several cold Template generators used to stall the
-        // popup N×800ms (one timeout budget per subprocess, summed). Warm
-        // every cold entry concurrently first — the loop then reads warm
-        // cache hits, and the stall is the slowest generator, not the sum.
-        let cold: Vec<&Vec<String>> = arg
-            .generators
-            .iter()
-            .filter_map(|g| match g {
-                crate::spec_parser::Generator::Template { script }
-                    if !generator_cache_fresh(script, cwd) =>
-                {
-                    Some(script)
-                }
-                _ => None,
-            })
-            .collect();
-        if cold.len() > 1 {
-            std::thread::scope(|s| {
-                for script in cold {
-                    s.spawn(move || {
-                        let _ = cached_template_generator(script, cwd);
-                    });
-                }
-            });
-        }
         for g in &arg.generators {
             match g {
                 crate::spec_parser::Generator::Template { script } => {
@@ -1370,8 +1347,11 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::MakefileTargets => {
+                    let owned_cwd = cwd.map(Path::to_path_buf);
                     if let Some(targets) =
-                        cached_native_generator("<nerv:makefile>", cwd, || makefile_targets(cwd))
+                        cached_native_generator("<nerv:makefile>", cwd, move || {
+                            makefile_targets(owned_cwd.as_deref())
+                        })
                     {
                         out.extend(
                             targets
@@ -1699,6 +1679,21 @@ static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>>
 const GENERATOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const GENERATOR_CACHE_MAX: usize = 64;
 
+/// How long a keystroke waits for a cold generator before deferring it
+/// to the background. Fast generators (git branch, ssh, pwd — all well
+/// under this) still return on the *same* keystroke; only genuinely
+/// slow ones (brew outdated ~1.3s, docker images, aws service calls)
+/// detach and land on a later keystroke, so no keystroke ever blocks
+/// noticeably. 50ms sits below the ~100ms human "instant" threshold.
+const GENERATOR_SYNC_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Keys with a populator thread currently computing, so concurrent
+/// keystrokes don't spawn a second subprocess for the same generator.
+/// A Drop guard in the populator clears the entry even on panic.
+static GENERATOR_INFLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<GeneratorCacheKey>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 
 /// Process-wide cache for `ScriptWithJsonPath` raw stdout, keyed by script
@@ -1707,25 +1702,9 @@ type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// TTL-memo through [`GENERATOR_CACHE`]: fresh hit → cached lines,
-/// otherwise run `compute` and insert. Shared by the subprocess
-/// template path and the in-process native generators below.
-fn cached_generator_lines(
-    key: GeneratorCacheKey,
-    compute: impl FnOnce() -> Option<Vec<String>>,
-) -> Option<Vec<String>> {
-    if let Ok(cache) = GENERATOR_CACHE.lock() {
-        if let Some((stamp, outcome)) = cache.get(&key) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return outcome.clone();
-            }
-        }
-    }
-    // Memoize the outcome including a miss (`None`): a generator that
-    // times out returns `None` every call, and without caching that it
-    // re-spawns and blocks ~800ms on every keystroke (see cache doc).
-    // Callers get back exactly what `compute` returned.
-    let outcome = compute();
+/// Insert `outcome` (a hit or a memoized miss) into [`GENERATOR_CACHE`]
+/// under `key`, evicting the oldest entry past the size cap.
+fn store_generator_result(key: GeneratorCacheKey, outcome: Option<Vec<String>>) {
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
@@ -1736,26 +1715,80 @@ fn cached_generator_lines(
                 cache.remove(&oldest);
             }
         }
-        cache.insert(key, (std::time::Instant::now(), outcome.clone()));
+        cache.insert(key, (std::time::Instant::now(), outcome));
     }
-    outcome
 }
 
-/// Cached wrapper around [`execute_template_generator`]. Returns
-/// the cached value on TTL-fresh hit, otherwise runs the generator
-/// and inserts the result.
+/// Non-blocking TTL-memo through [`GENERATOR_CACHE`]. Fresh hit → serve
+/// it. Otherwise run `compute` on a background *populator* thread and
+/// wait only [`GENERATOR_SYNC_WAIT`] for it: fast generators finish
+/// inside the window and return on this keystroke, slow ones fall
+/// through to the last-known (stale) value and finish in the background,
+/// landing on a later keystroke. This keeps the per-keystroke path from
+/// ever blocking on a slow subprocess. Shared by the subprocess template
+/// path and the in-process native generators below.
+fn cached_generator_lines(
+    key: GeneratorCacheKey,
+    compute: impl FnOnce() -> Option<Vec<String>> + Send + 'static,
+) -> Option<Vec<String>> {
+    // Fresh hit → serve immediately. An expired entry is kept as `stale`
+    // and served while a refresh runs (stale-while-revalidate — no empty
+    // flash on the 5s refresh).
+    let mut stale: Option<Vec<String>> = None;
+    if let Ok(cache) = GENERATOR_CACHE.lock() {
+        if let Some((stamp, outcome)) = cache.get(&key) {
+            if stamp.elapsed() < GENERATOR_CACHE_TTL {
+                return outcome.clone();
+            }
+            stale = outcome.clone();
+        }
+    }
+    // Claim the in-flight slot. If a populator is already running for
+    // this key, don't spawn another — serve stale now; the running
+    // populator's result lands on a later keystroke.
+    let claimed = GENERATOR_INFLIGHT
+        .lock()
+        .map(|mut s| s.insert(key.clone()))
+        .unwrap_or(false);
+    if !claimed {
+        return stale;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<Option<Vec<String>>>();
+    let pkey = key;
+    std::thread::spawn(move || {
+        // Release the in-flight slot even if `compute` panics, so a
+        // panicking generator is retried rather than wedged forever.
+        struct InflightGuard(GeneratorCacheKey);
+        impl Drop for InflightGuard {
+            fn drop(&mut self) {
+                if let Ok(mut s) = GENERATOR_INFLIGHT.lock() {
+                    s.remove(&self.0);
+                }
+            }
+        }
+        let guard = InflightGuard(pkey.clone());
+        let outcome = compute();
+        // store → release → send: by the time the recv below unblocks,
+        // the cache is already fresh, so the fast path is deterministic.
+        store_generator_result(pkey.clone(), outcome.clone());
+        drop(guard);
+        let _ = tx.send(outcome);
+    });
+    // Timeout (slow generator) or Disconnected (populator panicked
+    // before send) → serve stale; the populator keeps running.
+    rx.recv_timeout(GENERATOR_SYNC_WAIT).unwrap_or(stale)
+}
+
+/// Cached wrapper around [`execute_template_generator`]. Serves the
+/// cached value on a TTL-fresh hit; otherwise defers the generator to
+/// the background (see [`cached_generator_lines`]). Captures owned
+/// copies of `script`/`cwd` so the populator closure is `'static`.
 fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
-    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
-    cached_generator_lines(key, || execute_template_generator(script, cwd))
-}
-
-/// True when [`GENERATOR_CACHE`] holds a TTL-fresh entry for
-/// `(script, cwd)` — used to pick which generators need a prewarm.
-fn generator_cache_fresh(script: &[String], cwd: Option<&Path>) -> bool {
-    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
-    GENERATOR_CACHE.lock().is_ok_and(|c| {
-        c.get(&key)
-            .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
+    let owned_script = script.to_vec();
+    let owned_cwd = cwd.map(Path::to_path_buf);
+    let key: GeneratorCacheKey = (owned_script.clone(), owned_cwd.clone());
+    cached_generator_lines(key, move || {
+        execute_template_generator(&owned_script, owned_cwd.as_deref())
     })
 }
 
@@ -1767,7 +1800,7 @@ fn generator_cache_fresh(script: &[String], cwd: Option<&Path>) -> bool {
 fn cached_native_generator(
     tag: &str,
     cwd: Option<&Path>,
-    compute: impl FnOnce() -> Option<Vec<String>>,
+    compute: impl FnOnce() -> Option<Vec<String>> + Send + 'static,
 ) -> Option<Vec<String>> {
     let key: GeneratorCacheKey = (vec![tag.to_string()], cwd.map(Path::to_path_buf));
     cached_generator_lines(key, compute)
@@ -3897,76 +3930,134 @@ region = us-east-1
         );
     }
 
+    /// Poll [`GENERATOR_CACHE`] until `key` holds a TTL-fresh entry, up
+    /// to `timeout`. Waits for a detached populator to store its result
+    /// (hit or memoized miss) before asserting on the now-warm cache —
+    /// no fixed sleeps, so a loaded CI box can't race it.
+    fn wait_for_generator_cache(key: &GeneratorCacheKey, timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            let fresh = GENERATOR_CACHE.lock().is_ok_and(|c| {
+                c.get(key)
+                    .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
+            });
+            if fresh {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn native_generator_memoizes_within_ttl() {
-        // man/ssh/history/makefile walk the filesystem in-process; before
-        // the memo they re-ran on every keystroke. Second call inside the
-        // TTL must return the cached lines without invoking compute.
-        use std::cell::Cell;
-        let calls = Cell::new(0);
-        let compute = || {
-            calls.set(calls.get() + 1);
+        // man/ssh/history/makefile walk the filesystem in-process; the
+        // memo stops them re-running on every keystroke. compute now runs
+        // on a detached populator, so use a Send counter and wait for the
+        // store. The second call inside the TTL must hit the cache without
+        // invoking compute again.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tag = "<nerv:test-memo-uniq>";
+        let key: GeneratorCacheKey = (vec![tag.to_string()], None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c1 = calls.clone();
+        let _ = cached_native_generator(tag, None, move || {
+            c1.fetch_add(1, Ordering::SeqCst);
             Some(vec!["alpha".to_string(), "beta".to_string()])
-        };
-        let a = cached_native_generator("<nerv:test-memo-uniq>", None, compute);
-        let b = cached_native_generator("<nerv:test-memo-uniq>", None, || {
-            calls.set(calls.get() + 1);
+        });
+        wait_for_generator_cache(&key, std::time::Duration::from_secs(2));
+        let c2 = calls.clone();
+        let b = cached_native_generator(tag, None, move || {
+            c2.fetch_add(1, Ordering::SeqCst);
             Some(vec!["SHOULD-NOT-RUN".to_string()])
         });
         assert_eq!(
-            a.as_deref(),
             b.as_deref(),
+            Some(&["alpha".to_string(), "beta".to_string()][..]),
             "cache hit must replay first result"
         );
-        assert_eq!(calls.get(), 1, "compute ran again within TTL");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "compute ran again within TTL"
+        );
     }
 
     #[test]
     fn generator_miss_is_negatively_cached() {
-        // A generator that times out returns None. Without negative
-        // caching it re-spawned and blocked ~800ms every keystroke
+        // A generator that times out returns None. The miss is memoized
+        // (negative cache) so it isn't re-spawned every keystroke
         // (`brew outdated -q` at ~1.3s never fits the 800ms budget).
-        // The miss must be memoized: compute runs once within the TTL.
-        use std::cell::Cell;
-        let calls = Cell::new(0);
-        let a = cached_native_generator("<nerv:test-negcache-uniq>", None, || {
-            calls.set(calls.get() + 1);
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tag = "<nerv:test-negcache-uniq>";
+        let key: GeneratorCacheKey = (vec![tag.to_string()], None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c1 = calls.clone();
+        let _ = cached_native_generator(tag, None, move || {
+            c1.fetch_add(1, Ordering::SeqCst);
             None
         });
-        let b = cached_native_generator("<nerv:test-negcache-uniq>", None, || {
-            calls.set(calls.get() + 1);
+        wait_for_generator_cache(&key, std::time::Duration::from_secs(2));
+        let c2 = calls.clone();
+        let b = cached_native_generator(tag, None, move || {
+            c2.fetch_add(1, Ordering::SeqCst);
             None
         });
-        assert!(a.is_none(), "miss must return None to the caller");
         assert!(b.is_none(), "cached miss must still return None");
-        assert_eq!(calls.get(), 1, "timed-out generator re-ran within TTL");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "timed-out generator re-ran within TTL"
+        );
     }
 
     #[test]
     fn multiple_cold_generators_run_concurrently() {
-        // Two cold 400ms generators on one arg must cost ~max, not ~sum —
-        // the prewarm runs them on parallel threads with a shared wall.
-        use std::time::Instant;
-        let slow = |tag: &str| crate::spec_parser::Generator::Template {
-            script: vec![
+        // Two cold 400ms generators on one arg: detached populators run
+        // them in parallel, so both land in the cache after ~max(400ms),
+        // not ~sum(800ms). The first emit spawns both (returns nothing
+        // within the 50ms sync window); once both are cached a second
+        // emit collects them.
+        use std::time::{Duration, Instant};
+        let script = |tag: &str| {
+            vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 format!("sleep 0.4; echo prewarm-{tag}"),
-            ],
+            ]
         };
         let arg = Arg {
-            generators: vec![slow("a"), slow("b")],
+            generators: vec![
+                crate::spec_parser::Generator::Template {
+                    script: script("conc-gen-a"),
+                },
+                crate::spec_parser::Generator::Template {
+                    script: script("conc-gen-b"),
+                },
+            ],
             ..Default::default()
         };
+        let ka: GeneratorCacheKey = (script("conc-gen-a"), None);
+        let kb: GeneratorCacheKey = (script("conc-gen-b"), None);
         let t0 = Instant::now();
+        // First emit spawns both populators concurrently.
+        let _ = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        wait_for_generator_cache(&ka, Duration::from_secs(3));
+        wait_for_generator_cache(&kb, Duration::from_secs(3));
+        let warm_elapsed = t0.elapsed();
+        // Both cached now — a second emit collects them.
         let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
-        let elapsed = t0.elapsed();
-        assert_eq!(out.len(), 2, "both generators must contribute: {out:?}");
-        // Serial would be ≥800ms; allow generous slack for slow CI while
-        // still catching a regression back to sequential execution.
+        assert_eq!(
+            out.len(),
+            2,
+            "both generators must contribute once warm: {out:?}"
+        );
+        // Parallel, not serial: two overlapping 400ms sleeps warm in
+        // ~max, well under the ~800ms a sequential run would take.
         assert!(
-            elapsed.as_millis() < 750,
-            "expected concurrent cold generators, took {elapsed:?}"
+            warm_elapsed.as_millis() < 750,
+            "expected concurrent cold generators, took {warm_elapsed:?}"
         );
     }
 
