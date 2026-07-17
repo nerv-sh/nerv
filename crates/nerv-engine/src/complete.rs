@@ -1720,13 +1720,16 @@ fn store_generator_result(key: GeneratorCacheKey, outcome: Option<Vec<String>>) 
 }
 
 /// Non-blocking TTL-memo through [`GENERATOR_CACHE`]. Fresh hit → serve
-/// it. Otherwise run `compute` on a background *populator* thread and
-/// wait only [`GENERATOR_SYNC_WAIT`] for it: fast generators finish
-/// inside the window and return on this keystroke, slow ones fall
-/// through to the last-known (stale) value and finish in the background,
-/// landing on a later keystroke. This keeps the per-keystroke path from
-/// ever blocking on a slow subprocess. Shared by the subprocess template
-/// path and the in-process native generators below.
+/// it. On an expired entry with a positive value, serve that stale value
+/// immediately and refresh in the background (stale-while-revalidate —
+/// zero added latency at the TTL boundary). Only on a *cold or missed*
+/// key does the caller run `compute` on a background *populator* thread
+/// and wait up to [`GENERATOR_SYNC_WAIT`]: fast generators finish inside
+/// the window and return on this keystroke, slow ones serve nothing now
+/// and finish in the background, landing on a later keystroke. Either
+/// way the per-keystroke path never blocks on a slow subprocess. Shared
+/// by the subprocess template path and the in-process native generators
+/// below.
 fn cached_generator_lines(
     key: GeneratorCacheKey,
     compute: impl FnOnce() -> Option<Vec<String>> + Send + 'static,
@@ -1774,8 +1777,21 @@ fn cached_generator_lines(
         drop(guard);
         let _ = tx.send(outcome);
     });
-    // Timeout (slow generator) or Disconnected (populator panicked
-    // before send) → serve stale; the populator keeps running.
+    // Revalidation with a positive stale value in hand: serve it now
+    // and let the populator refresh in the background — do NOT spend the
+    // sync window. A slow generator (`brew formulae` ~630ms) always
+    // times out, so honoring the window here would cost a full
+    // GENERATOR_SYNC_WAIT *per generator* on every TTL boundary (~100ms
+    // for brew's two, 150-200ms for an aws chain) even though we already
+    // hold a value to show. The window only earns its keep on a cold or
+    // previously-missed key (`stale` is None), where waiting lets a
+    // *fast* generator land on this keystroke instead of flashing empty.
+    if stale.is_some() {
+        return stale;
+    }
+    // Cold/miss key: give a fast generator the window to land now. Slow
+    // ones time out (or the populator disconnects on panic) → serve None
+    // and let the background refresh land on a later keystroke.
     rx.recv_timeout(GENERATOR_SYNC_WAIT).unwrap_or(stale)
 }
 
@@ -4010,6 +4026,49 @@ region = us-east-1
             1,
             "timed-out generator re-ran within TTL"
         );
+    }
+
+    #[test]
+    fn revalidation_serves_stale_without_waiting_sync_window() {
+        // Root-cause guard for the periodic ~100ms hitch on warm large
+        // generators (brew/docker/aws): once a key has a positive value,
+        // crossing the TTL boundary must NOT spend GENERATOR_SYNC_WAIT —
+        // the stale value is served instantly while a refresh runs in the
+        // background. "Returns stale" alone doesn't discriminate (the
+        // pre-fix timeout path also returned stale); only the *timing*
+        // does. A slow (150ms) compute would, pre-fix, force a full 50ms
+        // window; post-fix the call returns in well under that.
+        use std::time::{Duration, Instant};
+        let key: GeneratorCacheKey = (vec!["<nerv:test-stale-reval>".to_string()], None);
+        // Seed an already-EXPIRED positive entry (timestamp older than
+        // the TTL) so this call takes the revalidation path, not a fresh
+        // hit.
+        let expired = Instant::now()
+            .checked_sub(GENERATOR_CACHE_TTL + Duration::from_secs(1))
+            .expect("clock far enough from boot");
+        GENERATOR_CACHE.lock().unwrap().insert(
+            key.clone(),
+            (expired, Some(vec!["cached-stale".to_string()])),
+        );
+        let t0 = Instant::now();
+        let out = cached_generator_lines(key.clone(), || {
+            std::thread::sleep(Duration::from_millis(150));
+            Some(vec!["fresh-should-not-block".to_string()])
+        });
+        let elapsed = t0.elapsed();
+        assert_eq!(
+            out.as_deref(),
+            Some(&["cached-stale".to_string()][..]),
+            "revalidation must serve the stale value, not wait for the refresh"
+        );
+        assert!(
+            elapsed < Duration::from_millis(25),
+            "revalidation blocked {elapsed:?} — the sync window must be \
+             skipped when a positive stale value exists (pre-fix ~50ms)"
+        );
+        // Let the background populator finish + release its in-flight slot
+        // so it can't leak into an adjacent test sharing the process.
+        wait_for_generator_cache(&key, Duration::from_secs(2));
     }
 
     #[test]
