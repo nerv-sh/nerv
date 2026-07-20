@@ -4120,12 +4120,15 @@ region = us-east-1
     fn revalidation_serves_stale_without_waiting_sync_window() {
         // Root-cause guard for the periodic ~100ms hitch on warm large
         // generators (brew/docker/aws): once a key has a positive value,
-        // crossing the TTL boundary must NOT spend GENERATOR_SYNC_WAIT —
-        // the stale value is served instantly while a refresh runs in the
-        // background. "Returns stale" alone doesn't discriminate (the
-        // pre-fix timeout path also returned stale); only the *timing*
-        // does. A slow (150ms) compute would, pre-fix, force a full 50ms
-        // window; post-fix the call returns in well under that.
+        // crossing the TTL boundary must NOT wait on the refresh — the
+        // stale value is served while it runs in the background.
+        // "Returns stale" alone doesn't discriminate (the pre-fix timeout
+        // path also returned stale after the window), so the discriminator
+        // is structural: the call must return while the 1.5s refresh is
+        // provably still running (done flag unset). No wall-clock bounds —
+        // absolute timing asserts flake under shared-CI scheduler stalls.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
         let key: GeneratorCacheKey = (vec!["<nerv:test-stale-reval>".to_string()], None);
         // Seed an already-EXPIRED positive entry (timestamp older than
@@ -4138,95 +4141,101 @@ region = us-east-1
             key.clone(),
             (expired, Some(vec!["cached-stale".to_string()])),
         );
-        let t0 = Instant::now();
-        let out = cached_generator_lines(key.clone(), || {
-            std::thread::sleep(Duration::from_millis(150));
+        let done = Arc::new(AtomicBool::new(false));
+        let d = done.clone();
+        let out = cached_generator_lines(key.clone(), move || {
+            std::thread::sleep(Duration::from_millis(1500));
+            d.store(true, Ordering::SeqCst);
             Some(vec!["fresh-should-not-block".to_string()])
         });
-        let elapsed = t0.elapsed();
         assert_eq!(
             out.as_deref(),
             Some(&["cached-stale".to_string()][..]),
             "revalidation must serve the stale value, not wait for the refresh"
         );
         assert!(
-            elapsed < Duration::from_millis(25),
-            "revalidation blocked {elapsed:?} — the sync window must be \
-             skipped when a positive stale value exists (pre-fix ~50ms)"
+            !done.load(Ordering::SeqCst),
+            "revalidation returned only after the refresh finished — it \
+             waited out the sync window instead of serving stale (pre-fix \
+             behavior)"
         );
         // Let the background populator finish + release its in-flight slot
         // so it can't leak into an adjacent test sharing the process.
-        wait_for_generator_cache(&key, Duration::from_secs(2));
+        wait_for_generator_cache(&key, Duration::from_secs(10));
     }
 
     #[test]
     fn populator_serves_fast_and_stale_but_defers_slow() {
         // The shared shell behind both the generator memo and the spec
-        // loader. Three behaviours, each with a timing assertion (only the
-        // timing discriminates a working async populator from a blocking
-        // one):
+        // loader. Three behaviours. Discrimination is STRUCTURAL, not
+        // wall-clock: a shared CI runner can stall this thread past any
+        // absolute bound (a `<120ms` assert flaked at 156ms on macos-14),
+        // so each slow case instead checks "did the call return while the
+        // compute was still running?" via a done flag, with the compute
+        // sleep long enough (1.5s) that scheduler noise can't blur it.
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
-        let window = Duration::from_millis(50);
 
-        // (1) Fast compute, no stale → lands inside the window on THIS call.
+        // (1) Fast compute, no stale → lands on THIS call. The generous
+        //     window makes this deterministic: recv unblocks the moment
+        //     the send happens, however slowly CI schedules the thread —
+        //     the window only caps waiting, it never adds any.
         let out = spawn_populator_and_maybe_wait(
             None::<Vec<u8>>,
-            window,
+            Duration::from_secs(10),
             || {},
             || Some(vec![1u8, 2, 3]),
         );
         assert_eq!(out, Some(vec![1, 2, 3]), "fast compute must land in window");
 
-        // (2) Slow compute, no stale → returns None without blocking on the
-        //     150ms parse (this is what stops a cold `aws` from freezing the
-        //     keystroke); the compute keeps running in the background.
-        let ran = Arc::new(AtomicBool::new(false));
-        let r2 = ran.clone();
-        let t0 = Instant::now();
+        // (2) Slow compute, no stale → must return None while the compute
+        //     is still running (what stops a cold `aws` parse from freezing
+        //     the keystroke); the compute finishes in the background.
+        let done = Arc::new(AtomicBool::new(false));
+        let d2 = done.clone();
         let out = spawn_populator_and_maybe_wait(
             None::<u32>,
-            window,
+            Duration::from_millis(50),
             || {},
             move || {
-                std::thread::sleep(Duration::from_millis(150));
-                r2.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(1500));
+                d2.store(true, Ordering::SeqCst);
                 Some(7u32)
             },
         );
-        let waited = t0.elapsed();
         assert_eq!(out, None, "slow compute must defer, not block");
         assert!(
-            waited < Duration::from_millis(120),
-            "blocked {waited:?} — must not wait out the 150ms compute"
+            !done.load(Ordering::SeqCst),
+            "call returned only after the compute finished — it blocked"
         );
-        let stop = Instant::now() + Duration::from_secs(2);
-        while !ran.load(Ordering::SeqCst) && Instant::now() < stop {
+        let stop = Instant::now() + Duration::from_secs(10);
+        while !done.load(Ordering::SeqCst) && Instant::now() < stop {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            ran.load(Ordering::SeqCst),
+            done.load(Ordering::SeqCst),
             "background compute must still finish"
         );
 
-        // (3) Slow compute WITH a positive stale value → serve stale
-        //     instantly, refresh in the background (the mtime-reload case).
-        let t0 = Instant::now();
+        // (3) Slow compute WITH a positive stale value → serve stale while
+        //     the refresh is still running (the mtime-reload case).
+        let done = Arc::new(AtomicBool::new(false));
+        let d3 = done.clone();
         let out = spawn_populator_and_maybe_wait(
             Some(99u32),
-            window,
+            Duration::from_millis(50),
             || {},
             move || {
-                std::thread::sleep(Duration::from_millis(150));
+                std::thread::sleep(Duration::from_millis(1500));
+                d3.store(true, Ordering::SeqCst);
                 Some(1u32)
             },
         );
-        let waited = t0.elapsed();
         assert_eq!(out, Some(99), "stale must be served immediately");
         assert!(
-            waited < Duration::from_millis(25),
-            "stale path blocked {waited:?} — must not wait for the refresh"
+            !done.load(Ordering::SeqCst),
+            "stale path returned only after the refresh finished — it waited"
         );
     }
 

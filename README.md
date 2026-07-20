@@ -60,18 +60,16 @@ cloud attached is now a local daemon and a zsh widget.
 Requires **macOS on Apple Silicon** and **zsh ≥ 5.8**.
 
 ```sh
-brew tap nerv-sh/tap
-brew install nerv
+brew install nerv-sh/tap/nerv
 eval "$(nerv init zsh)"
-nerv start
 ```
 
-Type `git ` in a new prompt — the popup should appear. If it doesn't, run
+That's the whole install. The `eval` line writes an idempotent, marker-fenced
+block into your `~/.zshrc` and activates completion in the current session;
+the daemon starts itself on demand, and the 700+ completion specs ship inside
+the package. Type `git ` — the popup should appear. If it doesn't, run
 `nerv doctor`: it checks the shell hook, the daemon, the spec cache, and the
 schema version, and tells you exactly what's wrong.
-
-`brew services start nerv` keeps the daemon alive across reboots (optional —
-`nerv start` is enough for a session).
 
 > Homebrew installs don't trip Gatekeeper: `brew` doesn't quarantine its
 > downloads, and the ad-hoc signature from the Rust toolchain is sufficient on
@@ -83,7 +81,7 @@ schema version, and tells you exactly what's wrong.
 ```text
  zsh ──────────────────────────────┐        ┌─ nervd (daemon) ────────────────┐
  │ ZLE widget (_nerv.zsh)          │  UDS   │ SpecRegistry — lazy, LRU-bound  │
- │   every keystroke:              ├───────►│   ~/Library/Caches/nerv/specs/  │
+ │   every keystroke:              ├───────►│   specs ship in the package     │
  │   nerv _complete "git ch" 6     │        │   (700+ specs, ~10 MB gzipped)  │
  │                                 │◄───────┤ generators — git branch,        │
  │ renders ghost + popup           │ 4-field│   npm scripts, … (cached, 800ms │
@@ -123,7 +121,7 @@ Scope is a feature. Nerv has **no** AI, **no** account or login, **no**
 telemetry or analytics, **no** runtime network calls, **no** auto-updater,
 and **no** webview. The CLI surface is frozen at `init`, `start`, `stop`,
 `doctor`, `spec list`, `uninstall` — there is deliberately no `nerv config`.
-These are documented non-goals ([`PLAN.md`](./PLAN.md) §4), not a backlog.
+These are documented non-goals, not a backlog.
 
 ## Configuration
 

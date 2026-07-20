@@ -55,6 +55,71 @@ pub fn specs_dir() -> Option<PathBuf> {
     cache_dir().map(|c| c.join(SPECS_SUBDIR))
 }
 
+/// True when `dir` holds at least one installed spec (`manifest.json`,
+/// `*.json`, or `*.json.gz`). A missing or empty dir is "no specs" —
+/// the signal `resolve_specs_dir` uses to fall back to the bundled set.
+fn has_specs(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.file_name()
+            .to_str()
+            .is_some_and(|n| n.ends_with(".json") || n.ends_with(".json.gz"))
+    })
+}
+
+/// Read-only spec sets shipped alongside the binary, in probe order:
+/// Homebrew keg layout (`bin/../share/nerv/specs`, from
+/// `pkgshare.install "specs"`) then the flat tarball layout (`specs/`
+/// next to the binary).
+fn bundled_specs_dirs() -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    let Some(bin_dir) = exe.parent() else {
+        return Vec::new();
+    };
+    vec![
+        bin_dir.join("../share/nerv/specs"),
+        bin_dir.join(SPECS_SUBDIR),
+    ]
+}
+
+/// Resolve the spec directory every consumer (daemon, doctor,
+/// `spec list`) should read, in priority order:
+///
+/// 1. `NERV_SPECS_DIR` env override (tests, power users) — always wins,
+///    even when empty, so test isolation is airtight.
+/// 2. The user cache (`~/Library/Caches/nerv/specs/`) *if it actually
+///    holds specs* — a `build-specs` run there overrides the bundle.
+/// 3. A bundled read-only set next to the binary (Homebrew `share/`,
+///    or `specs/` in an unpacked tarball) — what a fresh `brew install`
+///    user completes against without ever running `build-specs`.
+/// 4. The user cache path regardless, so existing "dir missing /
+///    empty" error paths and doctor hints keep pointing at the
+///    documented location.
+pub fn resolve_specs_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("NERV_SPECS_DIR") {
+        return Some(PathBuf::from(d));
+    }
+    let user = specs_dir();
+    if let Some(u) = &user {
+        if has_specs(u) {
+            return user;
+        }
+    }
+    for b in bundled_specs_dirs() {
+        if has_specs(&b) {
+            // Canonicalize the `bin/../share` hop for clean display in
+            // doctor/logs; the dir exists (has_specs read it), so this
+            // only fails on exotic FS races — fall back to the raw path.
+            return Some(std::fs::canonicalize(&b).unwrap_or(b));
+        }
+    }
+    user
+}
+
 #[cfg(test)]
 mod tests {
     //! The `PathBuf` shapes returned here ARE the contract
@@ -145,6 +210,58 @@ mod tests {
             unsafe { std::env::set_var("HOME", p) };
         }
         assert!(all_none);
+    }
+
+    /// `NERV_SPECS_DIR` always wins resolution — test isolation depends
+    /// on it, so it beats even a populated user cache.
+    #[test]
+    fn resolve_env_override_beats_user_cache() {
+        with_temp_home(|home| {
+            // Populated user cache that would otherwise win.
+            let user = home.join("Library/Caches/nerv/specs");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(user.join("git.json"), "{}").unwrap();
+            let over = home.join("override-specs");
+            // Env mutation — serialized by HOME_LOCK via with_temp_home.
+            unsafe { std::env::set_var("NERV_SPECS_DIR", &over) };
+            let got = resolve_specs_dir();
+            unsafe { std::env::remove_var("NERV_SPECS_DIR") };
+            assert_eq!(got, Some(over));
+        });
+    }
+
+    /// A user cache holding at least one spec wins over any bundled set
+    /// (a local `build-specs` run overrides the shipped bundle).
+    #[test]
+    fn resolve_prefers_populated_user_cache() {
+        with_temp_home(|home| {
+            let user = home.join("Library/Caches/nerv/specs");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(user.join("git.json.gz"), "x").unwrap();
+            assert_eq!(resolve_specs_dir(), Some(user));
+        });
+    }
+
+    /// Empty (or missing) user cache and no bundle next to the test
+    /// binary → resolution still lands on the documented user path, so
+    /// existing "dir missing" error flows keep their hint target.
+    #[test]
+    fn resolve_falls_back_to_user_path_when_nothing_found() {
+        with_temp_home(|home| {
+            let got = resolve_specs_dir();
+            assert_eq!(got, Some(home.join("Library/Caches/nerv/specs")));
+        });
+    }
+
+    /// The has_specs gate: dirs with only unrelated files don't count.
+    #[test]
+    fn has_specs_ignores_non_spec_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!has_specs(tmp.path()));
+        std::fs::write(tmp.path().join("README.md"), "x").unwrap();
+        assert!(!has_specs(tmp.path()));
+        std::fs::write(tmp.path().join("aws.json.gz"), "x").unwrap();
+        assert!(has_specs(tmp.path()));
     }
 
     /// Subdir constants are the documented strings — locking them

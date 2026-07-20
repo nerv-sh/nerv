@@ -25,13 +25,13 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 
 | # | 종류 | 경로 / 리소스 | 생성 주체 | `--keep-config` 시 |
 |---|------|---------------|----------|-------------------|
-| 1 | shell hook | `~/.zshrc` 의 `# >>> nerv >>>` ~ `# <<< nerv <<<` 블록 | `nerv init zsh >> ~/.zshrc` | **삭제** |
+| 1 | shell hook | `~/.zshrc` 의 `# >>> nerv >>>` ~ `# <<< nerv <<<` 블록 | `eval "$(nerv init zsh)"` (rc 에 마커 블록 자동 기록·멱등 갱신; `>> ~/.zshrc` 리다이렉트도 동일 블록) | **삭제** |
 | 2 | 데몬 프로세스 | `nervd` (PID 추적: `~/Library/Caches/nerv/nervd.pid`) | `nerv start` 또는 자동 기동 | **종료** |
 | 3 | 데몬 소켓 | `~/Library/Caches/nerv/nervd.sock` | nervd | 삭제 |
 | 4 | 데몬 로그 | `~/Library/Logs/nerv/nervd.log` (+ 회전 파일) | nervd | 삭제 |
 | 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 | 다양 | 삭제 |
 | 6 | 설정 디렉터리 | `~/.config/nerv/` (XDG_CONFIG_HOME 존중) | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존) |
-| 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, formula 메타 | `brew install` | brew 가 처리 |
+| 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, 동봉 spec (`…/share/nerv/specs/`), formula 메타 | `brew install` | brew 가 처리 |
 
 > **v1.0 비대상**: LaunchAgent (`~/Library/LaunchAgents/sh.nerv.nervd.plist`) — v1.0 은 `nerv start` / `stop` 수동 라이프사이클만. 자동 기동 도입 (v1.x) 시점에 본 인벤토리에 8번으로 추가하고 §4 step 6 도 함께 부활한다.
 >

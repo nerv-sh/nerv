@@ -349,8 +349,14 @@ Tier C 의 generator 함수를 QuickJS context 에 평가 → 결과 후보 반�
 양립성: ISC → Apache-2.0 prebuilt artifact OK, Apache+MIT → Apache-2.0 OK.
 
 `NOTICE` 의 정확한 형식은 `/NOTICE` 파일 참조 (M0-1 commit aec0e3c8 기준).
-빌드 산출물 (`~/Library/Caches/nerv/specs/`) 은 ISC 라이선스 헤더 포함
-(배포 시 — 별도 install pipeline 단계).
+빌드 산출물은 ISC 라이선스 헤더 포함.
+
+**배포 채널 (2026-07-20 확정)**: `release.yml` 이 bun `convert:all` +
+`build-specs --compress` 를 CI 에서 실행해 release tarball 에 `specs/`
+(~10MB gzip + manifest) 를 동봉하고, Homebrew Formula 가 `pkgshare` 로
+`share/nerv/specs/` 에 설치한다. 엔진의 `paths::resolve_specs_dir()` 가
+user cache (`~/Library/Caches/nerv/specs/`) 에 spec 이 없을 때 이 번들을
+읽는다 — 로컬 `build-specs` 실행 (user cache) 은 번들을 override.
 
 ---
 

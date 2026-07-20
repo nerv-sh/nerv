@@ -59,6 +59,14 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 # explicitly so a minimal rc doesn't leave the table missing.
 zmodload -F zsh/parameter p:aliases 2>/dev/null
 
+# Autostart nervd in the background so a fresh install (or a reboot)
+# needs no manual `nerv start`. `nerv start` is idempotent — it probes
+# the socket and exits quietly when a daemon already serves — so this
+# is a cheap no-op on every shell after the first. Backgrounded in a
+# subshell: never blocks the prompt, no job-control noise. E1 ("daemon
+# not running — run: nerv start") remains the fallback if this fails.
+( "$__NERV_BIN" start >/dev/null 2>&1 & ) 2>/dev/null
+
 __nerv_reset_state() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=0

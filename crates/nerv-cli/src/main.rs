@@ -185,9 +185,12 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 print!("{}", init_snippet_for_zsh(pty_mode));
                 Ok(())
             } else {
-                // Outer block: just emit the ~/.zshrc marker. The inner
-                // shell_script invocation does the env validation each
-                // session, where ZSH_VERSION etc. are actually set.
+                // Outer: install/refresh the ~/.zshrc marker block
+                // (idempotent — first-5-min §0.5-C), then emit it on
+                // stdout too, so `eval "$(nerv init zsh)"` both persists
+                // the hook AND activates it in the current session. The
+                // inner shell_script invocation does the env validation
+                // each session, where ZSH_VERSION etc. are actually set.
                 let bin = std::env::current_exe()?.to_string_lossy().into_owned();
                 let block = nerv_shell::init_block(
                     &bin,
@@ -195,6 +198,9 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                     &installed_at_rfc3339(),
                     "zsh",
                 );
+                if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+                    apply_init_block(&home, "zsh", &block);
+                }
                 print!("{block}");
                 Ok(())
             }
@@ -202,6 +208,76 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
         Shell::Bash => cmd_init_pty_only(shell_script, PtyShell::Bash),
         Shell::Fish => cmd_init_pty_only(shell_script, PtyShell::Fish),
     }
+}
+
+/// The rc file `nerv init <shell>` manages, relative to `$HOME`. Must
+/// stay inside `SHELL_INIT_FILES` — doctor and uninstall only scan that
+/// list, so writing anywhere else would orphan the block.
+fn rc_file_for_shell(shell_name: &str) -> Option<&'static str> {
+    match shell_name {
+        "zsh" => Some(".zshrc"),
+        "bash" => Some(".bashrc"),
+        "fish" => Some(".config/fish/config.fish"),
+        _ => None,
+    }
+}
+
+/// Install/refresh the marker block in the shell's rc file, idempotently
+/// (first-5-min §0.5-C): absent → append; same version + binary → leave
+/// the file untouched (silent — eval-in-rc users hit this every shell
+/// startup); anything else → strip all blocks, append one fresh copy.
+/// Failures degrade to a grey warning: stdout still carries the block,
+/// so `eval "$(nerv init <shell>)"` keeps working this session even when
+/// the rc isn't writable.
+fn apply_init_block(home: &std::path::Path, shell_name: &str, block: &str) {
+    use nerv_shell::UpsertAction;
+    let Some(rel) = rc_file_for_shell(shell_name) else {
+        return;
+    };
+    let rc = home.join(rel);
+    let existing = std::fs::read_to_string(&rc).unwrap_or_default();
+    let up = nerv_shell::upsert_block(&existing, block);
+    if up.action == UpsertAction::Current {
+        return;
+    }
+    if let Err(e) = write_rc_atomic(&rc, &up.content) {
+        eprintln!("[nerv] cannot write ~/{rel} ({e}) — append the printed block manually");
+        return;
+    }
+    match up.action {
+        UpsertAction::Installed => eprintln!("nerv: installed init block into ~/{rel}"),
+        UpsertAction::Updated { from } => eprintln!(
+            "nerv: updated existing init block (v{} → v{})",
+            from.as_deref().unwrap_or("unknown"),
+            env!("CARGO_PKG_VERSION"),
+        ),
+        UpsertAction::Current => unreachable!("returned above"),
+    }
+}
+
+/// Atomic rc write: temp file in the same directory + rename, so a shell
+/// mid-way through sourcing the file keeps reading the old inode and
+/// never sees a half-written rc (uninstall-spec §4 step 3 semantics).
+/// Preserves the original file's permissions across the inode swap.
+fn write_rc_atomic(rc: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = rc.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = rc
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::other("rc path has no file name"))?;
+    let tmp = rc.with_file_name(format!("{file_name}.nerv-tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    if let Ok(meta) = std::fs::metadata(rc) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, rc)
 }
 
 /// Shells that reach autocomplete only through the PTY shim (no ZLE).
@@ -245,13 +321,17 @@ fn cmd_init_pty_only(shell_script: bool, shell: PtyShell) -> anyhow::Result<()> 
     let bin = std::env::current_exe()?.to_string_lossy().into_owned();
     if !shell_script {
         // Outer rc block; same markers as zsh so the uninstaller strips
-        // every shell's block identically.
+        // every shell's block identically. Installed/refreshed in the
+        // shell's rc (idempotent) and echoed for the eval form.
         let block = nerv_shell::init_block(
             &bin,
             env!("CARGO_PKG_VERSION"),
             &installed_at_rfc3339(),
             shell.name(),
         );
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            apply_init_block(&home, shell.name(), &block);
+        }
         print!("{block}");
         return Ok(());
     }
@@ -453,10 +533,9 @@ fn build_doctor_report() -> DoctorReport {
 /// E5: spec cache schema version vs the daemon's supported version
 /// (error-states.md §3.5). A mismatch is a blocking (red) row.
 fn check_schema_version(r: &mut DoctorReport) {
-    let specs_dir = match std::env::var_os("NERV_SPECS_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(paths::specs_dir)
-    {
+    // env override → populated user cache → bundled (brew share/ or
+    // tarball specs/) → user path. Same chain the daemon reads.
+    let specs_dir = match paths::resolve_specs_dir() {
         Some(d) => d,
         None => return,
     };
@@ -764,10 +843,9 @@ fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
 
 /// E2 + E5: specs loaded + parse errors.
 fn check_specs(r: &mut DoctorReport) {
-    let specs_dir = match std::env::var_os("NERV_SPECS_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(paths::specs_dir)
-    {
+    // Same resolution chain the daemon uses (env → user cache →
+    // bundled), so doctor reports the dir completions actually read.
+    let specs_dir = match paths::resolve_specs_dir() {
         Some(d) => d,
         None => {
             r.push(DoctorLevel::Err, "specs", "HOME unset".into(), None);
@@ -779,7 +857,7 @@ fn check_specs(r: &mut DoctorReport) {
             DoctorLevel::Warn,
             "specs",
             format!("dir missing: {}", specs_dir.display()),
-            Some("populate via build-specs or homebrew install".into()),
+            Some("reinstall nerv (brew reinstall nerv) or run build-specs".into()),
         );
         return;
     }
@@ -842,6 +920,38 @@ fn cmd_start() -> anyhow::Result<()> {
     }
 
     fs::create_dir_all(&cache_dir).with_context(|| format!("mkdir {}", cache_dir.display()))?;
+
+    // Serialize the probe→spawn critical section across processes.
+    // Every new shell autostarts `nerv start` in the background, so two
+    // terminals opened together race: both probe before either daemon
+    // has bound the socket, both spawn, and the second daemon's
+    // stale-socket cleanup steals the first's listener — leaving an
+    // orphaned nervd no PID file points at (a trace uninstall can't
+    // see). An exclusive flock makes the loser wait; its re-probe below
+    // then finds the winner's socket and no-ops. The lock file lives in
+    // the cache dir, so uninstall's cache sweep removes it. flock is
+    // advisory and best-effort: on failure we fall through to the old
+    // racy-but-rare behavior rather than blocking startup.
+    let _start_lock = fs::File::create(cache_dir.join("nervd.start.lock"))
+        .inspect(|f| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+            }
+        })
+        .ok();
+    // Double-check under the lock: the starter we waited on may have
+    // just brought the daemon up.
+    if let Some(sock) = paths::socket_path() {
+        if daemon_responds_at(&sock) {
+            match read_pid(&pid_path) {
+                Some(pid) => println!("nervd already running (pid {pid})"),
+                None => println!("nervd already running"),
+            }
+            return Ok(());
+        }
+    }
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
@@ -976,11 +1086,7 @@ fn process_alive(_pid: u32) -> bool {
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
-    use std::path::PathBuf;
-
-    let specs_dir = std::env::var_os("NERV_SPECS_DIR")
-        .map(PathBuf::from)
-        .or_else(paths::specs_dir)
+    let specs_dir = paths::resolve_specs_dir()
         .ok_or_else(|| anyhow::anyhow!("HOME unset and NERV_SPECS_DIR not set"))?;
 
     if !specs_dir.exists() {
@@ -1422,6 +1528,71 @@ fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_init_block_installs_then_noops_then_updates() {
+        // The `eval "$(nerv init zsh)"` contract (first-5-min §0.5-C):
+        // fresh rc → block appended; re-run same version → file
+        // byte-identical (mtime-stable no-op); version bump → single
+        // block replaced in place, user lines intact.
+        let tmp = std::env::temp_dir().join(format!("nerv-apply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let rc = tmp.join(".zshrc");
+        std::fs::write(&rc, "alias ll='ls -la'\n").unwrap();
+
+        let v1 = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.9.0", "t1", "zsh");
+        apply_init_block(&tmp, "zsh", &v1);
+        let after_install = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(nerv_shell::count_blocks(&after_install), 1);
+        assert!(after_install.starts_with("alias ll='ls -la'\n"));
+
+        // Same version + bin, new timestamp → must not rewrite the file.
+        let v1_again = nerv_shell::init_block("/opt/homebrew/bin/nerv", "0.9.0", "t2", "zsh");
+        apply_init_block(&tmp, "zsh", &v1_again);
+        assert_eq!(std::fs::read_to_string(&rc).unwrap(), after_install);
+
+        // Version bump → exactly one block, new version, user line kept.
+        let v2 = nerv_shell::init_block("/opt/homebrew/bin/nerv", "1.0.0", "t3", "zsh");
+        apply_init_block(&tmp, "zsh", &v2);
+        let after_update = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(nerv_shell::count_blocks(&after_update), 1);
+        assert!(after_update.contains("Version: 1.0.0"));
+        assert!(!after_update.contains("Version: 0.9.0"));
+        assert!(after_update.contains("alias ll='ls -la'"));
+        // No temp residue from the atomic write.
+        assert!(!tmp.join(".zshrc.nerv-tmp").exists());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn apply_init_block_creates_fish_config_dir() {
+        // fish's rc is nested (.config/fish/config.fish); apply must
+        // create the parent chain on a pristine home.
+        let tmp = std::env::temp_dir().join(format!("nerv-applyfish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let blk = nerv_shell::init_block("/opt/homebrew/bin/nerv", "1.0.0", "t", "fish");
+        apply_init_block(&tmp, "fish", &blk);
+        let rc = tmp.join(".config/fish/config.fish");
+        let content = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(nerv_shell::count_blocks(&content), 1);
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn rc_file_for_shell_stays_inside_doctor_scan_list() {
+        // Contract: init may only write where doctor/uninstall scan,
+        // or the block would be orphaned.
+        for shell in ["zsh", "bash", "fish"] {
+            let rel = rc_file_for_shell(shell).expect("known shell");
+            assert!(
+                SHELL_INIT_FILES.contains(&rel),
+                "{rel} not in SHELL_INIT_FILES"
+            );
+        }
+        assert_eq!(rc_file_for_shell("tcsh"), None);
+    }
 
     #[test]
     fn installed_at_rfc3339_is_well_formed() {

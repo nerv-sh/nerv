@@ -68,6 +68,16 @@ else if set -q NERV_PTY
             set __nerv_pty_bin $NERV_PTY_BIN
         end
         if command -v $__nerv_pty_bin >/dev/null 2>&1
+            # Autostart nervd before handing over — the shim talks to
+            # the same UDS. `nerv start` is idempotent (socket probe):
+            # quiet no-op when a daemon already serves. The CLI lives
+            # next to nerv-pty; fall back to PATH.
+            set -l __nerv_cli (dirname $__nerv_pty_bin)/nerv
+            if not test -x $__nerv_cli
+                set __nerv_cli nerv
+            end
+            $__nerv_cli start >/dev/null 2>&1 &
+            disown 2>/dev/null
             exec $__nerv_pty_bin -- $SHELL
         else
             echo "[nerv] NERV_PTY=1 set but nerv-pty binary not found — falling back to no shim." >&2

@@ -123,6 +123,31 @@ jobs:
             -p nerv-cli -p nerv-daemon -p nerv-pty \
             --features nerv-cli/quickjs,nerv-daemon/quickjs
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: convert specs (TS → JSON, vendored withfig corpus)
+        working-directory: tools/ts-to-json
+        run: |
+          bun install --frozen-lockfile
+          bun run convert:all
+
+      - name: build spec cache (validate + gzip + manifest)
+        # build-specs canonicalizes the converted JSON, writes the E5
+        # schema manifest, and gzips (~10MB for 700+ specs). The result
+        # ships inside the tarball as `specs/`; the engine falls back to
+        # it (next to the binary, or brew's share/nerv/specs) whenever
+        # the user cache holds no specs — so `brew install` alone yields
+        # working completions with no extra install step.
+        run: |
+          cargo run --release -p nerv-engine --bin build-specs -- \
+            --input crates/nerv-engine/tests/fixtures/converted/ \
+            --output staged-specs/ \
+            --compress
+          ls staged-specs | head -5
+          test -f staged-specs/manifest.json
+
       - name: stage tarball
         id: stage
         run: |
@@ -137,6 +162,7 @@ jobs:
           cp target/${{ matrix.target }}/release/nerv     "$STAGE/"
           cp target/${{ matrix.target }}/release/nervd    "$STAGE/"
           cp target/${{ matrix.target }}/release/nerv-pty "$STAGE/"
+          cp -R staged-specs "$STAGE/specs"
           for f in LICENSE NOTICE README.md; do
             [ -f "$f" ] && cp "$f" "$STAGE/"
           done
