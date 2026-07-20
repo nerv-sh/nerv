@@ -81,7 +81,7 @@ schema version, and tells you exactly what's wrong.
 ```text
  zsh ──────────────────────────────┐        ┌─ nervd (daemon) ────────────────┐
  │ ZLE widget (_nerv.zsh)          │  UDS   │ SpecRegistry — lazy, LRU-bound  │
- │   every keystroke:              ├───────►│   ~/Library/Caches/nerv/specs/  │
+ │   every keystroke:              ├───────►│   specs ship in the package     │
  │   nerv _complete "git ch" 6     │        │   (700+ specs, ~10 MB gzipped)  │
  │                                 │◄───────┤ generators — git branch,        │
  │ renders ghost + popup           │ 4-field│   npm scripts, … (cached, 800ms │
