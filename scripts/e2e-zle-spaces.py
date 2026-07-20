@@ -86,11 +86,13 @@ def kill(master, proc):
 
 
 def cwd_after(env, keys):
-    """Type `keys`, press Enter once, then print $PWD."""
+    """Type `keys` (bytes, or a list of chunks each given time to
+    settle), press Enter once, then print $PWD."""
     master, proc = new_shell(env)
     pump(master, 2.0)
-    os.write(master, keys)
-    pump(master, 1.5)
+    for chunk in (keys if isinstance(keys, list) else [keys]):
+        os.write(master, chunk)
+        pump(master, 1.5)
     os.write(master, b"\r")
     pump(master, 1.0)
     os.write(master, b'print -r -- "CWDMARK=[$PWD]"\r')
@@ -108,7 +110,7 @@ def main():
     home = tempfile.mkdtemp(prefix="nerv-spaces-")
     probe = os.path.join(home, "probe")
     spacey = os.path.join(probe, "My Folder")
-    os.makedirs(spacey, exist_ok=True)
+    os.makedirs(os.path.join(spacey, "deeper"), exist_ok=True)
     specs = os.path.join(home, "specs")
     os.makedirs(specs, exist_ok=True)
     with open(os.path.join(specs, "cd.json"), "w") as f:
@@ -132,16 +134,31 @@ def main():
 
     rc = 1
     try:
+        # Case 1 — accept a spacey directory and run it.
         cwd, out = cwd_after(env, b"cd My")
-        ok = cwd.rstrip("/").endswith("My Folder")
-        log(f"case1 `cd My` + Enter -> cwd={cwd!r} -> {'OK' if ok else 'FAIL'}")
-        if ok:
-            log("PASS — a directory with a space completes to a usable line")
+        ok1 = cwd.rstrip("/").endswith("My Folder")
+        log(f"case1 accept    `cd My` +Enter -> cwd={cwd!r} -> {'OK' if ok1 else 'FAIL'}")
+
+        # Case 2 — DRILL THROUGH the space. The first Tab leaves
+        # `cd My\ Folder/` in the buffer (our own `(q)` quoting), so the
+        # second Tab feeds that escaped text back to the engine. This is
+        # the only case that proves widget-emit and engine-parse agree;
+        # a unit test on either side alone cannot.
+        cwd2, out2 = cwd_after(env, [b"cd My", b"\t", b"deep"])
+        ok2 = cwd2.rstrip("/").endswith(os.path.join("My Folder", "deeper"))
+        log(f"case2 drill     `cd My`+Tab+`deep`+Enter -> cwd={cwd2!r} -> {'OK' if ok2 else 'FAIL'}")
+
+        if ok1 and ok2:
+            log("PASS — spacey paths both accept and drill through")
             rc = 0
         else:
-            log("FAIL — inserted text was not shell-safe")
-            log(f"  expected cwd to end with 'My Folder', got {cwd!r}")
-            log(f"  tail: {out[-400:]!r}")
+            log("FAIL — spacey path handling is broken")
+            if not ok1:
+                log(f"  case1 expected cwd ending 'My Folder', got {cwd!r}")
+                log(f"  case1 tail: {out[-400:]!r}")
+            if not ok2:
+                log(f"  case2 expected cwd ending 'My Folder/deeper', got {cwd2!r}")
+                log(f"  case2 tail: {out2[-400:]!r}")
     finally:
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
 

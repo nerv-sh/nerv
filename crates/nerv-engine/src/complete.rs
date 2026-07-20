@@ -876,27 +876,45 @@ fn wrapped_command_start(tokens: &[Annotation]) -> usize {
     }
 }
 
+/// Split on whitespace, except where a backslash escapes it: `My\ File`
+/// is ONE token, not two.
+///
+/// This matters because the widget accepts completions using zsh's `(q)`
+/// backslash quoting, so `cd My<Tab>` leaves `cd My\ Folder/` in the
+/// buffer — the very next keystroke feeds that back here. Splitting it
+/// would both lose the prefix and inflate the consumed-positional count.
+///
+/// Backslash form only. Quoted forms (`cat "My F`) keep the quote as a
+/// literal prefix character and therefore match nothing, which is the
+/// pre-existing behavior for an open quote.
 fn tokenize(text: &str) -> Vec<Annotation> {
     let mut out = Vec::new();
-    let mut start = 0usize;
-    let mut bytes = text.bytes().enumerate().peekable();
+    let bytes = text.as_bytes();
     let mut word_start: Option<usize> = None;
-    while let Some(&(i, b)) = bytes.peek() {
-        if b == b' ' || b == b'\t' {
-            if let Some(ws) = word_start.take() {
-                out.push(Annotation {
-                    span: ws..i,
-                    text: text[ws..i].to_string(),
-                    kind: TokenKind::Unknown,
-                });
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            // Escape consumes the next byte whatever it is, so an
+            // escaped space never breaks the word. A trailing lone
+            // backslash falls through to the ordinary arm.
+            b'\\' if i + 1 < bytes.len() => {
+                word_start.get_or_insert(i);
+                i += 2;
             }
-            bytes.next();
-            start = i + 1;
-        } else {
-            if word_start.is_none() {
-                word_start = Some(i);
+            b' ' | b'\t' => {
+                if let Some(ws) = word_start.take() {
+                    out.push(Annotation {
+                        span: ws..i,
+                        text: text[ws..i].to_string(),
+                        kind: TokenKind::Unknown,
+                    });
+                }
+                i += 1;
             }
-            bytes.next();
+            _ => {
+                word_start.get_or_insert(i);
+                i += 1;
+            }
         }
     }
     if let Some(ws) = word_start {
@@ -906,20 +924,38 @@ fn tokenize(text: &str) -> Vec<Annotation> {
             kind: TokenKind::Unknown,
         });
     }
-    let _ = start;
     out
 }
 
-/// Trailing partial word for prefix filtering. Empty when the
-/// cursor sits after whitespace.
-fn current_prefix(text: &str) -> String {
-    if text.is_empty() || text.ends_with(' ') || text.ends_with('\t') {
-        return String::new();
+/// Drop word-form backslash escapes: `My\ File` → `My File`. Candidate
+/// names are literal, so the prefix has to be literal to match them.
+fn unescape_word(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
     }
-    let last_ws = text.rfind([' ', '\t']);
-    match last_ws {
-        Some(i) => text[i + 1..].to_string(),
-        None => text.to_string(),
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Trailing partial word for prefix filtering. Empty when the cursor
+/// sits after whitespace.
+///
+/// Derived from [`tokenize`] rather than scanning independently: the two
+/// disagreeing about what a word is on escaped input is exactly the bug
+/// this closes, so they share one definition. The last token reaching
+/// the end of the text means the cursor is still inside it; anything
+/// else means trailing whitespace, i.e. a fresh argument.
+fn current_prefix(text: &str) -> String {
+    match tokenize(text).last() {
+        Some(tok) if tok.span.end == text.len() => unescape_word(&tok.text),
+        _ => String::new(),
     }
 }
 
@@ -4594,6 +4630,53 @@ region = us-east-1
         assert_eq!(current_prefix("git st"), "st");
         assert_eq!(current_prefix("git checkout ma"), "ma");
         assert_eq!(current_prefix(""), "");
+    }
+
+    /// The pair that the old `ends_with(' ')` check collapsed: an
+    /// ESCAPED trailing space is still inside the word being typed,
+    /// while a real one starts a fresh argument. Getting these
+    /// backwards is what made `cd My\ <Tab>` go dead.
+    #[test]
+    fn current_prefix_distinguishes_escaped_from_real_trailing_space() {
+        assert_eq!(current_prefix(r"cd My\ "), "My ");
+        assert_eq!(current_prefix("cd Foo "), "");
+    }
+
+    /// A backslash-escaped space keeps the word whole, and the prefix
+    /// comes back literal so it can match a real filename.
+    #[test]
+    fn current_prefix_unescapes_the_word_form() {
+        assert_eq!(current_prefix(r"cat My\ F"), "My F");
+        assert_eq!(current_prefix(r"cat My\ File.txt"), "My File.txt");
+        assert_eq!(
+            current_prefix(r"cd ~/Application\ Sup"),
+            "~/Application Sup"
+        );
+        // Quoting is deliberately NOT interpreted: only the backslash
+        // form round-trips through the widget, so an unescaped space
+        // inside quotes still splits and the prefix is just the tail.
+        // Identical to the old `rfind(' ')` behavior — quoted input is
+        // untouched by this change.
+        assert_eq!(current_prefix("cat \"My F"), "F");
+        // Trailing lone backslash: nothing to escape, drop it.
+        assert_eq!(current_prefix(r"cat My\"), "My");
+    }
+
+    /// Token boundaries must agree with the prefix rule — an escaped
+    /// space is not a token break, so the positional cursor doesn't
+    /// over-advance on a path with a space in it.
+    #[test]
+    fn tokenize_does_not_split_on_escaped_space() {
+        let toks = tokenize(r"cat My\ File.txt");
+        let texts: Vec<&str> = toks.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["cat", r"My\ File.txt"]);
+
+        // Spans still index the ORIGINAL text, escapes included.
+        assert_eq!(&r"cat My\ File.txt"[toks[1].span.clone()], r"My\ File.txt");
+
+        // An unescaped space still splits.
+        let plain = tokenize("cat My File.txt");
+        assert_eq!(plain.len(), 3);
     }
 
     #[test]

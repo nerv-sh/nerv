@@ -458,14 +458,20 @@ __nerv_insert_selected() {
   local before="$LBUFFER"
   local after="$RBUFFER"
 
-  # Strip trailing partial word from `before` (the word the user
-  # was completing).
-  local pre
-  if [[ "$before" == *' '* ]]; then
-    pre="${before% *} "
-  else
-    pre=""
-  fi
+  # Strip trailing partial word from `before` (the word the user was
+  # completing). The split has to skip backslash-escaped whitespace or
+  # it cuts inside a path we ourselves quoted: `${before% *}` on
+  # `cd My\ Fol` yields `cd My\`, mangling the line on the second Tab.
+  # Mirrors the engine's tokenizer, which splits by the same rule.
+  local pre="" i=1 wstart=1 n=${#before}
+  while (( i <= n )); do
+    case "${before[i]}" in
+      '\') (( i += 2 )) ;;                       # escape swallows the next char
+      ' '|$'\t') (( i++ )); wstart=$i ;;         # real break: word starts after it
+      *) (( i++ )) ;;
+    esac
+  done
+  (( wstart > 1 )) && pre="${before[1,wstart-1]}"
 
   # Strip leading partial word from `after` (rest of the same word
   # when cursor is mid-token).
