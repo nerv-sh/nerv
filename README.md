@@ -60,18 +60,16 @@ cloud attached is now a local daemon and a zsh widget.
 Requires **macOS on Apple Silicon** and **zsh ≥ 5.8**.
 
 ```sh
-brew tap nerv-sh/tap
-brew install nerv
+brew install nerv-sh/tap/nerv
 eval "$(nerv init zsh)"
-nerv start
 ```
 
-Type `git ` in a new prompt — the popup should appear. If it doesn't, run
+That's the whole install. The `eval` line writes an idempotent, marker-fenced
+block into your `~/.zshrc` and activates completion in the current session;
+the daemon starts itself on demand, and the 700+ completion specs ship inside
+the package. Type `git ` — the popup should appear. If it doesn't, run
 `nerv doctor`: it checks the shell hook, the daemon, the spec cache, and the
 schema version, and tells you exactly what's wrong.
-
-`brew services start nerv` keeps the daemon alive across reboots (optional —
-`nerv start` is enough for a session).
 
 > Homebrew installs don't trip Gatekeeper: `brew` doesn't quarantine its
 > downloads, and the ad-hoc signature from the Rust toolchain is sufficient on

@@ -85,6 +85,14 @@ if ! command -v "$__NERV_PTY_BIN" >/dev/null 2>&1; then
   return 0
 fi
 
+# Autostart nervd before handing over — the shim's ghost/popup talk to
+# the same UDS. `nerv start` is idempotent (socket probe), so this is a
+# quiet no-op when a daemon already serves. The CLI lives next to
+# nerv-pty; fall back to PATH.
+typeset -g __NERV_CLI="${__NERV_PTY_BIN:h}/nerv"
+[[ -x "$__NERV_CLI" ]] || __NERV_CLI=nerv
+( "$__NERV_CLI" start >/dev/null 2>&1 & ) 2>/dev/null
+
 # Hand the shell over to nerv-pty. The wrapper opens a PTY, sets
 # NERV_PTY_SESSION_ID, and execs zsh again under itself — that
 # inner zsh hits the re-entry guard above and skips this block.

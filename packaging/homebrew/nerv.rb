@@ -18,18 +18,22 @@ class Nerv < Formula
     # nerv-pty is the M1 opt-in figterm-style PTY shim. Idle
     # unless the user sets NERV_PTY=1 before launching the shell.
     bin.install "nerv-pty" if File.exist?("nerv-pty")
+    # 700+ completion specs (gzipped JSON + schema manifest). The engine
+    # reads them from share/nerv/specs (relative to the binary) whenever
+    # the user spec cache is empty — no post-install spec step needed.
+    pkgshare.install "specs" if File.exist?("specs")
   end
 
   def caveats
     <<~EOS
-      Add the following to your ~/.zshrc to enable inline completion:
+      Run this once — it installs the shell hook into your ~/.zshrc and
+      activates completion in the current session (the daemon starts
+      automatically):
 
         eval "$(nerv init zsh)"
 
-      Then either restart your shell or run `nerv start` to spawn the daemon.
-      Run `nerv doctor` at any time to verify the install.
-
-      To remove every trace of nerv: `nerv uninstall`.
+      `nerv doctor` verifies the install.
+      `nerv uninstall` removes every trace.
     EOS
   end
 

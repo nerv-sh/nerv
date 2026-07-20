@@ -33,9 +33,11 @@ async fn main() -> anyhow::Result<()> {
     let pid_path = std::env::var_os("NERV_PID")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| paths::pid_path().expect("HOME present (just checked)"));
-    let specs_dir = std::env::var_os("NERV_SPECS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| paths::specs_dir().expect("HOME present (just checked)"));
+    // env override → populated user cache → bundled set shipped next to
+    // the binary (brew `share/nerv/specs` or tarball `specs/`) → user
+    // path. A fresh `brew install` user completes against the bundle
+    // without ever running build-specs.
+    let specs_dir = paths::resolve_specs_dir().expect("HOME present (just checked)");
 
     // Lazy registry: no upfront disk scan. Specs are read on first
     // lookup and cached. Startup stays O(1) even with 700+ specs.
@@ -88,8 +90,6 @@ async fn main() -> anyhow::Result<()> {
     let matching = MatchingConfig::load_default();
     info!(mode = ?matching.mode, "matching config loaded");
 
-    write_pid_file(&pid_path).await?;
-
     // Best-effort cleanup of any stale socket from a previous run.
     let _ = tokio::fs::remove_file(&sock_path).await;
 
@@ -101,6 +101,14 @@ async fn main() -> anyhow::Result<()> {
     use tokio::net::UnixListener;
     let listener = UnixListener::bind(&sock_path)
         .with_context(|| format!("cannot bind UDS at {}", sock_path.display()))?;
+
+    // PID file is written AFTER the socket is bound: it is the readiness
+    // signal `nerv start` polls before returning (and releasing its
+    // start lock). Writing it earlier reopens the double-spawn race —
+    // a second `nerv start` would probe between pid-write and bind,
+    // find no listener, and spawn a rival daemon whose stale-socket
+    // cleanup steals this one's listener.
+    write_pid_file(&pid_path).await?;
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);

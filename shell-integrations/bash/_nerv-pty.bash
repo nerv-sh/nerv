@@ -109,6 +109,13 @@ if ! command -v "$__NERV_PTY_BIN" >/dev/null 2>&1; then
   return 0
 fi
 
+# Autostart nervd before handing over — the shim talks to the same UDS.
+# `nerv start` is idempotent (socket probe): quiet no-op when a daemon
+# already serves. The CLI lives next to nerv-pty; fall back to PATH.
+__NERV_CLI="${__NERV_PTY_BIN%/*}/nerv"
+[[ -x "$__NERV_CLI" ]] || __NERV_CLI=nerv
+( "$__NERV_CLI" start >/dev/null 2>&1 & ) 2>/dev/null
+
 # Hand control to nerv-pty, which sets NERV_PTY_SESSION_ID and re-execs
 # this shell under its shadow terminal.
 exec "$__NERV_PTY_BIN" -- "$SHELL"
