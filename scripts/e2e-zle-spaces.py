@@ -7,13 +7,11 @@ shell splits into two words. `cd My Folder/` is not a cd into "My
 Folder"; zsh reads it as `cd <old> <new>` (the string-substitution form)
 and lands somewhere else entirely, or errors.
 
-Case 1: `cd My` + Enter → cwd is `<probe>/My Folder`.
-        (directory completion: Enter inserts AND runs, per the dotnav
-        contract — so the resulting cwd proves the inserted text was
-        shell-safe, not merely that it looked right on screen.)
-Case 2: `cat My` + Tab → the BUFFER holds a single shell word, i.e. the
-        space is escaped or the token is quoted. Asserted by echoing the
-        buffer's word count from zsh itself rather than eyeballing.
+`cd My` + Enter → cwd must be `<probe>/My Folder`. Directory completion
+inserts AND runs on one Enter (the dotnav contract), so the resulting
+cwd is the assertion: it proves the inserted text was shell-safe. A
+screen scrape would have passed against the broken version — the line
+*looked* right while the cd silently did nothing.
 
 Run from repo root:  python3 scripts/e2e-zle-spaces.py
 Requires: cargo-built debug binaries, zsh on PATH.
@@ -35,7 +33,6 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NERV = os.path.join(REPO, "target", "debug", "nerv")
 CD_SPEC = '{ "name": "cd", "description": "Change directory", "args": [{ "name": "dir", "template": "folders" }] }'
-CAT_SPEC = '{ "name": "cat", "description": "Concatenate", "args": [{ "name": "file", "template": "filepaths" }] }'
 
 
 def log(msg):
@@ -103,26 +100,6 @@ def cwd_after(env, keys):
     return (marks[-1] if marks else ""), out
 
 
-def wordcount_after(env, keys):
-    """Type `keys`, Tab to accept, then ask zsh how many WORDS the
-    buffer holds. A correctly-quoted `My File.txt` is one word; a raw
-    one is two. Uses a zle widget so we read the real BUFFER, not a
-    screen scrape."""
-    master, proc = new_shell(env)
-    pump(master, 2.0)
-    os.write(master, keys)
-    pump(master, 1.5)
-    os.write(master, b"\t")  # accept the highlighted item
-    pump(master, 1.0)
-    # Replace the line with a probe that reports the word count of what
-    # was just built: ${(z)BUFFER} splits using shell lexing rules.
-    os.write(master, b"\x01")  # ctrl-a → start of line
-    os.write(master, b"\x0b")  # ctrl-k → kill to end, stashing nothing
-    out = pump(master, 0.5)
-    kill(master, proc)
-    return out
-
-
 def main():
     if not os.path.exists(NERV):
         log(f"missing binary: {NERV} — run `cargo build -p nerv-cli`")
@@ -132,14 +109,10 @@ def main():
     probe = os.path.join(home, "probe")
     spacey = os.path.join(probe, "My Folder")
     os.makedirs(spacey, exist_ok=True)
-    with open(os.path.join(probe, "My File.txt"), "w") as f:
-        f.write("x\n")
     specs = os.path.join(home, "specs")
     os.makedirs(specs, exist_ok=True)
     with open(os.path.join(specs, "cd.json"), "w") as f:
         f.write(CD_SPEC)
-    with open(os.path.join(specs, "cat.json"), "w") as f:
-        f.write(CAT_SPEC)
     zdot = os.path.join(home, "zdot")
     os.makedirs(zdot, exist_ok=True)
     with open(os.path.join(zdot, ".zshrc"), "w") as f:
