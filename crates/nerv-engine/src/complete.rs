@@ -722,7 +722,14 @@ pub fn complete_in(
         // …). Merge whenever the level has args with dynamic source.
         let mut subs = emit_subcommands(current, &prefix, mode);
         if arg_has_dynamic_source(current) {
-            subs.extend(emit_arg_candidates(current, &prefix, cwd, mode, &tokens));
+            subs.extend(emit_arg_candidates(
+                current,
+                result.subcommand_arg_index,
+                &prefix,
+                cwd,
+                mode,
+                &tokens,
+            ));
         }
         // Sort by priority first (script results get priority 75
         // and float above default-50 subcommands), then alpha.
@@ -739,7 +746,14 @@ pub fn complete_in(
                 mode,
                 &result.consumed_options,
             ),
-            CursorContext::Arg => emit_arg_candidates(current, &prefix, cwd, mode, &tokens),
+            CursorContext::Arg => emit_arg_candidates(
+                current,
+                result.subcommand_arg_index,
+                &prefix,
+                cwd,
+                mode,
+                &tokens,
+            ),
             CursorContext::Done => vec![],
         }
     };
@@ -1205,14 +1219,20 @@ fn arg_has_dynamic_source(node: &Subcommand) -> bool {
     })
 }
 
+/// `arg_index` is the parser's positional cursor — which slot the
+/// consumed tokens have advanced to. Assuming slot 0 here is what made
+/// `git push origin <Tab>` re-suggest remotes: the branch generator
+/// sits in slot 1 and was never reachable. `None` (or an index past the
+/// end) means the arg list is exhausted, so there is nothing to emit.
 fn emit_arg_candidates(
     node: &Subcommand,
+    arg_index: Option<usize>,
     prefix: &str,
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
     tokens: &[Annotation],
 ) -> Vec<Suggestion> {
-    let Some(arg) = node.args.first() else {
+    let Some(arg) = arg_index.and_then(|i| node.args.get(i)) else {
         return vec![];
     };
     emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens)
@@ -3848,6 +3868,91 @@ region = us-east-1
             names,
             ["ns-one", "ns-two"],
             "expected the -n option's generator, not the positional slot"
+        );
+    }
+
+    /// `git push origin <Tab>` regression: once a positional token is
+    /// consumed, completion must dispatch to the NEXT arg slot. The
+    /// parser tracked the cursor correctly (`ArgState::advance`) but
+    /// `ParserResult` dropped the index, so `emit_arg_candidates` fell
+    /// back to `args.first()` forever — `git push origin ␣` re-ran the
+    /// *remote* generator (suggesting `origin` again) instead of the
+    /// branch one, and `grep <pat> ␣` never reached its filepaths arg.
+    #[test]
+    fn positional_dispatch_advances_to_the_second_arg() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let two_positionals = |name: &str| Subcommand {
+            name: name.into(),
+            args: vec![
+                Arg {
+                    name: Some("remote".into()),
+                    generators: vec![Generator::Template {
+                        script: vec!["/usr/bin/printf".into(), "first-slot\n".into()],
+                    }],
+                    ..Default::default()
+                },
+                Arg {
+                    name: Some("branch".into()),
+                    generators: vec![Generator::Template {
+                        script: vec!["/usr/bin/printf".into(), "second-slot\n".into()],
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let spec = two_positionals("x");
+        let first = complete("x ", 2, &registry_with(spec.clone()));
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|s| s.display.as_str())
+                .collect::<Vec<_>>(),
+            ["first-slot"],
+            "empty line must still use args[0]"
+        );
+
+        let line = "x origin ";
+        let second = complete(line, line.len(), &registry_with(spec));
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|s| s.display.as_str())
+                .collect::<Vec<_>>(),
+            ["second-slot"],
+            "after consuming args[0], completion must advance to args[1]"
+        );
+    }
+
+    /// The advance must SATURATE on a variadic tail rather than run off
+    /// the end: `rm a b c<Tab>` keeps offering the variadic slot.
+    #[test]
+    fn positional_dispatch_saturates_on_variadic_tail() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("files".into()),
+                is_variadic: true,
+                generators: vec![Generator::Template {
+                    script: vec!["/usr/bin/printf".into(), "vary\n".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let line = "x a b c ";
+        let r = complete(line, line.len(), &registry_with(spec));
+        assert_eq!(
+            r.items
+                .iter()
+                .map(|s| s.display.as_str())
+                .collect::<Vec<_>>(),
+            ["vary"],
+            "variadic slot must keep accepting tokens"
         );
     }
 
