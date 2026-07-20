@@ -3927,6 +3927,48 @@ region = us-east-1
         );
     }
 
+    /// The case between the two above: a single NON-variadic arg that
+    /// has been consumed. `compute_cursor_context` only reports `Arg`
+    /// while `has_more()` holds, so an exhausted list never reaches arg
+    /// dispatch — it falls through to subcommands/options/Done. Pinned
+    /// because the `has_more()` gate on `subcommand_arg_index` would
+    /// otherwise be the thing deciding it, silently.
+    #[test]
+    fn positional_dispatch_stops_at_an_exhausted_non_variadic_arg() {
+        use crate::spec_parser::{Arg, Generator, Subcommand};
+        let spec = Subcommand {
+            name: "x".into(),
+            args: vec![Arg {
+                name: Some("only".into()),
+                generators: vec![Generator::Template {
+                    script: vec!["/usr/bin/printf".into(), "the-slot\n".into()],
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let open = complete("x ", 2, &registry_with(spec.clone()));
+        assert_eq!(
+            open.items
+                .iter()
+                .map(|s| s.display.as_str())
+                .collect::<Vec<_>>(),
+            ["the-slot"],
+            "unconsumed slot still completes"
+        );
+
+        let line = "x taken ";
+        let done = complete(line, line.len(), &registry_with(spec));
+        assert!(
+            done.items.is_empty(),
+            "a consumed non-variadic arg must not re-offer slot 0: {:?}",
+            done.items
+                .iter()
+                .map(|s| s.display.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// The advance must SATURATE on a variadic tail rather than run off
     /// the end: `rm a b c<Tab>` keeps offering the variadic slot.
     #[test]
