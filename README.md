@@ -29,7 +29,7 @@ cloud attached is now a local daemon and a zsh widget.
 **Press a key, see the next token. That's it.**
 
 <p align="center">
-  <img src="docs/assets/demo.gif" width="740" alt="nerv in action: typing git che shows ghost text and a popup, Right-arrow accepts, live git branches complete from the repo, and npm run lists package.json scripts">
+  <img src="docs/assets/demo.gif" width="740" alt="nerv in action: typing git ch shows dim ghost text and a popup with descriptions and argument hints, Right-arrow accepts it, git checkout lists the repository's live branches, selecting one and pressing Enter switches branch, npm run lists the scripts from package.json, and cd lists folders labelled with how many items each holds">
 </p>
 
 ## Highlights
