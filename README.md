@@ -121,7 +121,7 @@ Scope is a feature. Nerv has **no** AI, **no** account or login, **no**
 telemetry or analytics, **no** runtime network calls, **no** auto-updater,
 and **no** webview. The CLI surface is frozen at `init`, `start`, `stop`,
 `doctor`, `spec list`, `uninstall` — there is deliberately no `nerv config`.
-These are documented non-goals ([`PLAN.md`](./PLAN.md) §4), not a backlog.
+These are documented non-goals, not a backlog.
 
 ## Configuration
 

@@ -26,3 +26,12 @@ specs-prebuilt/manifest.json
 
 # Local nerv state (during dev)
 .nerv-local/
+
+# Internal strategy docs — kept local-only (removed from history pre-publication)
+/PLAN.md
+/CLAUDE.md
+/docs/archive/
+/docs/findings/
+/docs/dogfood.md
+/docs/first-5-min.md
+/.github/PR_BODY.md
