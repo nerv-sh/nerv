@@ -30,6 +30,17 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: checkout nerv at the released tag (Formula template source)
+        # The template lives in THIS repo, so it has to be checked out —
+        # without this the `cp` below has no source (the tap checkout
+        # only brings in the tap). Pinned to the released tag, not the
+        # default branch, so the Formula always matches the binary that
+        # was actually shipped under that version.
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.meta.outputs.tag }}
+          path: src
+
       - name: fetch release tarball + sha256
         id: dl
         run: |
@@ -61,13 +72,23 @@ jobs:
           FORMULA="tap/Formula/nerv.rb"
           mkdir -p "$(dirname "$FORMULA")"
           # Start from the in-repo template so style stays consistent.
-          cp packaging/homebrew/nerv.rb "$FORMULA"
+          cp src/packaging/homebrew/nerv.rb "$FORMULA"
           # Pin version + sha256 in-place. The template carries
           # `version "0.0.0"` and a 64-zero sha256 placeholder.
           /usr/bin/sed -i '' \
             -e "s|version \"0.0.0\"|version \"${VERSION}\"|" \
             -e "s|sha256 \"0000000000000000000000000000000000000000000000000000000000000000\"|sha256 \"${SHA256}\"|" \
             "$FORMULA"
+          # Guard the silent-failure mode: if the template ever renames
+          # those placeholders, sed no-ops and we would publish a
+          # `version "0.0.0"` Formula that breaks every user's install.
+          grep -q "version \"${VERSION}\"" "$FORMULA" \
+            || { echo "::error::version placeholder not substituted"; exit 1; }
+          grep -q "sha256 \"${SHA256}\"" "$FORMULA" \
+            || { echo "::error::sha256 placeholder not substituted"; exit 1; }
+          # A syntactically broken Formula breaks `brew install` for
+          # everyone; catch it here rather than in users' terminals.
+          ruby -c "$FORMULA"
           echo "--- updated Formula ---"
           cat "$FORMULA"
 
