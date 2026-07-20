@@ -53,12 +53,30 @@ const SPEC_CACHE_CAP: usize = 16;
 /// a single oversized spec still completes.
 const SPEC_CACHE_BYTE_BUDGET: usize = 200 << 20;
 
+/// How long a keystroke waits for a cold spec parse before deferring it
+/// to the background (see `SpecRegistry::lookup`). All but two specs parse
+/// well under this; only `aws` (~260ms, 7.4MB gz) and `gcloud` (~70ms)
+/// exceed it, so those two defer — empty on the first keystroke, full on
+/// the next — while the other ~700 land on the same keystroke. Nothing
+/// ever blocks the prompt past this window. Mirrors `GENERATOR_SYNC_WAIT`:
+/// 50ms sits below the ~100ms human "instant" threshold.
+const SPEC_LOAD_SYNC_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
 pub struct SpecRegistry {
     dir: Option<PathBuf>,
-    cache: RwLock<HashMap<String, CacheEntry>>,
+    /// Arc-wrapped so a background parse thread (see `lookup`) can insert
+    /// its result after the keystroke that spawned it has already
+    /// returned. All `.read()`/`.write()` call sites are unchanged — the
+    /// `Arc` derefs to the `RwLock`.
+    cache: Arc<RwLock<HashMap<String, CacheEntry>>>,
     /// Monotonic counter stamped onto `CacheEntry.tick` at each access; the
-    /// basis for LRU eviction order.
-    next_tick: AtomicU64,
+    /// basis for LRU eviction order. Arc-shared with background parsers.
+    next_tick: Arc<AtomicU64>,
+    /// Binary names with a background parse currently in flight, so
+    /// concurrent keystrokes on a cold spec don't each spawn a redundant
+    /// (for `aws`, ~45MB) parse. A Drop guard in the populator clears the
+    /// entry even on panic.
+    inflight: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Spec stems (binary names) marked dirty by the FS watcher. Drained
     /// at lookup-time so any cached entry gets re-read from disk on the
     /// very next call. `None` when no watcher is active (e.g. empty
@@ -83,8 +101,9 @@ impl Default for SpecRegistry {
     fn default() -> Self {
         Self {
             dir: None,
-            cache: RwLock::new(HashMap::new()),
-            next_tick: AtomicU64::new(0),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            next_tick: Arc::new(AtomicU64::new(0)),
+            inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: None,
             _watcher: None,
         }
@@ -125,8 +144,9 @@ impl SpecRegistry {
         let watcher = start_spec_watcher(dir, pending.clone());
         Self {
             dir: Some(dir.to_path_buf()),
-            cache: RwLock::new(HashMap::new()),
-            next_tick: AtomicU64::new(0),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            next_tick: Arc::new(AtomicU64::new(0)),
+            inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: Some(pending),
             _watcher: watcher,
         }
@@ -207,33 +227,78 @@ impl SpecRegistry {
         self.drain_invalidations();
         // Fast path: cache hit + mtime unchanged. Bump the entry's LRU tick
         // (atomic → safe under the shared read lock) so an actively-used spec
-        // never evicts. Poisoned read → skip → load_from_disk (no
+        // never evicts. Poisoned read → skip → background load (no
         // incorrectness). The `disk_mtime` stat runs under the read lock;
         // reads are shared, so it doesn't serialise concurrent lookups.
+        //
+        // A stale entry (mtime advanced) keeps its old spec as `stale`, served
+        // while a background reload runs: a spec file changes rarely, and one
+        // keystroke of the previous spec beats blocking the prompt on a
+        // re-parse.
+        let mut stale: Option<Arc<Spec>> = None;
         if let Ok(cache) = self.cache.read() {
             if let Some(entry) = cache.get(name) {
                 if entry.mtime == self.disk_mtime(name) {
                     entry.tick.store(self.next_tick(), Ordering::Relaxed);
                     return entry.spec.clone();
                 }
-                // Mtime advanced (or file gone) — fall through to reload.
+                stale = entry.spec.clone();
             }
         }
-        let (mtime, spec, bytes) = self.load_from_disk(name);
-        if let Ok(mut cache) = self.cache.write() {
-            let tick = self.next_tick();
-            cache.insert(
-                name.to_string(),
-                CacheEntry {
-                    mtime,
-                    spec: spec.clone(),
-                    bytes,
-                    tick: AtomicU64::new(tick),
-                },
-            );
-            self.evict_overflow(&mut cache);
+        // Cold or stale key: parse off the keystroke path. A cold `aws` parse
+        // is ~260ms (7.4MB) — done synchronously it froze the first `aws `
+        // keystroke inside the bridge's 500ms budget. Instead spawn the parse
+        // on a background thread and wait only SPEC_LOAD_SYNC_WAIT: the ~700
+        // fast specs land on this keystroke, the two big ones (aws, gcloud)
+        // fall through to `stale`/None and land on the next. The in-flight
+        // claim stops rapid cold typing (`aws s3api …`) from spawning several
+        // ~45MB parses at once. Registries without a dir (in-code specs via
+        // `insert`) have nothing to load → miss is `None`; bail before the
+        // in-flight claim so we never leave a slot claimed with no populator
+        // to release it.
+        self.dir.as_ref()?;
+        let claimed = self
+            .inflight
+            .lock()
+            .map(|mut s| s.insert(name.to_string()))
+            .unwrap_or(false);
+        if !claimed {
+            return stale;
         }
-        spec
+        // dir is Some (checked above) and never mutated after construction;
+        // clone only now that we're committed to spawning the parse.
+        let dir = self.dir.clone().expect("spec dir present");
+        let cache = Arc::clone(&self.cache);
+        let next_tick = Arc::clone(&self.next_tick);
+        let inflight = Arc::clone(&self.inflight);
+        let release_name = name.to_string();
+        let load_name = name.to_string();
+        spawn_populator_and_maybe_wait(
+            stale,
+            SPEC_LOAD_SYNC_WAIT,
+            move || {
+                if let Ok(mut s) = inflight.lock() {
+                    s.remove(&release_name);
+                }
+            },
+            move || {
+                let (mtime, spec, bytes) = Self::load_spec_from_dir(&dir, &load_name);
+                if let Ok(mut cache) = cache.write() {
+                    let tick = next_tick.fetch_add(1, Ordering::Relaxed);
+                    cache.insert(
+                        load_name.clone(),
+                        CacheEntry {
+                            mtime,
+                            spec: spec.clone(),
+                            bytes,
+                            tick: AtomicU64::new(tick),
+                        },
+                    );
+                    Self::evict_spec_overflow(&mut cache);
+                }
+                spec
+            },
+        )
     }
 
     /// Next monotonic tick for LRU stamping.
@@ -247,7 +312,7 @@ impl SpecRegistry {
     /// (byte-free) never count or evict. The just-inserted entry holds the
     /// highest tick, so it is never the victim — the in-flight completion
     /// keeps its spec even when it alone busts the byte budget.
-    fn evict_overflow(&self, cache: &mut HashMap<String, CacheEntry>) {
+    fn evict_spec_overflow(cache: &mut HashMap<String, CacheEntry>) {
         loop {
             let positive = cache.values().filter(|e| e.spec.is_some()).count();
             let bytes: usize = cache
@@ -290,13 +355,10 @@ impl SpecRegistry {
         None
     }
 
-    fn load_from_disk(
-        &self,
+    fn load_spec_from_dir(
+        dir: &Path,
         name: &str,
     ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
-        let Some(dir) = self.dir.as_ref() else {
-            return (None, None, 0);
-        };
         // Prefer plain JSON for human inspection; fall back to gzipped
         // form (build-time compressed cache).
         for path in [
@@ -358,7 +420,7 @@ impl SpecRegistry {
                     tick: AtomicU64::new(tick),
                 },
             );
-            self.evict_overflow(&mut cache);
+            Self::evict_spec_overflow(&mut cache);
         }
     }
 
@@ -1259,34 +1321,11 @@ fn emit_candidates_for_arg(
 
     // Tier B: spawn `Generator::Template` scripts and parse stdout
     // lines as candidates. Skipped under NERV_NO_GENERATORS=1 (tests,
-    // sandboxed environments).
+    // sandboxed environments). Each cold generator detaches to its own
+    // background populator (see cached_generator_lines), so multiple
+    // generators on one arg already run concurrently — no explicit
+    // prewarm pass needed.
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
-        // Parallel prewarm: the dispatch loop below is sequential, so an
-        // arg carrying several cold Template generators used to stall the
-        // popup N×800ms (one timeout budget per subprocess, summed). Warm
-        // every cold entry concurrently first — the loop then reads warm
-        // cache hits, and the stall is the slowest generator, not the sum.
-        let cold: Vec<&Vec<String>> = arg
-            .generators
-            .iter()
-            .filter_map(|g| match g {
-                crate::spec_parser::Generator::Template { script }
-                    if !generator_cache_fresh(script, cwd) =>
-                {
-                    Some(script)
-                }
-                _ => None,
-            })
-            .collect();
-        if cold.len() > 1 {
-            std::thread::scope(|s| {
-                for script in cold {
-                    s.spawn(move || {
-                        let _ = cached_template_generator(script, cwd);
-                    });
-                }
-            });
-        }
         for g in &arg.generators {
             match g {
                 crate::spec_parser::Generator::Template { script } => {
@@ -1370,8 +1409,11 @@ fn emit_candidates_for_arg(
                     }
                 }
                 crate::spec_parser::Generator::MakefileTargets => {
+                    let owned_cwd = cwd.map(Path::to_path_buf);
                     if let Some(targets) =
-                        cached_native_generator("<nerv:makefile>", cwd, || makefile_targets(cwd))
+                        cached_native_generator("<nerv:makefile>", cwd, move || {
+                            makefile_targets(owned_cwd.as_deref())
+                        })
                     {
                         out.extend(
                             targets
@@ -1679,21 +1721,40 @@ fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) ->
 }
 
 type GeneratorCacheKey = (Vec<String>, Option<PathBuf>);
-type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Vec<String>)>;
+type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Option<Vec<String>>)>;
 
 /// Process-wide cache for Tier B generator results.
 /// Key: `(script argv, spawn cwd)`. The cwd is part of the key because
 /// cwd-sensitive generators (`git branch -a`, …) produce different
 /// output per directory — keying on argv alone leaked one repo's
 /// branches into another (Fig #2101 / #2026 / #2268). Value:
-/// (insertion-time, captured stdout lines). TTL: 5s. Max entries: 64
-/// (oldest-evicted on overflow). Keeps per-keystroke completion calls
-/// from re-spawning the same shell command (e.g. `git branch --list`).
+/// (insertion-time, memoized outcome). The outcome is `Option` so a
+/// *miss* (`None`: generator timed out or errored) is cached too —
+/// otherwise a command that consistently overruns `GENERATOR_TIMEOUT_MS`
+/// (e.g. `brew outdated -q`, ~1.3s) re-spawns and blocks the daemon
+/// ~800ms on every keystroke. TTL: 5s. Max entries: 64 (oldest-evicted
+/// on overflow). Keeps per-keystroke completion calls from re-spawning
+/// the same shell command (e.g. `git branch --list`).
 static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 const GENERATOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 const GENERATOR_CACHE_MAX: usize = 64;
+
+/// How long a keystroke waits for a cold generator before deferring it
+/// to the background. Fast generators (git branch, ssh, pwd — all well
+/// under this) still return on the *same* keystroke; only genuinely
+/// slow ones (brew outdated ~1.3s, docker images, aws service calls)
+/// detach and land on a later keystroke, so no keystroke ever blocks
+/// noticeably. 50ms sits below the ~100ms human "instant" threshold.
+const GENERATOR_SYNC_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Keys with a populator thread currently computing, so concurrent
+/// keystrokes don't spawn a second subprocess for the same generator.
+/// A Drop guard in the populator clears the entry even on panic.
+static GENERATOR_INFLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<GeneratorCacheKey>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 
@@ -1703,21 +1764,9 @@ type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
-/// TTL-memo through [`GENERATOR_CACHE`]: fresh hit → cached lines,
-/// otherwise run `compute` and insert. Shared by the subprocess
-/// template path and the in-process native generators below.
-fn cached_generator_lines(
-    key: GeneratorCacheKey,
-    compute: impl FnOnce() -> Option<Vec<String>>,
-) -> Option<Vec<String>> {
-    if let Ok(cache) = GENERATOR_CACHE.lock() {
-        if let Some((stamp, lines)) = cache.get(&key) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return Some(lines.clone());
-            }
-        }
-    }
-    let lines = compute()?;
+/// Insert `outcome` (a hit or a memoized miss) into [`GENERATOR_CACHE`]
+/// under `key`, evicting the oldest entry past the size cap.
+fn store_generator_result(key: GeneratorCacheKey, outcome: Option<Vec<String>>) {
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
@@ -1728,26 +1777,122 @@ fn cached_generator_lines(
                 cache.remove(&oldest);
             }
         }
-        cache.insert(key, (std::time::Instant::now(), lines.clone()));
+        cache.insert(key, (std::time::Instant::now(), outcome));
     }
-    Some(lines)
 }
 
-/// Cached wrapper around [`execute_template_generator`]. Returns
-/// the cached value on TTL-fresh hit, otherwise runs the generator
-/// and inserts the result.
+/// The shared non-blocking populator shell behind both the generator
+/// TTL-memo and the spec-registry lazy loader. The caller has already
+/// (a) checked its own cache for a fresh hit, (b) captured any positive
+/// `stale` value to serve during a refresh, and (c) claimed the in-flight
+/// slot. This runs `compute` — which performs its own store into the
+/// caller's cache and returns the value to serve — on a background thread
+/// with `release` Drop-guarded (runs even on panic, so a panicking
+/// compute is retried, not wedged), then decides what to serve *this*
+/// keystroke:
+///
+///   - a positive `stale` value in hand → serve it now and refresh in the
+///     background (stale-while-revalidate — zero added latency; a slow
+///     compute would otherwise burn the whole window on every refresh),
+///   - otherwise (cold / previously-missed) → wait up to `window` so a
+///     *fast* compute lands on this keystroke instead of flashing empty; a
+///     slow one falls through to `None` and lands on a later keystroke.
+///
+/// `compute` stores before it returns, so by the time the recv below
+/// unblocks the caller's cache is already fresh (deterministic fast path).
+fn spawn_populator_and_maybe_wait<V, R>(
+    stale: Option<V>,
+    window: std::time::Duration,
+    release: R,
+    compute: impl FnOnce() -> Option<V> + Send + 'static,
+) -> Option<V>
+where
+    V: Send + 'static,
+    R: FnOnce() + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel::<Option<V>>();
+    std::thread::spawn(move || {
+        struct Guard<F: FnOnce()>(Option<F>);
+        impl<F: FnOnce()> Drop for Guard<F> {
+            fn drop(&mut self) {
+                if let Some(f) = self.0.take() {
+                    f();
+                }
+            }
+        }
+        let _guard = Guard(Some(release));
+        let out = compute();
+        let _ = tx.send(out);
+    });
+    if stale.is_some() {
+        return stale;
+    }
+    // `stale` is `None` here (the branch above returned otherwise): a slow
+    // compute that misses the window serves nothing this keystroke.
+    rx.recv_timeout(window).unwrap_or(None)
+}
+
+/// TTL-memo over [`GENERATOR_CACHE`] for Tier B / native generator output.
+/// Fresh hit → serve it; expired entry → serve stale while a background
+/// populator refreshes; cold/missed key → defer to the populator (see
+/// [`spawn_populator_and_maybe_wait`]), so the per-keystroke path never
+/// blocks on a slow subprocess. Shared by the subprocess template path and
+/// the in-process native generators below.
+fn cached_generator_lines(
+    key: GeneratorCacheKey,
+    compute: impl FnOnce() -> Option<Vec<String>> + Send + 'static,
+) -> Option<Vec<String>> {
+    // Fresh hit → serve immediately. An expired entry is kept as `stale`
+    // and served while a refresh runs (stale-while-revalidate — no empty
+    // flash on the 5s refresh, no waiting on a slow generator at the TTL
+    // boundary; see `spawn_populator_and_maybe_wait`).
+    let mut stale: Option<Vec<String>> = None;
+    if let Ok(cache) = GENERATOR_CACHE.lock() {
+        if let Some((stamp, outcome)) = cache.get(&key) {
+            if stamp.elapsed() < GENERATOR_CACHE_TTL {
+                return outcome.clone();
+            }
+            stale = outcome.clone();
+        }
+    }
+    // Claim the in-flight slot. If a populator is already running for
+    // this key, don't spawn another — serve stale now; the running
+    // populator's result lands on a later keystroke.
+    let claimed = GENERATOR_INFLIGHT
+        .lock()
+        .map(|mut s| s.insert(key.clone()))
+        .unwrap_or(false);
+    if !claimed {
+        return stale;
+    }
+    let store_key = key.clone();
+    let release_key = key;
+    spawn_populator_and_maybe_wait(
+        stale,
+        GENERATOR_SYNC_WAIT,
+        move || {
+            if let Ok(mut s) = GENERATOR_INFLIGHT.lock() {
+                s.remove(&release_key);
+            }
+        },
+        move || {
+            let outcome = compute();
+            store_generator_result(store_key, outcome.clone());
+            outcome
+        },
+    )
+}
+
+/// Cached wrapper around [`execute_template_generator`]. Serves the
+/// cached value on a TTL-fresh hit; otherwise defers the generator to
+/// the background (see [`cached_generator_lines`]). Captures owned
+/// copies of `script`/`cwd` so the populator closure is `'static`.
 fn cached_template_generator(script: &[String], cwd: Option<&Path>) -> Option<Vec<String>> {
-    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
-    cached_generator_lines(key, || execute_template_generator(script, cwd))
-}
-
-/// True when [`GENERATOR_CACHE`] holds a TTL-fresh entry for
-/// `(script, cwd)` — used to pick which generators need a prewarm.
-fn generator_cache_fresh(script: &[String], cwd: Option<&Path>) -> bool {
-    let key: GeneratorCacheKey = (script.to_vec(), cwd.map(Path::to_path_buf));
-    GENERATOR_CACHE.lock().is_ok_and(|c| {
-        c.get(&key)
-            .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
+    let owned_script = script.to_vec();
+    let owned_cwd = cwd.map(Path::to_path_buf);
+    let key: GeneratorCacheKey = (owned_script.clone(), owned_cwd.clone());
+    cached_generator_lines(key, move || {
+        execute_template_generator(&owned_script, owned_cwd.as_deref())
     })
 }
 
@@ -1759,7 +1904,7 @@ fn generator_cache_fresh(script: &[String], cwd: Option<&Path>) -> bool {
 fn cached_native_generator(
     tag: &str,
     cwd: Option<&Path>,
-    compute: impl FnOnce() -> Option<Vec<String>>,
+    compute: impl FnOnce() -> Option<Vec<String>> + Send + 'static,
 ) -> Option<Vec<String>> {
     let key: GeneratorCacheKey = (vec![tag.to_string()], cwd.map(Path::to_path_buf));
     cached_generator_lines(key, compute)
@@ -3889,55 +4034,248 @@ region = us-east-1
         );
     }
 
+    /// Poll [`GENERATOR_CACHE`] until `key` holds a TTL-fresh entry, up
+    /// to `timeout`. Waits for a detached populator to store its result
+    /// (hit or memoized miss) before asserting on the now-warm cache —
+    /// no fixed sleeps, so a loaded CI box can't race it.
+    fn wait_for_generator_cache(key: &GeneratorCacheKey, timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            let fresh = GENERATOR_CACHE.lock().is_ok_and(|c| {
+                c.get(key)
+                    .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
+            });
+            if fresh {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn native_generator_memoizes_within_ttl() {
-        // man/ssh/history/makefile walk the filesystem in-process; before
-        // the memo they re-ran on every keystroke. Second call inside the
-        // TTL must return the cached lines without invoking compute.
-        use std::cell::Cell;
-        let calls = Cell::new(0);
-        let compute = || {
-            calls.set(calls.get() + 1);
+        // man/ssh/history/makefile walk the filesystem in-process; the
+        // memo stops them re-running on every keystroke. compute now runs
+        // on a detached populator, so use a Send counter and wait for the
+        // store. The second call inside the TTL must hit the cache without
+        // invoking compute again.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tag = "<nerv:test-memo-uniq>";
+        let key: GeneratorCacheKey = (vec![tag.to_string()], None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c1 = calls.clone();
+        let _ = cached_native_generator(tag, None, move || {
+            c1.fetch_add(1, Ordering::SeqCst);
             Some(vec!["alpha".to_string(), "beta".to_string()])
-        };
-        let a = cached_native_generator("<nerv:test-memo-uniq>", None, compute);
-        let b = cached_native_generator("<nerv:test-memo-uniq>", None, || {
-            calls.set(calls.get() + 1);
+        });
+        wait_for_generator_cache(&key, std::time::Duration::from_secs(2));
+        let c2 = calls.clone();
+        let b = cached_native_generator(tag, None, move || {
+            c2.fetch_add(1, Ordering::SeqCst);
             Some(vec!["SHOULD-NOT-RUN".to_string()])
         });
         assert_eq!(
-            a.as_deref(),
             b.as_deref(),
+            Some(&["alpha".to_string(), "beta".to_string()][..]),
             "cache hit must replay first result"
         );
-        assert_eq!(calls.get(), 1, "compute ran again within TTL");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "compute ran again within TTL"
+        );
+    }
+
+    #[test]
+    fn generator_miss_is_negatively_cached() {
+        // A generator that times out returns None. The miss is memoized
+        // (negative cache) so it isn't re-spawned every keystroke
+        // (`brew outdated -q` at ~1.3s never fits the 800ms budget).
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tag = "<nerv:test-negcache-uniq>";
+        let key: GeneratorCacheKey = (vec![tag.to_string()], None);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c1 = calls.clone();
+        let _ = cached_native_generator(tag, None, move || {
+            c1.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+        wait_for_generator_cache(&key, std::time::Duration::from_secs(2));
+        let c2 = calls.clone();
+        let b = cached_native_generator(tag, None, move || {
+            c2.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+        assert!(b.is_none(), "cached miss must still return None");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "timed-out generator re-ran within TTL"
+        );
+    }
+
+    #[test]
+    fn revalidation_serves_stale_without_waiting_sync_window() {
+        // Root-cause guard for the periodic ~100ms hitch on warm large
+        // generators (brew/docker/aws): once a key has a positive value,
+        // crossing the TTL boundary must NOT spend GENERATOR_SYNC_WAIT —
+        // the stale value is served instantly while a refresh runs in the
+        // background. "Returns stale" alone doesn't discriminate (the
+        // pre-fix timeout path also returned stale); only the *timing*
+        // does. A slow (150ms) compute would, pre-fix, force a full 50ms
+        // window; post-fix the call returns in well under that.
+        use std::time::{Duration, Instant};
+        let key: GeneratorCacheKey = (vec!["<nerv:test-stale-reval>".to_string()], None);
+        // Seed an already-EXPIRED positive entry (timestamp older than
+        // the TTL) so this call takes the revalidation path, not a fresh
+        // hit.
+        let expired = Instant::now()
+            .checked_sub(GENERATOR_CACHE_TTL + Duration::from_secs(1))
+            .expect("clock far enough from boot");
+        GENERATOR_CACHE.lock().unwrap().insert(
+            key.clone(),
+            (expired, Some(vec!["cached-stale".to_string()])),
+        );
+        let t0 = Instant::now();
+        let out = cached_generator_lines(key.clone(), || {
+            std::thread::sleep(Duration::from_millis(150));
+            Some(vec!["fresh-should-not-block".to_string()])
+        });
+        let elapsed = t0.elapsed();
+        assert_eq!(
+            out.as_deref(),
+            Some(&["cached-stale".to_string()][..]),
+            "revalidation must serve the stale value, not wait for the refresh"
+        );
+        assert!(
+            elapsed < Duration::from_millis(25),
+            "revalidation blocked {elapsed:?} — the sync window must be \
+             skipped when a positive stale value exists (pre-fix ~50ms)"
+        );
+        // Let the background populator finish + release its in-flight slot
+        // so it can't leak into an adjacent test sharing the process.
+        wait_for_generator_cache(&key, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn populator_serves_fast_and_stale_but_defers_slow() {
+        // The shared shell behind both the generator memo and the spec
+        // loader. Three behaviours, each with a timing assertion (only the
+        // timing discriminates a working async populator from a blocking
+        // one):
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+        let window = Duration::from_millis(50);
+
+        // (1) Fast compute, no stale → lands inside the window on THIS call.
+        let out = spawn_populator_and_maybe_wait(
+            None::<Vec<u8>>,
+            window,
+            || {},
+            || Some(vec![1u8, 2, 3]),
+        );
+        assert_eq!(out, Some(vec![1, 2, 3]), "fast compute must land in window");
+
+        // (2) Slow compute, no stale → returns None without blocking on the
+        //     150ms parse (this is what stops a cold `aws` from freezing the
+        //     keystroke); the compute keeps running in the background.
+        let ran = Arc::new(AtomicBool::new(false));
+        let r2 = ran.clone();
+        let t0 = Instant::now();
+        let out = spawn_populator_and_maybe_wait(
+            None::<u32>,
+            window,
+            || {},
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                r2.store(true, Ordering::SeqCst);
+                Some(7u32)
+            },
+        );
+        let waited = t0.elapsed();
+        assert_eq!(out, None, "slow compute must defer, not block");
+        assert!(
+            waited < Duration::from_millis(120),
+            "blocked {waited:?} — must not wait out the 150ms compute"
+        );
+        let stop = Instant::now() + Duration::from_secs(2);
+        while !ran.load(Ordering::SeqCst) && Instant::now() < stop {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "background compute must still finish"
+        );
+
+        // (3) Slow compute WITH a positive stale value → serve stale
+        //     instantly, refresh in the background (the mtime-reload case).
+        let t0 = Instant::now();
+        let out = spawn_populator_and_maybe_wait(
+            Some(99u32),
+            window,
+            || {},
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+                Some(1u32)
+            },
+        );
+        let waited = t0.elapsed();
+        assert_eq!(out, Some(99), "stale must be served immediately");
+        assert!(
+            waited < Duration::from_millis(25),
+            "stale path blocked {waited:?} — must not wait for the refresh"
+        );
     }
 
     #[test]
     fn multiple_cold_generators_run_concurrently() {
-        // Two cold 400ms generators on one arg must cost ~max, not ~sum —
-        // the prewarm runs them on parallel threads with a shared wall.
-        use std::time::Instant;
-        let slow = |tag: &str| crate::spec_parser::Generator::Template {
-            script: vec![
+        // Two cold 400ms generators on one arg: detached populators run
+        // them in parallel, so both land in the cache after ~max(400ms),
+        // not ~sum(800ms). The first emit spawns both (returns nothing
+        // within the 50ms sync window); once both are cached a second
+        // emit collects them.
+        use std::time::{Duration, Instant};
+        let script = |tag: &str| {
+            vec![
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 format!("sleep 0.4; echo prewarm-{tag}"),
-            ],
+            ]
         };
         let arg = Arg {
-            generators: vec![slow("a"), slow("b")],
+            generators: vec![
+                crate::spec_parser::Generator::Template {
+                    script: script("conc-gen-a"),
+                },
+                crate::spec_parser::Generator::Template {
+                    script: script("conc-gen-b"),
+                },
+            ],
             ..Default::default()
         };
+        let ka: GeneratorCacheKey = (script("conc-gen-a"), None);
+        let kb: GeneratorCacheKey = (script("conc-gen-b"), None);
         let t0 = Instant::now();
+        // First emit spawns both populators concurrently.
+        let _ = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        wait_for_generator_cache(&ka, Duration::from_secs(3));
+        wait_for_generator_cache(&kb, Duration::from_secs(3));
+        let warm_elapsed = t0.elapsed();
+        // Both cached now — a second emit collects them.
         let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
-        let elapsed = t0.elapsed();
-        assert_eq!(out.len(), 2, "both generators must contribute: {out:?}");
-        // Serial would be ≥800ms; allow generous slack for slow CI while
-        // still catching a regression back to sequential execution.
+        assert_eq!(
+            out.len(),
+            2,
+            "both generators must contribute once warm: {out:?}"
+        );
+        // Parallel, not serial: two overlapping 400ms sleeps warm in
+        // ~max, well under the ~800ms a sequential run would take.
         assert!(
-            elapsed.as_millis() < 750,
-            "expected concurrent cold generators, took {elapsed:?}"
+            warm_elapsed.as_millis() < 750,
+            "expected concurrent cold generators, took {warm_elapsed:?}"
         );
     }
 
@@ -4066,7 +4404,15 @@ region = us-east-1
         sleep(Duration::from_secs(1));
         fs::write(&path, r#"{"name":"widget","description":"v2"}"#).unwrap();
 
-        let v2 = r.lookup("widget").expect("v2");
+        // Reload is now off the keystroke path (stale-while-revalidate): the
+        // first lookup after the mtime bump serves the old v1 spec while a
+        // background thread re-parses, so v2 lands on a subsequent lookup.
+        // Poll for it rather than asserting on the immediate return.
+        let v2 = wait_for_lookup(&r, "widget", Duration::from_secs(2), |s| {
+            s.as_ref()
+                .is_some_and(|sp| sp.description.as_deref() == Some("v2"))
+        })
+        .expect("v2 should load after reload");
         assert_eq!(v2.description.as_deref(), Some("v2"));
 
         fs::remove_dir_all(&tmp).ok();
@@ -5054,7 +5400,7 @@ region = us-east-1
         // running with a smaller --only filter) must drop the in-memory
         // entry so subsequent lookups miss. Watcher Remove events feed
         // the same `pending` set as Modify, so the path under test is
-        // the same drain → cache.remove → load_from_disk → None flow.
+        // the same drain → cache.remove → load_spec_from_dir → None flow.
         let tmp = tempfile::tempdir().unwrap();
         let spec_path = tmp.path().join("ephemeral.json");
         std::fs::write(&spec_path, r#"{"name":"ephemeral"}"#).unwrap();
@@ -5098,7 +5444,7 @@ region = us-east-1
     fn fs_watcher_reloads_gzipped_spec_files() {
         // Production caches ship as `*.json.gz` (10× smaller). The
         // watcher's stem extractor strips `.json.gz` the same as `.json`
-        // and `load_from_disk` falls back to the gz path when plain
+        // and `load_spec_from_dir` falls back to the gz path when plain
         // doesn't exist. End-to-end: rewriting a `.json.gz` should
         // re-render the cached spec on the next lookup.
         use std::io::Write;
@@ -5201,7 +5547,7 @@ region = us-east-1
                 },
             );
         }
-        reg.evict_overflow(&mut cache);
+        SpecRegistry::evict_spec_overflow(&mut cache);
         assert!(!cache.contains_key("cloud0"), "oldest must evict on bytes");
         assert!(cache.contains_key("cloud1") && cache.contains_key("cloud2"));
     }
@@ -5224,7 +5570,7 @@ region = us-east-1
                 tick: AtomicU64::new(reg.next_tick()),
             },
         );
-        reg.evict_overflow(&mut cache);
+        SpecRegistry::evict_spec_overflow(&mut cache);
         assert!(cache.contains_key("megacloud"));
     }
 

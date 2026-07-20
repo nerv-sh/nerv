@@ -2,6 +2,7 @@ name: release
 
 on:
   push:
+    branches: [main]
     tags:
       - "v*.*.*"
   workflow_dispatch:
@@ -11,7 +12,15 @@ on:
         required: true
 
 permissions:
-  contents: write # gh release create / upload
+  contents: write # gh release create / upload + read Cargo.toml
+  actions: write # gh workflow run homebrew-bump.yml
+
+# Serialize releases per ref: two quick main merges won't race on the
+# same version, and a manual tag release never cancels one already
+# building.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,8 +28,57 @@ env:
   RUST_CHANNEL: "1.85"
 
 jobs:
+  # Decide the tag + whether to cut a release. Cheap ubuntu gate so the
+  # expensive macOS build only runs when there's actually something to
+  # release.
+  gate:
+    name: decide release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.decide.outputs.tag }}
+      should_release: ${{ steps.decide.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: decide tag + whether to release
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # Manual: release the (already-existing) input tag.
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            # Direct tag push (v*.*.*): release that tag.
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            # Push to main: the Cargo.toml workspace version drives the
+            # tag. Release only when v<version> has no release yet AND the
+            # merge commit carries no [skip release] brake. So shipping =
+            # "bump Cargo.toml version"; every other merge is a no-op.
+            VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+            TAG="v${VERSION}"
+            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+            if git log -1 --format=%B | grep -qF '[skip release]'; then
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::[skip release] present — no release for ${TAG}."
+            elif gh release view "$TAG" >/dev/null 2>&1; then
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::${TAG} already released — bump Cargo.toml version to ship a new one."
+            else
+              echo "should_release=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Releasing ${TAG} from main."
+            fi
+          fi
+
   build:
     name: build (${{ matrix.target }})
+    needs: gate
+    if: needs.gate.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -69,13 +127,9 @@ jobs:
         id: stage
         run: |
           set -euo pipefail
-          # Resolve the release tag: prefer the workflow_dispatch
-          # input, fall back to GITHUB_REF_NAME on tag push.
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
+          # Tag is decided once by the gate job; on a main push
+          # GITHUB_REF_NAME is `main`, not a version.
+          TAG="${{ needs.gate.outputs.tag }}"
           VERSION="${TAG#v}"
           NAME="nerv-${VERSION}-${{ matrix.target }}"
           STAGE="staging/${NAME}"
@@ -103,21 +157,11 @@ jobs:
 
   release:
     name: gh release create
-    needs: build
+    needs: [gate, build]
+    if: needs.gate.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: resolve tag
-        id: tag
-        run: |
-          set -euo pipefail
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            TAG="${{ github.event.inputs.tag }}"
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: download all build artifacts
         uses: actions/download-artifact@v4
@@ -133,14 +177,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.tag.outputs.tag }}"
+          TAG="${{ needs.gate.outputs.tag }}"
           # `gh release create` is idempotent in spirit: create if
-          # missing, otherwise upload --clobber onto the existing
-          # release. The dispatch path assumes the tag already exists.
+          # missing (pointing the new tag at the built commit),
+          # otherwise upload --clobber onto the existing release (tag
+          # push / dispatch, where the tag already exists).
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" artifacts/* --clobber
           else
             gh release create "$TAG" artifacts/* \
+              --target "${{ github.sha }}" \
               --title "$TAG" \
-              --notes "Unsigned developer preview build of \`nerv\` + \`nervd\` for macOS (aarch64 + x86_64). Apple Developer ID signing/notarization arrives in a later release — until then, macOS Gatekeeper will warn on first launch. See README for install instructions."
+              --notes "Unsigned developer preview build of \`nerv\` + \`nervd\` for macOS (Apple Silicon). Apple Developer ID signing/notarization arrives in a later release — until then, macOS Gatekeeper will warn on first launch. See README for install instructions."
           fi
+
+      - name: bump Homebrew tap
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A release created with GITHUB_TOKEN does NOT emit a
+          # release:published event that can trigger homebrew-bump —
+          # GitHub blocks token-caused workflow cascades to prevent
+          # recursion (the same rule that stops our created tag from
+          # re-triggering this workflow). Dispatch it explicitly:
+          # workflow_dispatch is exempt from that rule, so the tap always
+          # tracks the release deterministically instead of via a
+          # cascade that silently no-ops.
+          gh workflow run homebrew-bump.yml -f tag="${{ needs.gate.outputs.tag }}" \
+            || echo "::warning::homebrew-bump dispatch failed — bump the tap manually"
