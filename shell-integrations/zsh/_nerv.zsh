@@ -458,14 +458,20 @@ __nerv_insert_selected() {
   local before="$LBUFFER"
   local after="$RBUFFER"
 
-  # Strip trailing partial word from `before` (the word the user
-  # was completing).
-  local pre
-  if [[ "$before" == *' '* ]]; then
-    pre="${before% *} "
-  else
-    pre=""
-  fi
+  # Strip trailing partial word from `before` (the word the user was
+  # completing). The split has to skip backslash-escaped whitespace or
+  # it cuts inside a path we ourselves quoted: `${before% *}` on
+  # `cd My\ Fol` yields `cd My\`, mangling the line on the second Tab.
+  # Mirrors the engine's tokenizer, which splits by the same rule.
+  local pre="" i=1 wstart=1 n=${#before}
+  while (( i <= n )); do
+    case "${before[i]}" in
+      '\') (( i += 2 )) ;;                       # escape swallows the next char
+      ' '|$'\t') (( i++ )); wstart=$i ;;         # real break: word starts after it
+      *) (( i++ )) ;;
+    esac
+  done
+  (( wstart > 1 )) && pre="${before[1,wstart-1]}"
 
   # Strip leading partial word from `after` (rest of the same word
   # when cursor is mid-token).
@@ -483,9 +489,28 @@ __nerv_insert_selected() {
   local sep=" "
   [[ "$insertion" == */ || "$insertion" == *= ]] && sep=""
 
+  # Shell-quote before splicing: macOS is full of paths with spaces
+  # (`Application Support`, `Google Drive`), and a raw insertion turns
+  # `cd My Folder/` into two words — zsh reads that as the `cd old new`
+  # substitution form and silently lands elsewhere. `(q)` is the
+  # backslash flavor, matching what zsh's own completion emits, and it
+  # leaves ordinary tokens (`checkout`, `--amend`, `--color=`) untouched.
+  #
+  # A leading `~/` must stay bare or tilde expansion dies (`(q)` would
+  # emit `\~/…`, a literal directory named `~`), so quote only the part
+  # after it. Quoting is a per-shell concern and deliberately lives here
+  # rather than in the engine, whose `insertion` is also matched against
+  # the typed prefix and shared with the bash/fish PTY path.
+  local ins_q
+  if [[ "$insertion" == '~/'* ]]; then
+    ins_q="~/${(q)${insertion#\~/}}"
+  else
+    ins_q="${(q)insertion}"
+  fi
+
   # Build full BUFFER and place CURSOR right after the insertion+sep.
-  BUFFER="${pre}${insertion}${sep}${post# }"
-  CURSOR=$(( ${#pre} + ${#insertion} + ${#sep} ))
+  BUFFER="${pre}${ins_q}${sep}${post# }"
+  CURSOR=$(( ${#pre} + ${#ins_q} + ${#sep} ))
 
   # Frecency: record the accept in the background so the next
   # completion request can boost it. Fire-and-forget — never

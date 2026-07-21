@@ -536,6 +536,14 @@ pub struct ParserResult {
     /// instead of the surrounding subcommand's positional args.
     /// `None` everywhere else.
     pub active_option_arg: Option<(String, usize)>,
+    /// Which positional slot of the current subcommand the cursor is
+    /// awaiting. `ArgState` already tracks this (advancing per consumed
+    /// token, saturating on a variadic tail); this exposes it so
+    /// `complete` can dispatch to `args[idx]` instead of assuming
+    /// `args[0]` — `git push origin <here>` is slot 1 (branch), not
+    /// slot 0 (remote). `None` once a non-variadic arg list is
+    /// exhausted, i.e. there is no legal positional left to complete.
+    pub subcommand_arg_index: Option<usize>,
     /// Options already consumed at the *current* subcommand level
     /// (cleared on each subcommand descend, mirroring the matcher's
     /// own repeat-rejection scope). `complete` uses this with
@@ -1044,11 +1052,21 @@ pub fn parse_arguments(spec: &Spec, tokens: &[Annotation], cursor: usize) -> Par
         _ => None,
     };
 
+    // Same idea for the positional slot: `has_more` gates it so an
+    // exhausted non-variadic list reports "no slot" rather than
+    // pointing past the end of `args`.
+    let subcommand_arg_index = state
+        .subcommand_args
+        .as_ref()
+        .filter(|args| args.has_more())
+        .map(|args| args.idx);
+
     ParserResult {
         annotations,
         cursor_context,
         subcommand_path: state.subcommand_path,
         active_option_arg,
+        subcommand_arg_index,
         consumed_options: state.consumed_options,
     }
 }
