@@ -248,6 +248,13 @@ __nerv_show_popup() {
   (( foot_hint + 2 > W )) && W=$(( foot_hint + 2 ))
   (( W > cap )) && W=$cap
   (( W < __NERV_WIDTH )) && W=$__NERV_WIDTH
+  # Terminal-width hard clamp LAST — the fixed minimum above must never
+  # push a row past the window edge: painted rows carry 2 leading spaces
+  # and the zle -R reservation blanks are W+4 cells, so anything wider
+  # than COLUMNS-4 wraps in a small window and tears the box apart.
+  local wmax=$(( term_cols - 4 ))
+  (( wmax < 8 )) && wmax=8
+  (( W > wmax )) && W=$wmax
 
   # hbar fills the cells BETWEEN the corner glyphs (╭…╮ / ├…┤ /
   # ╰…╯). Each border row is W cells total; corners take 2 cells,
@@ -289,6 +296,15 @@ __nerv_show_popup() {
   # " │" on the left and " │" on the right. Equals W - 2.
   local row_body=$(( W - 2 ))
 
+  # A narrow window can leave the cached display slot wider than the
+  # row body; clamp so the padded name can't push the right border past
+  # the box edge (" G " prefix = 2 + glyph slot cells).
+  local glyph_slot=1
+  (( has_wide_icon )) && glyph_slot=2
+  local disp_room=$(( row_body - 2 - glyph_slot ))
+  (( disp_room < 1 )) && disp_room=1
+  (( max_disp > disp_room )) && max_disp=$disp_room
+
   # "Immediately execute" sentinel row (Fig parity) — drawn ONLY at a
   # segment boundary (browsing), where it's row 0 and highlighted by
   # default (SELECTED==0). Hidden while the user filters a token. Content
@@ -297,6 +313,12 @@ __nerv_show_popup() {
   if (( __NERV_HAS_SENTINEL )); then
     local sent_txt="↩ Immediately execute"
     local sent_w=${(m)#sent_txt}
+    # Narrow window: truncate the label on a cell boundary so the
+    # sentinel row can't overflow the box either.
+    if (( sent_w > row_body - 1 )); then
+      sent_txt="${(mr:$(( row_body - 1 )):)sent_txt}"
+      sent_w=$(( row_body - 1 ))
+    fi
     local sent_pad_n=$(( row_body - 1 - sent_w ))
     (( sent_pad_n < 0 )) && sent_pad_n=0
     local sent_pad=""; repeat $sent_pad_n; do sent_pad+=" "; done
