@@ -269,9 +269,19 @@ __nerv_show_popup() {
   # --- Build plain-text lines for zle -R (space reservation) ---
   # zle -R doesn't interpret ANSI in its args, so we reserve space
   # with blanks first and overwrite with colored content via printf.
+  #
+  # Each blank must own a whole screen line. zle -R lists its status strings
+  # the way a completion list is drawn — COLUMNATED — so a box-width blank
+  # shares its line on a wide window and zsh reserves fewer lines than we
+  # asked for. The paint below walks down with ESC[B, which clamps at the
+  # bottom margin instead of scrolling, so a short reservation piles every
+  # remaining row onto the last screen line and the box collapses to its two
+  # borders. COLUMNS-3 leaves room for zsh's inter-column gap, so exactly one
+  # column fits at any width. Derivation + regression: e2e-zle-bottom.py.
   local -a plain=()
-  local blank=""
-  repeat $(( W + 4 )); do blank+=" "; done
+  local blank_w=$(( term_cols - 3 ))
+  (( blank_w < W + 4 )) && blank_w=$(( W + 4 ))
+  local blank="${(r:$blank_w:)}"
   # visible items + 4 chrome (top / divider / footer / bottom), + 1 for
   # the sentinel row when present.
   local plain_rows=$(( visible + 4 + __NERV_HAS_SENTINEL ))
