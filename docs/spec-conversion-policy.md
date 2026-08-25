@@ -356,7 +356,27 @@ Tier C 의 generator 함수를 QuickJS context 에 평가 → 결과 후보 반�
 (~10MB gzip + manifest) 를 동봉하고, Homebrew Formula 가 `pkgshare` 로
 `share/nerv/specs/` 에 설치한다. 엔진의 `paths::resolve_specs_dir()` 가
 user cache (`~/Library/Caches/nerv/specs/`) 에 spec 이 없을 때 이 번들을
-읽는다 — 로컬 `build-specs` 실행 (user cache) 은 번들을 override.
+읽는다 — 로컬 `build-specs` 실행 (user cache) 은 번들을 *통째로* override.
+
+### 6.1 사용자 overlay — `~/.config/nerv/specs/` (2026-08-25)
+
+upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없는 도구
+(`claude`, 사내 CLI, 개인 스크립트) 의 spec 을 번들 전체를 다시 빌드하지 않고
+**한 파일씩** 얹는 경로가 이 디렉터리다. 계약:
+
+| 항목 | 규칙 |
+|------|------|
+| 경로 | `~/.config/nerv/specs/<name>.json` 또는 `<name>.json.gz` (loader 가 둘 다 읽음, manifest 불필요) |
+| 해석 순서 | `paths::resolve_spec_layers()` → `SpecLayers { overlay, primary }`, 레지스트리 순서 = `[overlay (dir 이 존재할 때 — 비어 있어도 watch 대상), primary]`. primary = 기존 `resolve_specs_dir()` 체인 (user cache → bundled → user 경로). **`NERV_SPECS_DIR` 가 설정되면 그 dir 하나만** — 테스트 격리는 그대로 airtight |
+| 충돌 | 같은 stem 이 양쪽에 있으면 overlay **파일이 통째로** 이긴다. subcommand/option 단위 merge 없음 — 번들 spec 을 손보려면 복사해서 전체를 둔다 |
+| 파손 | overlay JSON 이 깨지면 그 stem 만 완성 없음 (negative cache, E2 와 동일). 다른 spec 은 영향 없음. `nerv doctor` 가 `user specs` 행을 red 로 표시 |
+| schema 게이트 (E5) | primary dir 의 `manifest.json` 만 검사. overlay 에는 manifest 를 두지 않는다 |
+| hot-reload | overlay dir 이 **데몬 부팅 시 존재**하면 FSEvents 로 파일 편집·추가·삭제가 다음 키스트로크에 반영. dir 을 부팅 *후* 만들었으면 `nerv stop && nerv start` 1회 |
+| uninstall | `~/.config/nerv/` 와 함께 삭제. 보존하려면 `nerv uninstall --keep-config` (uninstall-spec §2 행 6) |
+| 포맷 | `crates/nerv-engine/tests/fixtures/specs/*.json` 과 같은 JSON (`name` / `description` / `subcommands` / `options[].names` / `args`). 살아있는 예제 = `examples/specs/claude.json` |
+
+소비자 3곳 (daemon / `nerv doctor` / `nerv spec list`) 은 전부 `resolve_spec_layers()` 를
+쓴다 — 한 곳이라도 `resolve_specs_dir()` 단독으로 남으면 doctor 가 데몬과 다른 spec 을 진단한다.
 
 ---
 

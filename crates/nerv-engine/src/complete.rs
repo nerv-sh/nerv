@@ -67,7 +67,11 @@ const SPEC_CACHE_BYTE_BUDGET: usize = 200 << 20;
 const SPEC_LOAD_SYNC_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub struct SpecRegistry {
-    dir: Option<PathBuf>,
+    /// Spec layers, highest priority first. A stem resolves from the first
+    /// layer holding `<stem>.json` / `<stem>.json.gz` — so a user overlay
+    /// (`~/.config/nerv/specs/`) replaces the bundled file of the same name
+    /// wholesale. Empty for in-code registries (`empty()` + `insert`).
+    dirs: Vec<PathBuf>,
     /// Arc-wrapped so a background parse thread (see `lookup`) can insert
     /// its result after the keystroke that spawned it has already
     /// returned. All `.read()`/`.write()` call sites are unchanged — the
@@ -94,7 +98,7 @@ pub struct SpecRegistry {
 impl std::fmt::Debug for SpecRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpecRegistry")
-            .field("dir", &self.dir)
+            .field("dirs", &self.dirs)
             .field("cache", &self.cache)
             .field("watcher_active", &self._watcher.is_some())
             .finish()
@@ -104,7 +108,7 @@ impl std::fmt::Debug for SpecRegistry {
 impl Default for SpecRegistry {
     fn default() -> Self {
         Self {
-            dir: None,
+            dirs: Vec::new(),
             cache: Arc::new(RwLock::new(HashMap::new())),
             next_tick: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -144,10 +148,21 @@ impl SpecRegistry {
     /// restarting the daemon. The mtime check in `lookup` stays as a
     /// belt-and-suspenders fallback if the watcher fails or drops events.
     pub fn at_dir(dir: &Path) -> Self {
+        Self::at_dirs(std::slice::from_ref(&dir.to_path_buf()))
+    }
+
+    /// Build a registry over `dirs`, highest priority first. Each stem is
+    /// read from the first layer that has it (plain `.json` before `.json.gz`
+    /// *within* a layer, then the next layer) — a user overlay file replaces
+    /// the bundled one of the same name in full; there is no merge. One FS
+    /// watcher covers every layer that exists at construction; a layer that
+    /// is created later is still probed on lookup but not watched (restart
+    /// the daemon — `docs/spec-conversion-policy.md` §6.1 "사용자 overlay").
+    pub fn at_dirs(dirs: &[PathBuf]) -> Self {
         let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        let watcher = start_spec_watcher(dir, pending.clone());
+        let watcher = start_spec_watcher(dirs, pending.clone());
         Self {
-            dir: Some(dir.to_path_buf()),
+            dirs: dirs.to_vec(),
             cache: Arc::new(RwLock::new(HashMap::new())),
             next_tick: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -156,55 +171,45 @@ impl SpecRegistry {
         }
     }
 
-    /// Build a registry rooted at `dir` and eagerly scan it for parse
-    /// errors. Useful at daemon startup so problems show up in logs
-    /// without waiting for a user keystroke. Returns the registry +
-    /// every error encountered during the scan; positive results are
-    /// kept in the cache so subsequent lookups are O(1). FS watcher
-    /// is spawned the same way as `at_dir`.
-    pub fn load_dir(dir: &Path) -> (Self, Vec<SpecLoadError>) {
-        let registry = Self::at_dir(dir);
+    /// Build a registry over `dirs` (see `at_dirs`) and eagerly scan every
+    /// layer for parse errors. Useful for `nerv doctor` so problems show up
+    /// without waiting for a user keystroke. Returns the registry + every
+    /// error encountered; positive results are kept in the cache so
+    /// subsequent lookups are O(1). Layers are walked in priority order and
+    /// a stem already taken by a higher layer is skipped in lower ones —
+    /// including its parse errors, since that file is shadowed and never
+    /// read at runtime. A missing layer contributes nothing (no error).
+    pub fn load_dirs(dirs: &[PathBuf]) -> (Self, Vec<SpecLoadError>) {
+        let registry = Self::at_dirs(dirs);
         let mut errors = Vec::new();
-        let Ok(entries) = fs::read_dir(dir) else {
-            return (registry, errors);
-        };
+        let mut seen_stems = std::collections::HashSet::new();
         let mut cache = registry.cache.write().expect("cache poisoned");
-        for entry in entries.flatten() {
-            let path = entry.path();
-            // Accept both plain `.json` and gzipped `.json.gz`. Earlier
-            // versions skipped the latter, causing `nerv doctor` to
-            // report `0 specs loaded` against a populated `.json.gz`
-            // cache.
-            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let is_json = file_name.ends_with(".json");
-            let is_gz = file_name.ends_with(".json.gz");
-            if !is_json && !is_gz {
+        for (path, stem) in spec_files(dirs) {
+            if !seen_stems.insert(stem.clone()) {
                 continue;
             }
-            let mtime = path.metadata().and_then(|m| m.modified()).ok();
+            let meta = path.metadata().ok();
             match load_spec_file(&path) {
                 Ok(spec) => {
                     let key = if !spec.name.is_empty() {
                         spec.name.clone()
-                    } else if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        stem.to_string()
                     } else {
-                        continue;
+                        stem
                     };
                     let tick = registry.next_tick();
                     cache.insert(
                         key,
                         CacheEntry {
-                            mtime,
+                            mtime: meta.as_ref().and_then(|m| m.modified().ok()),
                             spec: Some(Arc::new(spec)),
                             // On-disk length (compressed for .gz) — close
                             // enough for a path that never evicts anyway.
-                            bytes: path.metadata().map(|m| m.len() as usize).unwrap_or(0),
+                            bytes: meta.as_ref().map(|m| m.len() as usize).unwrap_or(0),
                             tick: AtomicU64::new(tick),
                         },
                     );
-                    // No evict here: load_dir is the eager full scan (doctor,
-                    // short-lived), not the bounded lazy runtime cache.
+                    // No evict here: load_dirs is the eager full scan
+                    // (doctor, short-lived), not the bounded lazy cache.
                 }
                 Err(e) => errors.push(e),
             }
@@ -260,7 +265,9 @@ impl SpecRegistry {
         // `insert`) have nothing to load → miss is `None`; bail before the
         // in-flight claim so we never leave a slot claimed with no populator
         // to release it.
-        self.dir.as_ref()?;
+        if self.dirs.is_empty() {
+            return None;
+        }
         let claimed = self
             .inflight
             .lock()
@@ -269,9 +276,9 @@ impl SpecRegistry {
         if !claimed {
             return stale;
         }
-        // dir is Some (checked above) and never mutated after construction;
-        // clone only now that we're committed to spawning the parse.
-        let dir = self.dir.clone().expect("spec dir present");
+        // dirs is non-empty (checked above) and never mutated after
+        // construction; clone only now that we're committed to the parse.
+        let dirs = self.dirs.clone();
         let cache = Arc::clone(&self.cache);
         let next_tick = Arc::clone(&self.next_tick);
         let inflight = Arc::clone(&self.inflight);
@@ -286,7 +293,7 @@ impl SpecRegistry {
                 }
             },
             move || {
-                let (mtime, spec, bytes) = Self::load_spec_from_dir(&dir, &load_name);
+                let (mtime, spec, bytes) = Self::load_spec_from_dirs(&dirs, &load_name);
                 if let Ok(mut cache) = cache.write() {
                     let tick = next_tick.fetch_add(1, Ordering::Relaxed);
                     cache.insert(
@@ -347,38 +354,41 @@ impl SpecRegistry {
     /// stat() the file backing `name` (plain or .gz form) and return
     /// its mtime. `None` if the file doesn't exist or stat fails.
     fn disk_mtime(&self, name: &str) -> Option<std::time::SystemTime> {
-        let dir = self.dir.as_ref()?;
-        let plain = dir.join(format!("{name}.json"));
-        if let Ok(m) = plain.metadata() {
-            return m.modified().ok();
-        }
-        let gz = dir.join(format!("{name}.json.gz"));
-        if let Ok(m) = gz.metadata() {
-            return m.modified().ok();
-        }
-        None
+        Self::resolve_spec_file(&self.dirs, name).and_then(|(_, meta)| meta.modified().ok())
     }
 
-    fn load_spec_from_dir(
-        dir: &Path,
+    /// First on-disk file backing `name` across the layers, with the stat
+    /// that found it: plain `.json` before `.json.gz` within a layer, higher
+    /// layer before lower. This single probe order is what makes
+    /// `disk_mtime` and the loader agree on *which* file a stem means. One
+    /// `metadata()` per candidate — this runs on the keystroke fast path.
+    fn resolve_spec_file(dirs: &[PathBuf], name: &str) -> Option<(PathBuf, fs::Metadata)> {
+        dirs.iter().find_map(|dir| {
+            [
+                dir.join(format!("{name}.json")),
+                dir.join(format!("{name}.json.gz")),
+            ]
+            .into_iter()
+            .find_map(|p| p.metadata().ok().map(|m| (p, m)))
+        })
+    }
+
+    fn load_spec_from_dirs(
+        dirs: &[PathBuf],
         name: &str,
     ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
-        // Prefer plain JSON for human inspection; fall back to gzipped
-        // form (build-time compressed cache).
-        for path in [
-            dir.join(format!("{name}.json")),
-            dir.join(format!("{name}.json.gz")),
-        ] {
-            if path.exists() {
-                let mtime = path.metadata().and_then(|m| m.modified()).ok();
-                let (spec, bytes) = match crate::spec_loader::load_spec_file_with_size(&path) {
-                    Ok((spec, bytes)) => (Some(Arc::new(spec)), bytes),
-                    Err(_) => (None, 0),
-                };
-                return (mtime, spec, bytes);
-            }
-        }
-        (None, None, 0)
+        let Some((path, meta)) = Self::resolve_spec_file(dirs, name) else {
+            return (None, None, 0);
+        };
+        let mtime = meta.modified().ok();
+        // A file that fails to parse is a negative entry for its stem — it
+        // shadows any lower layer, so a broken overlay file silences that
+        // one command rather than falling through to the bundled spec.
+        let (spec, bytes) = match crate::spec_loader::load_spec_file_with_size(&path) {
+            Ok((spec, bytes)) => (Some(Arc::new(spec)), bytes),
+            Err(_) => (None, 0),
+        };
+        (mtime, spec, bytes)
     }
 
     /// Move every queued FS-watcher invalidation into the cache:
@@ -458,37 +468,67 @@ impl SpecRegistry {
             .unwrap_or_default()
     }
 
-    /// Walk the spec dir and return file-stem names of every
-    /// `*.json` or `*.json.gz` present. Used by `nerv spec list` so
-    /// the table reflects what's installed even before any lookup.
-    /// Deduplicates if both forms exist (plain wins).
+    /// Walk every spec layer and return the union of file-stem names of
+    /// all `*.json` / `*.json.gz` present, sorted, one entry per stem no
+    /// matter how many layers or forms carry it. Used by `nerv spec list`
+    /// so the table reflects what's installed even before any lookup;
+    /// which layer actually serves a stem is `stems_served_from`.
     pub fn dir_listing(&self) -> Vec<String> {
-        let Some(dir) = self.dir.as_ref() else {
+        if self.dirs.is_empty() {
             return self.cached_names();
-        };
-        let Ok(entries) = fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let mut seen = std::collections::BTreeSet::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let stem = match path.file_name().and_then(|s| s.to_str()) {
-                Some(s) if s.ends_with(".json.gz") => &s[..s.len() - 8],
-                Some(s) if s.ends_with(".json") => &s[..s.len() - 5],
-                _ => continue,
-            };
-            seen.insert(stem.to_string());
         }
-        seen.into_iter().collect()
+        self.listing_by_origin().into_keys().collect()
+    }
+
+    /// Stems whose backing file lives in `layer` *and* is the one the
+    /// registry would read (not shadowed by a higher layer). Lets `spec
+    /// list` / doctor mark overlay entries without re-probing the disk.
+    pub fn stems_served_from(&self, layer: &Path) -> Vec<String> {
+        self.listing_by_origin()
+            .into_iter()
+            .filter(|(_, origin)| *origin == layer)
+            .map(|(stem, _)| stem)
+            .collect()
+    }
+
+    /// One `read_dir` pass per layer, in priority order: stem → the layer
+    /// that serves it (first layer listing the stem wins, matching the
+    /// probe order of `resolve_spec_file`). Sorted by stem.
+    fn listing_by_origin(&self) -> std::collections::BTreeMap<String, &Path> {
+        let mut origin = std::collections::BTreeMap::new();
+        for dir in &self.dirs {
+            for (_, stem) in spec_files(std::slice::from_ref(dir)) {
+                origin.entry(stem).or_insert(dir.as_path());
+            }
+        }
+        origin
     }
 }
 
-/// Spawn a filesystem watcher over `dir` and forward changed-file
-/// events into `pending` as spec stems. Returns `None` when the
-/// watcher fails to start (the registry stays correct via mtime
-/// polling so this is a soft failure).
+/// Every spec file (`<stem>.json` / `<stem>.json.gz`) under `dirs`, in dir
+/// order, as `(path, stem)`. A dir that can't be read yields nothing — a
+/// missing overlay layer is normal, not an error.
+fn spec_files(dirs: &[PathBuf]) -> impl Iterator<Item = (PathBuf, String)> + '_ {
+    dirs.iter().flat_map(|dir| {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                spec_stem_from_path(&path).map(|stem| (path, stem))
+            })
+    })
+}
+
+/// Spawn one filesystem watcher over every layer in `dirs` and forward
+/// changed-file events into `pending` as spec stems (a stem is layer-
+/// agnostic: the drained lookup re-resolves which file wins). Returns
+/// `None` when the watcher fails to start or no layer could be watched
+/// (the registry stays correct via mtime polling so this is a soft
+/// failure); a layer that doesn't exist yet is skipped, not fatal.
 fn start_spec_watcher(
-    dir: &Path,
+    dirs: &[PathBuf],
     pending: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 ) -> Option<Box<dyn notify::Watcher + Send + Sync>> {
     use notify::{EventKind, RecursiveMode, Watcher};
@@ -516,8 +556,14 @@ fn start_spec_watcher(
         }
     })
     .ok()?;
-    // NonRecursive: the specs directory is flat (Caches/nerv/specs).
-    watcher.watch(dir, RecursiveMode::NonRecursive).ok()?;
+    // NonRecursive: every spec layer is a flat directory.
+    let watched = dirs
+        .iter()
+        .filter(|dir| watcher.watch(dir, RecursiveMode::NonRecursive).is_ok())
+        .count();
+    if watched == 0 {
+        return None;
+    }
     Some(Box::new(watcher))
 }
 
@@ -3773,7 +3819,7 @@ region = us-east-1
 
     #[test]
     fn registry_load_dir_handles_missing_dir() {
-        let (r, errs) = SpecRegistry::load_dir(Path::new("/tmp/nerv-nonexistent-xyz"));
+        let (r, errs) = SpecRegistry::load_dirs(&[PathBuf::from("/tmp/nerv-nonexistent-xyz")]);
         assert!(r.is_empty());
         assert!(errs.is_empty());
     }
@@ -3781,7 +3827,7 @@ region = us-east-1
     #[test]
     fn registry_load_dir_picks_up_workspace_fixtures() {
         let dir = workspace_fixture_specs_dir();
-        let (r, errs) = SpecRegistry::load_dir(&dir);
+        let (r, errs) = SpecRegistry::load_dirs(&[dir]);
         assert!(errs.is_empty(), "fixture load errors: {errs:?}");
         for name in [
             "git", "echo", "docker", "kubectl", "npm", "cargo", "gh", "brew", "make",
@@ -5579,6 +5625,143 @@ region = us-east-1
         );
         assert!(spec_stem_from_path(Path::new("/tmp/specs/.swap")).is_none());
         assert!(spec_stem_from_path(Path::new("/tmp/specs/git.json.bak")).is_none());
+    }
+
+    /// Two-layer helper: (overlay, bundled) tempdirs + a registry over
+    /// `[overlay, bundled]`. Files are written by the caller.
+    fn two_layers() -> (tempfile::TempDir, tempfile::TempDir) {
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap())
+    }
+
+    /// A user overlay file with the same stem as a bundled spec replaces it
+    /// wholesale — the bundled subcommands do not leak through (no merge).
+    #[test]
+    fn overlay_layer_wins_same_stem_wholesale() {
+        let (overlay, bundled) = two_layers();
+        std::fs::write(
+            bundled.path().join("foo.json"),
+            r#"{"name":"foo","subcommands":[{"name":"alpha"},{"name":"beta"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            overlay.path().join("foo.json"),
+            r#"{"name":"foo","subcommands":[{"name":"omega"}]}"#,
+        )
+        .unwrap();
+        let reg =
+            SpecRegistry::at_dirs(&[overlay.path().to_path_buf(), bundled.path().to_path_buf()]);
+        let foo = reg.lookup("foo").expect("overlay foo must load");
+        let names: Vec<_> = foo.subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["omega"], "overlay replaces, never merges");
+    }
+
+    /// A stem that exists only in the overlay resolves, and the listing is
+    /// the union of both layers without duplicates.
+    #[test]
+    fn overlay_only_stem_loads_and_listing_is_union() {
+        let (overlay, bundled) = two_layers();
+        std::fs::write(bundled.path().join("foo.json"), r#"{"name":"foo"}"#).unwrap();
+        std::fs::write(bundled.path().join("bar.json.gz"), b"not-read").unwrap();
+        std::fs::write(overlay.path().join("bar.json"), r#"{"name":"bar"}"#).unwrap();
+        std::fs::write(overlay.path().join("claude.json"), r#"{"name":"claude"}"#).unwrap();
+        let reg =
+            SpecRegistry::at_dirs(&[overlay.path().to_path_buf(), bundled.path().to_path_buf()]);
+        assert_eq!(
+            reg.lookup("claude").expect("overlay-only stem").name,
+            "claude"
+        );
+        // `bar`: overlay plain .json beats the bundled .json.gz.
+        assert_eq!(reg.lookup("bar").expect("bar").name, "bar");
+        assert_eq!(reg.dir_listing(), ["bar", "claude", "foo"]);
+        assert_eq!(
+            reg.stems_served_from(overlay.path()),
+            ["bar", "claude"],
+            "only stems actually read from the overlay are attributed to it"
+        );
+    }
+
+    /// A broken overlay file shadows its stem (negative, like E2) but
+    /// leaves every other spec untouched.
+    #[test]
+    fn broken_overlay_file_is_isolated_to_its_stem() {
+        let (overlay, bundled) = two_layers();
+        std::fs::write(bundled.path().join("foo.json"), r#"{"name":"foo"}"#).unwrap();
+        std::fs::write(bundled.path().join("baz.json"), r#"{"name":"baz"}"#).unwrap();
+        std::fs::write(overlay.path().join("foo.json"), "{ this is not json").unwrap();
+        let reg =
+            SpecRegistry::at_dirs(&[overlay.path().to_path_buf(), bundled.path().to_path_buf()]);
+        assert!(
+            reg.lookup("foo").is_none(),
+            "broken overlay shadows the bundled foo"
+        );
+        assert_eq!(
+            reg.lookup("baz").expect("unrelated spec still loads").name,
+            "baz"
+        );
+    }
+
+    /// The eager scan (doctor) honours the same shadowing: a lower-layer
+    /// file for a stem already taken is neither loaded nor reported.
+    #[test]
+    fn load_dirs_first_layer_shadows_lower_including_errors() {
+        let (overlay, bundled) = two_layers();
+        std::fs::write(bundled.path().join("foo.json"), "{ broken bundled").unwrap();
+        std::fs::write(bundled.path().join("bar.json"), r#"{"name":"bar"}"#).unwrap();
+        std::fs::write(
+            overlay.path().join("foo.json"),
+            r#"{"name":"foo","subcommands":[{"name":"omega"}]}"#,
+        )
+        .unwrap();
+        let (reg, errs) =
+            SpecRegistry::load_dirs(&[overlay.path().to_path_buf(), bundled.path().to_path_buf()]);
+        assert!(
+            errs.is_empty(),
+            "shadowed broken file must not be reported: {errs:?}"
+        );
+        assert_eq!(reg.len(), 2);
+        assert_eq!(reg.lookup("foo").unwrap().subcommands[0].name, "omega");
+    }
+
+    /// A layer that doesn't exist (typical: no overlay dir yet) is probed
+    /// harmlessly and the watcher still runs on the layers that do.
+    #[test]
+    fn missing_layer_is_not_fatal() {
+        let bundled = tempfile::tempdir().unwrap();
+        std::fs::write(bundled.path().join("foo.json"), r#"{"name":"foo"}"#).unwrap();
+        let ghost = bundled.path().join("no-such-overlay");
+        let reg = SpecRegistry::at_dirs(&[ghost, bundled.path().to_path_buf()]);
+        assert_eq!(reg.lookup("foo").expect("bundled still serves").name, "foo");
+        assert!(reg._watcher.is_some(), "watcher must survive one bad layer");
+    }
+
+    /// Editing an overlay file while the registry is live lands on the next
+    /// lookup — the single watcher covers both layers.
+    #[test]
+    fn overlay_edit_reloads_on_next_lookup() {
+        let (overlay, bundled) = two_layers();
+        std::fs::write(bundled.path().join("foo.json"), r#"{"name":"foo"}"#).unwrap();
+        let spec_path = overlay.path().join("foo.json");
+        std::fs::write(
+            &spec_path,
+            r#"{"name":"foo","subcommands":[{"name":"alpha"}]}"#,
+        )
+        .unwrap();
+        let reg =
+            SpecRegistry::at_dirs(&[overlay.path().to_path_buf(), bundled.path().to_path_buf()]);
+        assert_eq!(reg.lookup("foo").unwrap().subcommands.len(), 1);
+        std::fs::write(
+            &spec_path,
+            r#"{"name":"foo","subcommands":[{"name":"alpha"},{"name":"beta"}]}"#,
+        )
+        .unwrap();
+        let after = wait_for_lookup(&reg, "foo", std::time::Duration::from_secs(3), |got| {
+            got.as_ref().is_some_and(|s| s.subcommands.len() == 2)
+        });
+        assert_eq!(
+            after.expect("foo").subcommands.len(),
+            2,
+            "overlay edit not picked up"
+        );
     }
 
     #[test]

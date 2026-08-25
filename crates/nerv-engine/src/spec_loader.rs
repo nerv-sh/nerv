@@ -47,6 +47,17 @@ pub enum SpecLoadError {
     },
 }
 
+impl SpecLoadError {
+    /// The spec file this error is about — lets a caller attribute it to
+    /// the layer (bundled vs user overlay) the file lives in.
+    pub fn path(&self) -> &str {
+        match self {
+            Self::NotFound(p) => p,
+            Self::Io { path, .. } | Self::Parse { path, .. } => path,
+        }
+    }
+}
+
 /// Load a single spec from disk. Recognizes plain `*.json` and
 /// gzip-compressed `*.json.gz` by file extension.
 ///

@@ -37,34 +37,36 @@ async fn main() -> anyhow::Result<()> {
     // the binary (brew `share/nerv/specs` or tarball `specs/`) → user
     // path. A fresh `brew install` user completes against the bundle
     // without ever running build-specs.
-    let specs_dir = paths::resolve_specs_dir().expect("HOME present (just checked)");
+    // Primary = env override → populated user cache → bundled set; the
+    // user overlay `~/.config/nerv/specs/` (if the dir exists) is layered
+    // on top — a stem there replaces the bundled file wholesale. The E5
+    // schema gate below looks at the primary dir only.
+    let layers = paths::resolve_spec_layers().expect("HOME present (just checked)");
 
     // Lazy registry: no upfront disk scan. Specs are read on first
     // lookup and cached. Startup stays O(1) even with 700+ specs.
-    let registry = Arc::new(SpecRegistry::at_dir(&specs_dir));
-    info!(
-        specs_dir = %specs_dir.display(),
-        "spec registry initialized (lazy)"
-    );
+    let registry = Arc::new(SpecRegistry::at_dirs(&layers.dirs()));
+    info!(layers = ?layers, "spec registry initialized (lazy)");
 
     // E5: reject a spec cache built for a different schema version
     // (error-states.md §3.5). On mismatch the daemon stays up but every
     // Complete returns empty with this reason, which the CLI bridge turns
     // into the grey ZLE hint. A missing manifest is tolerated.
-    let schema_block: Arc<Option<String>> = Arc::new(match manifest::check_schema(&specs_dir) {
-        manifest::SchemaStatus::Mismatch { found } => {
-            let reason = format!(
-                "spec schema mismatch — daemon expects v{}, found v{found}",
-                manifest::SUPPORTED_SCHEMA_VERSION
-            );
-            error!(
-                "{reason}. Run: brew reinstall nerv (or: nerv doctor). \
+    let schema_block: Arc<Option<String>> =
+        Arc::new(match manifest::check_schema(&layers.primary) {
+            manifest::SchemaStatus::Mismatch { found } => {
+                let reason = format!(
+                    "spec schema mismatch — daemon expects v{}, found v{found}",
+                    manifest::SUPPORTED_SCHEMA_VERSION
+                );
+                error!(
+                    "{reason}. Run: brew reinstall nerv (or: nerv doctor). \
                  Autocomplete disabled until resolved."
-            );
-            Some(reason)
-        }
-        _ => None,
-    });
+                );
+                Some(reason)
+            }
+            _ => None,
+        });
 
     // Frecency: per-spec usage history that nudges repeat picks to
     // the top of suggestion lists. Persisted as a TSV next to specs.

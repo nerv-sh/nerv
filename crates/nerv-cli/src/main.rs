@@ -535,11 +535,10 @@ fn build_doctor_report() -> DoctorReport {
 fn check_schema_version(r: &mut DoctorReport) {
     // env override → populated user cache → bundled (brew share/ or
     // tarball specs/) → user path. Same chain the daemon reads.
-    let specs_dir = match paths::resolve_specs_dir() {
-        Some(d) => d,
-        None => return,
+    let Some(layers) = paths::resolve_spec_layers() else {
+        return;
     };
-    match nerv_engine::manifest::check_schema(&specs_dir) {
+    match nerv_engine::manifest::check_schema(&layers.primary) {
         nerv_engine::manifest::SchemaStatus::Ok => r.push(
             DoctorLevel::Ok,
             "spec schema",
@@ -843,47 +842,76 @@ fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
 
 /// E2 + E5: specs loaded + parse errors.
 fn check_specs(r: &mut DoctorReport) {
-    // Same resolution chain the daemon uses (env → user cache →
-    // bundled), so doctor reports the dir completions actually read.
-    let specs_dir = match paths::resolve_specs_dir() {
-        Some(d) => d,
-        None => {
-            r.push(DoctorLevel::Err, "specs", "HOME unset".into(), None);
-            return;
-        }
+    // Same layered chain the daemon reads (overlay → env/user cache →
+    // bundled), so doctor reports the specs completions actually use.
+    let Some(layers) = paths::resolve_spec_layers() else {
+        r.push(DoctorLevel::Err, "specs", "HOME unset".into(), None);
+        return;
     };
-    if !specs_dir.exists() {
+    check_specs_in(r, &layers);
+}
+
+/// Doctor rows for a concrete layer list (`resolve_spec_layers` shape:
+/// primary last, optional user overlay first). Split out so the rows are
+/// unit-testable against tempdirs without touching HOME.
+fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
+    let primary = &layers.primary;
+    if !primary.exists() {
         r.push(
             DoctorLevel::Warn,
             "specs",
-            format!("dir missing: {}", specs_dir.display()),
+            format!("dir missing: {}", primary.display()),
             Some("reinstall nerv (brew reinstall nerv) or run build-specs".into()),
         );
         return;
     }
-    // Doctor eager-scans (load_dir) so it can report parse errors up
+    // Doctor eager-scans (load_dirs) so it can report parse errors up
     // front, rather than waiting for a user keystroke to surface E2.
-    let (registry, errs) = SpecRegistry::load_dir(&specs_dir);
+    let (registry, errs) = SpecRegistry::load_dirs(&layers.dirs());
     let count = registry.len();
-    let err_count = errs.len();
-    if err_count == 0 && count == 0 {
+    // The overlay (if any) gets its own row: a broken user file must read
+    // as "your file", not as a corrupt install. Every error names its file,
+    // so split on which layer the file lives in.
+    let overlay = layers.overlay.as_deref();
+    let (overlay_errs, primary_errs): (Vec<_>, Vec<_>) = errs
+        .iter()
+        .partition(|e| overlay.is_some_and(|o| std::path::Path::new(e.path()).starts_with(o)));
+    if errs.is_empty() && count == 0 {
         r.push(
             DoctorLevel::Warn,
             "specs",
             "0 specs loaded".into(),
-            Some(format!("populate {}", specs_dir.display())),
+            Some(format!("populate {}", primary.display())),
         );
         return;
     }
-    if err_count > 0 {
+    if !primary_errs.is_empty() {
         r.push(
             DoctorLevel::Err,
             "spec health",
-            format!("{err_count} disabled: {}", errs[0]),
+            format!("{} disabled: {}", primary_errs.len(), primary_errs[0]),
             Some("run: brew reinstall nerv".into()),
         );
     }
     r.push(DoctorLevel::Ok, "specs", format!("{count} loaded"), None);
+    if let Some(o) = overlay {
+        let served = registry.stems_served_from(o).len();
+        if overlay_errs.is_empty() {
+            r.push(
+                DoctorLevel::Ok,
+                "user specs",
+                format!("{served} in {}", o.display()),
+                None,
+            );
+        } else {
+            r.push(
+                DoctorLevel::Err,
+                "user specs",
+                format!("{} disabled: {}", overlay_errs.len(), overlay_errs[0]),
+                Some(format!("fix or remove that file in {}", o.display())),
+            );
+        }
+    }
 }
 
 fn cmd_start() -> anyhow::Result<()> {
@@ -1086,22 +1114,35 @@ fn process_alive(_pid: u32) -> bool {
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
-    let specs_dir = paths::resolve_specs_dir()
+    let layers = paths::resolve_spec_layers()
         .ok_or_else(|| anyhow::anyhow!("HOME unset and NERV_SPECS_DIR not set"))?;
-
-    if !specs_dir.exists() {
-        println!("(no specs at {})", specs_dir.display());
-        return Ok(());
+    for line in spec_list_lines(&layers) {
+        println!("{line}");
     }
+    Ok(())
+}
 
-    let registry = SpecRegistry::at_dir(&specs_dir);
+/// The `nerv spec list` table for a concrete layer list (primary last,
+/// optional user overlay first): union of every layer, one row per stem,
+/// overlay-served stems marked `*` after TIER with a legend at the end.
+/// Rows that fail to load are skipped with a stderr note (doctor has the
+/// detail). Pure over `layers` so it is unit-testable.
+fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
+    let primary = &layers.primary;
+    if !primary.exists() {
+        return vec![format!("(no specs at {})", primary.display())];
+    }
+    let registry = SpecRegistry::at_dirs(&layers.dirs());
     let names = registry.dir_listing();
     if names.is_empty() {
-        println!("(no specs found in {})", specs_dir.display());
-        return Ok(());
+        return vec![format!("(no specs found in {})", primary.display())];
     }
+    let overlay = layers.overlay.as_deref();
+    let from_overlay: std::collections::HashSet<String> = overlay
+        .map(|o| registry.stems_served_from(o).into_iter().collect())
+        .unwrap_or_default();
 
-    println!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS");
+    let mut lines = vec![format!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS")];
     for name in names {
         let Some(spec) = registry.lookup(&name) else {
             eprintln!("  ⚠ {name}: load error (run nerv doctor)");
@@ -1109,9 +1150,18 @@ fn cmd_spec_list() -> anyhow::Result<()> {
         };
         let (subs, opts) = count_tree(spec.as_ref());
         let tier = compute_tier(spec.as_ref());
-        println!("{name:<18} {subs:>5} {opts:>5}  {tier}");
+        let mark = if from_overlay.contains(&name) {
+            "*"
+        } else {
+            ""
+        };
+        lines.push(format!("{name:<18} {subs:>5} {opts:>5}  {tier}{mark}"));
     }
-    Ok(())
+    if let Some(o) = overlay {
+        lines.push(String::new());
+        lines.push(format!("* = served from {} (user overlay)", o.display()));
+    }
+    lines
 }
 
 /// Recursive count of subcommands + options across the whole spec tree.
@@ -2119,6 +2169,153 @@ mod tests {
         let got = resolve_pty_bin_for_init(nerv.to_str().unwrap()).unwrap();
         assert_eq!(std::path::PathBuf::from(got), pty);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Two-layer fixture: (overlay, primary) under a fresh temp dir.
+    fn overlay_layers(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("nerv-layers-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let overlay = root.join("overlay");
+        let primary = root.join("primary");
+        std::fs::create_dir_all(&overlay).unwrap();
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::write(
+            primary.join("git.json"),
+            r#"{"name":"git","subcommands":[{"name":"status"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(primary.join("echo.json"), r#"{"name":"echo"}"#).unwrap();
+        (overlay, primary)
+    }
+
+    fn layers_of(
+        overlay: Option<std::path::PathBuf>,
+        primary: std::path::PathBuf,
+    ) -> paths::SpecLayers {
+        paths::SpecLayers { overlay, primary }
+    }
+
+    fn doctor_labels(r: &DoctorReport) -> Vec<(String, String)> {
+        r.entries
+            .iter()
+            .map(|e| (e.label.clone(), format!("{:?}", e.level)))
+            .collect()
+    }
+
+    /// Overlay present and healthy → a green `user specs` row counting only
+    /// the stems it actually serves; `specs` counts the union.
+    #[test]
+    fn doctor_reports_user_specs_row_for_healthy_overlay() {
+        let (overlay, primary) = overlay_layers("healthy");
+        std::fs::write(overlay.join("claude.json"), r#"{"name":"claude"}"#).unwrap();
+        std::fs::write(overlay.join("echo.json"), r#"{"name":"echo"}"#).unwrap();
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_of(Some(overlay.clone()), primary));
+        let rows = doctor_labels(&r);
+        assert_eq!(
+            rows,
+            [
+                ("specs".to_string(), "Ok".to_string()),
+                ("user specs".into(), "Ok".into())
+            ]
+        );
+        assert_eq!(
+            r.entries[0].detail, "3 loaded",
+            "union: git + echo(overlay) + claude"
+        );
+        assert_eq!(r.entries[1].detail, format!("2 in {}", overlay.display()));
+    }
+
+    /// A broken overlay file is *the user's* problem: red `user specs` row
+    /// with a fix-the-file hint, while the primary `specs` row stays green
+    /// (no "reinstall nerv" advice for a typo in ~/.config).
+    #[test]
+    fn doctor_isolates_broken_overlay_file_to_user_specs_row() {
+        let (overlay, primary) = overlay_layers("broken");
+        std::fs::write(overlay.join("claude.json"), "{ not json").unwrap();
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_of(Some(overlay.clone()), primary));
+        let rows = doctor_labels(&r);
+        assert_eq!(
+            rows,
+            [
+                ("specs".to_string(), "Ok".to_string()),
+                ("user specs".into(), "Err".into())
+            ]
+        );
+        assert!(
+            r.entries[1].detail.starts_with("1 disabled: "),
+            "{}",
+            r.entries[1].detail
+        );
+        assert_eq!(
+            r.entries[1].hint.as_deref(),
+            Some(format!("fix or remove that file in {}", overlay.display()).as_str())
+        );
+    }
+
+    /// No overlay layer → no `user specs` row at all (fresh install output
+    /// is byte-for-byte the pre-overlay doctor).
+    #[test]
+    fn doctor_omits_user_specs_row_without_overlay() {
+        let (_overlay, primary) = overlay_layers("none");
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_of(None, primary));
+        assert_eq!(doctor_labels(&r), [("specs".to_string(), "Ok".to_string())]);
+        assert_eq!(r.entries[0].detail, "2 loaded");
+    }
+
+    /// `spec list` shows the union once per stem, marks overlay-served rows
+    /// with `*`, and closes with the legend.
+    #[test]
+    fn spec_list_marks_overlay_rows_and_adds_legend() {
+        let (overlay, primary) = overlay_layers("list");
+        std::fs::write(overlay.join("claude.json"), r#"{"name":"claude"}"#).unwrap();
+        std::fs::write(
+            overlay.join("echo.json"),
+            r#"{"name":"echo","options":[{"names":["-z"]}]}"#,
+        )
+        .unwrap();
+        let lines = spec_list_lines(&layers_of(Some(overlay.clone()), primary));
+        let names: Vec<&str> = lines[1..4]
+            .iter()
+            .map(|l| l.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["claude", "echo", "git"],
+            "union, sorted, no duplicate echo"
+        );
+        assert!(
+            lines[1].ends_with('*'),
+            "claude is overlay-served: {}",
+            lines[1]
+        );
+        assert!(
+            lines[2].ends_with('*'),
+            "echo overridden by overlay: {}",
+            lines[2]
+        );
+        assert!(!lines[3].ends_with('*'), "git is bundled: {}", lines[3]);
+        assert!(
+            lines[2].contains("    0     1"),
+            "overlay echo (1 option) wins: {}",
+            lines[2]
+        );
+        assert_eq!(
+            lines.last().unwrap(),
+            &format!("* = served from {} (user overlay)", overlay.display())
+        );
+    }
+
+    /// Without an overlay the table has no marks and no legend — unchanged
+    /// output for every existing user.
+    #[test]
+    fn spec_list_without_overlay_has_no_marks_or_legend() {
+        let (_overlay, primary) = overlay_layers("plain");
+        let lines = spec_list_lines(&layers_of(None, primary));
+        assert_eq!(lines.len(), 3, "header + 2 rows, no legend: {lines:?}");
+        assert!(lines.iter().all(|l| !l.ends_with('*')));
     }
 
     /// `count_tree` walks the spec tree and returns (subs, opts). The
