@@ -535,11 +535,10 @@ fn build_doctor_report() -> DoctorReport {
 fn check_schema_version(r: &mut DoctorReport) {
     // env override → populated user cache → bundled (brew share/ or
     // tarball specs/) → user path. Same chain the daemon reads.
-    let specs_dir = match paths::resolve_specs_dir() {
-        Some(d) => d,
-        None => return,
+    let Some(layers) = paths::resolve_spec_layers() else {
+        return;
     };
-    match nerv_engine::manifest::check_schema(&specs_dir) {
+    match nerv_engine::manifest::check_schema(&layers.primary) {
         nerv_engine::manifest::SchemaStatus::Ok => r.push(
             DoctorLevel::Ok,
             "spec schema",
@@ -855,16 +854,8 @@ fn check_specs(r: &mut DoctorReport) {
 /// Doctor rows for a concrete layer list (`resolve_spec_layers` shape:
 /// primary last, optional user overlay first). Split out so the rows are
 /// unit-testable against tempdirs without touching HOME.
-fn check_specs_in(r: &mut DoctorReport, layers: &[std::path::PathBuf]) {
-    let Some(primary) = layers.last() else {
-        r.push(
-            DoctorLevel::Err,
-            "specs",
-            "no spec dir resolved".into(),
-            None,
-        );
-        return;
-    };
+fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
+    let primary = &layers.primary;
     if !primary.exists() {
         r.push(
             DoctorLevel::Warn,
@@ -876,27 +867,16 @@ fn check_specs_in(r: &mut DoctorReport, layers: &[std::path::PathBuf]) {
     }
     // Doctor eager-scans (load_dirs) so it can report parse errors up
     // front, rather than waiting for a user keystroke to surface E2.
-    let (registry, errs) = SpecRegistry::load_dirs(layers);
+    let (registry, errs) = SpecRegistry::load_dirs(&layers.dirs());
     let count = registry.len();
     // The overlay (if any) gets its own row: a broken user file must read
-    // as "your file", not as a corrupt install. Its errors are the subset of
-    // `errs` that came from overlay files (a shadowed bundled file is never
-    // read, so nothing else can originate there).
-    let overlay = (layers.len() > 1).then(|| &layers[0]);
-    let overlay_errs: std::collections::HashSet<String> = overlay
-        .map(|o| {
-            SpecRegistry::load_dir(o)
-                .1
-                .iter()
-                .map(|e| e.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let primary_errs: Vec<&nerv_engine::spec_loader::SpecLoadError> = errs
+    // as "your file", not as a corrupt install. Every error names its file,
+    // so split on which layer the file lives in.
+    let overlay = layers.overlay.as_deref();
+    let (overlay_errs, primary_errs): (Vec<_>, Vec<_>) = errs
         .iter()
-        .filter(|e| !overlay_errs.contains(&e.to_string()))
-        .collect();
-    if primary_errs.is_empty() && overlay_errs.is_empty() && count == 0 {
+        .partition(|e| overlay.is_some_and(|o| std::path::Path::new(e.path()).starts_with(o)));
+    if errs.is_empty() && count == 0 {
         r.push(
             DoctorLevel::Warn,
             "specs",
@@ -924,12 +904,10 @@ fn check_specs_in(r: &mut DoctorReport, layers: &[std::path::PathBuf]) {
                 None,
             );
         } else {
-            let mut first: Vec<&String> = overlay_errs.iter().collect();
-            first.sort();
             r.push(
                 DoctorLevel::Err,
                 "user specs",
-                format!("{} disabled: {}", overlay_errs.len(), first[0]),
+                format!("{} disabled: {}", overlay_errs.len(), overlay_errs[0]),
                 Some(format!("fix or remove that file in {}", o.display())),
             );
         }
@@ -1149,19 +1127,17 @@ fn cmd_spec_list() -> anyhow::Result<()> {
 /// overlay-served stems marked `*` after TIER with a legend at the end.
 /// Rows that fail to load are skipped with a stderr note (doctor has the
 /// detail). Pure over `layers` so it is unit-testable.
-fn spec_list_lines(layers: &[std::path::PathBuf]) -> Vec<String> {
-    let Some(primary) = layers.last() else {
-        return vec!["(no spec dir resolved)".into()];
-    };
+fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
+    let primary = &layers.primary;
     if !primary.exists() {
         return vec![format!("(no specs at {})", primary.display())];
     }
-    let registry = SpecRegistry::at_dirs(layers);
+    let registry = SpecRegistry::at_dirs(&layers.dirs());
     let names = registry.dir_listing();
     if names.is_empty() {
         return vec![format!("(no specs found in {})", primary.display())];
     }
-    let overlay = (layers.len() > 1).then(|| &layers[0]);
+    let overlay = layers.overlay.as_deref();
     let from_overlay: std::collections::HashSet<String> = overlay
         .map(|o| registry.stems_served_from(o).into_iter().collect())
         .unwrap_or_default();
@@ -2212,6 +2188,13 @@ mod tests {
         (overlay, primary)
     }
 
+    fn layers_of(
+        overlay: Option<std::path::PathBuf>,
+        primary: std::path::PathBuf,
+    ) -> paths::SpecLayers {
+        paths::SpecLayers { overlay, primary }
+    }
+
     fn doctor_labels(r: &DoctorReport) -> Vec<(String, String)> {
         r.entries
             .iter()
@@ -2227,7 +2210,7 @@ mod tests {
         std::fs::write(overlay.join("claude.json"), r#"{"name":"claude"}"#).unwrap();
         std::fs::write(overlay.join("echo.json"), r#"{"name":"echo"}"#).unwrap();
         let mut r = DoctorReport::default();
-        check_specs_in(&mut r, &[overlay.clone(), primary]);
+        check_specs_in(&mut r, &layers_of(Some(overlay.clone()), primary));
         let rows = doctor_labels(&r);
         assert_eq!(
             rows,
@@ -2251,7 +2234,7 @@ mod tests {
         let (overlay, primary) = overlay_layers("broken");
         std::fs::write(overlay.join("claude.json"), "{ not json").unwrap();
         let mut r = DoctorReport::default();
-        check_specs_in(&mut r, &[overlay.clone(), primary]);
+        check_specs_in(&mut r, &layers_of(Some(overlay.clone()), primary));
         let rows = doctor_labels(&r);
         assert_eq!(
             rows,
@@ -2277,7 +2260,7 @@ mod tests {
     fn doctor_omits_user_specs_row_without_overlay() {
         let (_overlay, primary) = overlay_layers("none");
         let mut r = DoctorReport::default();
-        check_specs_in(&mut r, &[primary]);
+        check_specs_in(&mut r, &layers_of(None, primary));
         assert_eq!(doctor_labels(&r), [("specs".to_string(), "Ok".to_string())]);
         assert_eq!(r.entries[0].detail, "2 loaded");
     }
@@ -2293,7 +2276,7 @@ mod tests {
             r#"{"name":"echo","options":[{"names":["-z"]}]}"#,
         )
         .unwrap();
-        let lines = spec_list_lines(&[overlay.clone(), primary]);
+        let lines = spec_list_lines(&layers_of(Some(overlay.clone()), primary));
         let names: Vec<&str> = lines[1..4]
             .iter()
             .map(|l| l.split_whitespace().next().unwrap())
@@ -2330,7 +2313,7 @@ mod tests {
     #[test]
     fn spec_list_without_overlay_has_no_marks_or_legend() {
         let (_overlay, primary) = overlay_layers("plain");
-        let lines = spec_list_lines(&[primary]);
+        let lines = spec_list_lines(&layers_of(None, primary));
         assert_eq!(lines.len(), 3, "header + 2 rows, no legend: {lines:?}");
         assert!(lines.iter().all(|l| !l.ends_with('*')));
     }

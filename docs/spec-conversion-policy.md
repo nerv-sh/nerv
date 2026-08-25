@@ -367,7 +367,7 @@ upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없�
 | 항목 | 규칙 |
 |------|------|
 | 경로 | `~/.config/nerv/specs/<name>.json` 또는 `<name>.json.gz` (loader 가 둘 다 읽음, manifest 불필요) |
-| 해석 순서 | `paths::resolve_spec_layers()` = `[overlay (spec 이 1개 이상 있을 때), primary]`. primary = 기존 `resolve_specs_dir()` 체인 (user cache → bundled → user 경로). **`NERV_SPECS_DIR` 가 설정되면 그 dir 하나만** — 테스트 격리는 그대로 airtight |
+| 해석 순서 | `paths::resolve_spec_layers()` → `SpecLayers { overlay, primary }`, 레지스트리 순서 = `[overlay (dir 이 존재할 때 — 비어 있어도 watch 대상), primary]`. primary = 기존 `resolve_specs_dir()` 체인 (user cache → bundled → user 경로). **`NERV_SPECS_DIR` 가 설정되면 그 dir 하나만** — 테스트 격리는 그대로 airtight |
 | 충돌 | 같은 stem 이 양쪽에 있으면 overlay **파일이 통째로** 이긴다. subcommand/option 단위 merge 없음 — 번들 spec 을 손보려면 복사해서 전체를 둔다 |
 | 파손 | overlay JSON 이 깨지면 그 stem 만 완성 없음 (negative cache, E2 와 동일). 다른 spec 은 영향 없음. `nerv doctor` 가 `user specs` 행을 red 로 표시 |
 | schema 게이트 (E5) | primary dir 의 `manifest.json` 만 검사. overlay 에는 manifest 를 두지 않는다 |

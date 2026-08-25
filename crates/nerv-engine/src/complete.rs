@@ -167,67 +167,47 @@ impl SpecRegistry {
         }
     }
 
-    /// Build a registry rooted at `dir` and eagerly scan it for parse
-    /// errors. Useful at daemon startup so problems show up in logs
-    /// without waiting for a user keystroke. Returns the registry +
-    /// every error encountered during the scan; positive results are
-    /// kept in the cache so subsequent lookups are O(1). FS watcher
-    /// is spawned the same way as `at_dir`.
-    pub fn load_dir(dir: &Path) -> (Self, Vec<SpecLoadError>) {
-        Self::load_dirs(std::slice::from_ref(&dir.to_path_buf()))
-    }
-
-    /// Eager scan over layered dirs (see `at_dirs`). Layers are walked in
-    /// priority order and a stem already taken by a higher layer is skipped
-    /// in lower ones — including its parse errors, since that file is
-    /// shadowed and never read at runtime. A missing layer contributes
-    /// nothing (no error): the overlay dir is optional.
+    /// Build a registry over `dirs` (see `at_dirs`) and eagerly scan every
+    /// layer for parse errors. Useful for `nerv doctor` so problems show up
+    /// without waiting for a user keystroke. Returns the registry + every
+    /// error encountered; positive results are kept in the cache so
+    /// subsequent lookups are O(1). Layers are walked in priority order and
+    /// a stem already taken by a higher layer is skipped in lower ones —
+    /// including its parse errors, since that file is shadowed and never
+    /// read at runtime. A missing layer contributes nothing (no error).
     pub fn load_dirs(dirs: &[PathBuf]) -> (Self, Vec<SpecLoadError>) {
         let registry = Self::at_dirs(dirs);
         let mut errors = Vec::new();
         let mut seen_stems = std::collections::HashSet::new();
         let mut cache = registry.cache.write().expect("cache poisoned");
-        for dir in dirs {
-            let Ok(entries) = fs::read_dir(dir) else {
+        for (path, stem) in spec_files(dirs) {
+            if !seen_stems.insert(stem.clone()) {
                 continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                // Accept both plain `.json` and gzipped `.json.gz`. Earlier
-                // versions skipped the latter, causing `nerv doctor` to
-                // report `0 specs loaded` against a populated `.json.gz`
-                // cache.
-                let Some(stem) = spec_stem_from_path(&path) else {
-                    continue;
-                };
-                if !seen_stems.insert(stem.clone()) {
-                    continue;
+            }
+            let meta = path.metadata().ok();
+            match load_spec_file(&path) {
+                Ok(spec) => {
+                    let key = if !spec.name.is_empty() {
+                        spec.name.clone()
+                    } else {
+                        stem
+                    };
+                    let tick = registry.next_tick();
+                    cache.insert(
+                        key,
+                        CacheEntry {
+                            mtime: meta.as_ref().and_then(|m| m.modified().ok()),
+                            spec: Some(Arc::new(spec)),
+                            // On-disk length (compressed for .gz) — close
+                            // enough for a path that never evicts anyway.
+                            bytes: meta.as_ref().map(|m| m.len() as usize).unwrap_or(0),
+                            tick: AtomicU64::new(tick),
+                        },
+                    );
+                    // No evict here: load_dirs is the eager full scan
+                    // (doctor, short-lived), not the bounded lazy cache.
                 }
-                let mtime = path.metadata().and_then(|m| m.modified()).ok();
-                match load_spec_file(&path) {
-                    Ok(spec) => {
-                        let key = if !spec.name.is_empty() {
-                            spec.name.clone()
-                        } else {
-                            stem
-                        };
-                        let tick = registry.next_tick();
-                        cache.insert(
-                            key,
-                            CacheEntry {
-                                mtime,
-                                spec: Some(Arc::new(spec)),
-                                // On-disk length (compressed for .gz) — close
-                                // enough for a path that never evicts anyway.
-                                bytes: path.metadata().map(|m| m.len() as usize).unwrap_or(0),
-                                tick: AtomicU64::new(tick),
-                            },
-                        );
-                        // No evict here: load_dirs is the eager full scan
-                        // (doctor, short-lived), not the bounded lazy cache.
-                    }
-                    Err(e) => errors.push(e),
-                }
+                Err(e) => errors.push(e),
             }
         }
         drop(cache);
@@ -370,22 +350,22 @@ impl SpecRegistry {
     /// stat() the file backing `name` (plain or .gz form) and return
     /// its mtime. `None` if the file doesn't exist or stat fails.
     fn disk_mtime(&self, name: &str) -> Option<std::time::SystemTime> {
-        Self::resolve_spec_path(&self.dirs, name)
-            .and_then(|p| p.metadata().and_then(|m| m.modified()).ok())
+        Self::resolve_spec_file(&self.dirs, name).and_then(|(_, meta)| meta.modified().ok())
     }
 
-    /// First on-disk file backing `name` across the layers: plain `.json`
-    /// before `.json.gz` within a layer, higher layer before lower. This
-    /// single probe order is what makes `disk_mtime` and the loader agree
-    /// on *which* file a stem means.
-    fn resolve_spec_path(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
+    /// First on-disk file backing `name` across the layers, with the stat
+    /// that found it: plain `.json` before `.json.gz` within a layer, higher
+    /// layer before lower. This single probe order is what makes
+    /// `disk_mtime` and the loader agree on *which* file a stem means. One
+    /// `metadata()` per candidate — this runs on the keystroke fast path.
+    fn resolve_spec_file(dirs: &[PathBuf], name: &str) -> Option<(PathBuf, fs::Metadata)> {
         dirs.iter().find_map(|dir| {
             [
                 dir.join(format!("{name}.json")),
                 dir.join(format!("{name}.json.gz")),
             ]
             .into_iter()
-            .find(|p| p.exists())
+            .find_map(|p| p.metadata().ok().map(|m| (p, m)))
         })
     }
 
@@ -393,10 +373,10 @@ impl SpecRegistry {
         dirs: &[PathBuf],
         name: &str,
     ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
-        let Some(path) = Self::resolve_spec_path(dirs, name) else {
+        let Some((path, meta)) = Self::resolve_spec_file(dirs, name) else {
             return (None, None, 0);
         };
-        let mtime = path.metadata().and_then(|m| m.modified()).ok();
+        let mtime = meta.modified().ok();
         // A file that fails to parse is a negative entry for its stem — it
         // shadows any lower layer, so a broken overlay file silences that
         // one command rather than falling through to the bundled spec.
@@ -493,33 +473,48 @@ impl SpecRegistry {
         if self.dirs.is_empty() {
             return self.cached_names();
         }
-        let mut seen = std::collections::BTreeSet::new();
-        for dir in &self.dirs {
-            let Ok(entries) = fs::read_dir(dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                if let Some(stem) = spec_stem_from_path(&entry.path()) {
-                    seen.insert(stem);
-                }
-            }
-        }
-        seen.into_iter().collect()
+        self.listing_by_origin().into_keys().collect()
     }
 
     /// Stems whose backing file lives in `layer` *and* is the one the
     /// registry would read (not shadowed by a higher layer). Lets `spec
-    /// list` mark overlay entries without re-probing the disk itself.
+    /// list` / doctor mark overlay entries without re-probing the disk.
     pub fn stems_served_from(&self, layer: &Path) -> Vec<String> {
-        self.dir_listing()
+        self.listing_by_origin()
             .into_iter()
-            .filter(|stem| {
-                Self::resolve_spec_path(&self.dirs, stem)
-                    .and_then(|p| p.parent().map(|d| d == layer))
-                    .unwrap_or(false)
-            })
+            .filter(|(_, origin)| *origin == layer)
+            .map(|(stem, _)| stem)
             .collect()
     }
+
+    /// One `read_dir` pass per layer, in priority order: stem → the layer
+    /// that serves it (first layer listing the stem wins, matching the
+    /// probe order of `resolve_spec_file`). Sorted by stem.
+    fn listing_by_origin(&self) -> std::collections::BTreeMap<String, &Path> {
+        let mut origin = std::collections::BTreeMap::new();
+        for dir in &self.dirs {
+            for (_, stem) in spec_files(std::slice::from_ref(dir)) {
+                origin.entry(stem).or_insert(dir.as_path());
+            }
+        }
+        origin
+    }
+}
+
+/// Every spec file (`<stem>.json` / `<stem>.json.gz`) under `dirs`, in dir
+/// order, as `(path, stem)`. A dir that can't be read yields nothing — a
+/// missing overlay layer is normal, not an error.
+fn spec_files(dirs: &[PathBuf]) -> impl Iterator<Item = (PathBuf, String)> + '_ {
+    dirs.iter().flat_map(|dir| {
+        fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                spec_stem_from_path(&path).map(|stem| (path, stem))
+            })
+    })
 }
 
 /// Spawn one filesystem watcher over every layer in `dirs` and forward
@@ -558,12 +553,10 @@ fn start_spec_watcher(
     })
     .ok()?;
     // NonRecursive: every spec layer is a flat directory.
-    let mut watched = 0usize;
-    for dir in dirs {
-        if watcher.watch(dir, RecursiveMode::NonRecursive).is_ok() {
-            watched += 1;
-        }
-    }
+    let watched = dirs
+        .iter()
+        .filter(|dir| watcher.watch(dir, RecursiveMode::NonRecursive).is_ok())
+        .count();
     if watched == 0 {
         return None;
     }
@@ -3822,7 +3815,7 @@ region = us-east-1
 
     #[test]
     fn registry_load_dir_handles_missing_dir() {
-        let (r, errs) = SpecRegistry::load_dir(Path::new("/tmp/nerv-nonexistent-xyz"));
+        let (r, errs) = SpecRegistry::load_dirs(&[PathBuf::from("/tmp/nerv-nonexistent-xyz")]);
         assert!(r.is_empty());
         assert!(errs.is_empty());
     }
@@ -3830,7 +3823,7 @@ region = us-east-1
     #[test]
     fn registry_load_dir_picks_up_workspace_fixtures() {
         let dir = workspace_fixture_specs_dir();
-        let (r, errs) = SpecRegistry::load_dir(&dir);
+        let (r, errs) = SpecRegistry::load_dirs(&[dir]);
         assert!(errs.is_empty(), "fixture load errors: {errs:?}");
         for name in [
             "git", "echo", "docker", "kubectl", "npm", "cargo", "gh", "brew", "make",

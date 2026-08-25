@@ -4,6 +4,7 @@
 //! over the hand-rolled fixture pack it must load, complete, and be
 //! attributed to the overlay layer, while the bundled fixtures keep serving.
 
+use nerv_engine::complete::workspace_fixture_specs_dir;
 use nerv_engine::{SpecRegistry, complete};
 use std::path::PathBuf;
 
@@ -13,15 +14,9 @@ fn examples_dir() -> PathBuf {
         .collect()
 }
 
-fn fixtures_dir() -> PathBuf {
-    [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", "specs"]
-        .iter()
-        .collect()
-}
-
 #[test]
 fn claude_example_loads_as_overlay_and_completes() {
-    let reg = SpecRegistry::at_dirs(&[examples_dir(), fixtures_dir()]);
+    let reg = SpecRegistry::at_dirs(&[examples_dir(), workspace_fixture_specs_dir()]);
 
     let claude = reg
         .lookup("claude")
