@@ -30,7 +30,7 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 | 3 | 데몬 소켓 | `~/Library/Caches/nerv/nervd.sock` | nervd | 삭제 |
 | 4 | 데몬 로그 | `~/Library/Logs/nerv/nervd.log` (+ 회전 파일) | nervd | 삭제 |
 | 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 | 다양 | 삭제 |
-| 6 | 설정 디렉터리 | `~/.config/nerv/` (XDG_CONFIG_HOME 존중) | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존) |
+| 6 | 설정 디렉터리 | `~/.config/nerv/` (XDG_CONFIG_HOME 존중) — `nerv.toml` + **`specs/` 사용자 overlay spec** (spec-conversion-policy §6.1) 포함 | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존 — overlay spec 도 `--keep-config` 로만 살아남는다) |
 | 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, 동봉 spec (`…/share/nerv/specs/`), formula 메타 | `brew install` | brew 가 처리 |
 
 > **v1.0 비대상**: LaunchAgent (`~/Library/LaunchAgents/sh.nerv.nervd.plist`) — v1.0 은 `nerv start` / `stop` 수동 라이프사이클만. 자동 기동 도입 (v1.x) 시점에 본 인벤토리에 8번으로 추가하고 §4 step 6 도 함께 부활한다.
@@ -213,10 +213,11 @@ THEN:
 ### 7.7 `--keep-config`
 
 ```
-GIVEN: ~/.config/nerv/config.toml 사용자 편집 존재
+GIVEN: ~/.config/nerv/config.toml 사용자 편집 + ~/.config/nerv/specs/claude.json (overlay spec) 존재
 WHEN: nerv uninstall --keep-config
 THEN:
   - ~/.config/nerv/config.toml 보존
+  - ~/.config/nerv/specs/claude.json 보존 (overlay 는 설정 디렉터리의 일부)
   - 그 외 모든 흔적 §2 인벤토리대로 제거
 ```
 

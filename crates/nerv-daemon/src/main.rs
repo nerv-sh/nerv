@@ -38,12 +38,17 @@ async fn main() -> anyhow::Result<()> {
     // path. A fresh `brew install` user completes against the bundle
     // without ever running build-specs.
     let specs_dir = paths::resolve_specs_dir().expect("HOME present (just checked)");
+    // Layered on top: the user overlay `~/.config/nerv/specs/` (only when
+    // it holds a spec) — a stem there replaces the bundled file wholesale.
+    // The E5 schema gate below stays on the primary dir only.
+    let layers = paths::resolve_spec_layers().expect("HOME present (just checked)");
 
     // Lazy registry: no upfront disk scan. Specs are read on first
     // lookup and cached. Startup stays O(1) even with 700+ specs.
-    let registry = Arc::new(SpecRegistry::at_dir(&specs_dir));
+    let registry = Arc::new(SpecRegistry::at_dirs(&layers));
     info!(
         specs_dir = %specs_dir.display(),
+        layers = ?layers,
         "spec registry initialized (lazy)"
     );
 

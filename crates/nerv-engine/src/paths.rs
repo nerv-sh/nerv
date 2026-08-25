@@ -120,6 +120,42 @@ pub fn resolve_specs_dir() -> Option<PathBuf> {
     user
 }
 
+/// `~/.config/nerv/specs/` — user-authored overlay specs (tools upstream
+/// never covered: `claude`, in-house CLIs). Lives under the *config* dir,
+/// not the cache, because it is user content: `nerv uninstall` removes it
+/// with `~/.config/nerv/` unless `--keep-config`
+/// (`docs/uninstall-spec.md` §2 row 6).
+pub fn user_specs_dir() -> Option<PathBuf> {
+    config_dir().map(|c| c.join(SPECS_SUBDIR))
+}
+
+/// Every spec dir a consumer (daemon, doctor, `spec list`) reads, highest
+/// priority first — hand the whole list to `SpecRegistry::at_dirs`, which
+/// resolves each stem from the first layer that has it (a user file
+/// replaces the bundled one of the same name wholesale; no merge).
+///
+/// 1. `NERV_SPECS_DIR` set → that dir **alone**. Test isolation must stay
+///    airtight, so a developer's real overlay never leaks into an e2e run.
+/// 2. Otherwise `[user overlay (only if it holds a spec), primary]`, where
+///    primary is the unchanged [`resolve_specs_dir`] chain. The overlay is
+///    skipped while empty so a fresh install keeps a single layer.
+///
+/// Contract: `docs/spec-conversion-policy.md` §6.1 "사용자 overlay".
+pub fn resolve_spec_layers() -> Option<Vec<PathBuf>> {
+    if let Some(d) = std::env::var_os("NERV_SPECS_DIR") {
+        return Some(vec![PathBuf::from(d)]);
+    }
+    let primary = resolve_specs_dir()?;
+    let mut layers = Vec::with_capacity(2);
+    if let Some(overlay) = user_specs_dir() {
+        if has_specs(&overlay) {
+            layers.push(overlay);
+        }
+    }
+    layers.push(primary);
+    Some(layers)
+}
+
 #[cfg(test)]
 mod tests {
     //! The `PathBuf` shapes returned here ARE the contract
@@ -250,6 +286,58 @@ mod tests {
         with_temp_home(|home| {
             let got = resolve_specs_dir();
             assert_eq!(got, Some(home.join("Library/Caches/nerv/specs")));
+        });
+    }
+
+    #[test]
+    fn user_specs_dir_under_config() {
+        with_temp_home(|home| {
+            assert_eq!(user_specs_dir().unwrap(), home.join(".config/nerv/specs"));
+        });
+    }
+
+    /// No overlay (dir missing) → a single layer, the primary chain's
+    /// answer — a fresh install behaves exactly as before.
+    #[test]
+    fn layers_without_overlay_is_primary_only() {
+        with_temp_home(|home| {
+            let got = resolve_spec_layers().unwrap();
+            assert_eq!(got, vec![home.join("Library/Caches/nerv/specs")]);
+        });
+    }
+
+    /// An overlay holding at least one spec goes *first*; an overlay dir
+    /// that exists but is empty is skipped (has_specs gate).
+    #[test]
+    fn layers_put_populated_overlay_before_primary() {
+        with_temp_home(|home| {
+            let overlay = home.join(".config/nerv/specs");
+            std::fs::create_dir_all(&overlay).unwrap();
+            assert_eq!(
+                resolve_spec_layers().unwrap().len(),
+                1,
+                "empty overlay dir must not add a layer"
+            );
+            std::fs::write(overlay.join("claude.json"), "{}").unwrap();
+            let got = resolve_spec_layers().unwrap();
+            assert_eq!(got, vec![overlay, home.join("Library/Caches/nerv/specs")]);
+        });
+    }
+
+    /// `NERV_SPECS_DIR` collapses resolution to that one dir even when a
+    /// populated overlay exists — e2e isolation must not see the
+    /// developer's own overlay.
+    #[test]
+    fn layers_env_override_excludes_overlay() {
+        with_temp_home(|home| {
+            let overlay = home.join(".config/nerv/specs");
+            std::fs::create_dir_all(&overlay).unwrap();
+            std::fs::write(overlay.join("claude.json"), "{}").unwrap();
+            let over = home.join("override-specs");
+            unsafe { std::env::set_var("NERV_SPECS_DIR", &over) };
+            let got = resolve_spec_layers();
+            unsafe { std::env::remove_var("NERV_SPECS_DIR") };
+            assert_eq!(got, Some(vec![over]));
         });
     }
 
