@@ -36,14 +36,18 @@ use std::sync::{Arc, RwLock};
 /// and the spec is re-read. Adds ~1µs per lookup on top of the
 /// HashMap hit (cheap compared to even the fastest UDS roundtrip).
 /// Max positive (spec-bearing) entries the lazy lookup cache keeps resident.
-/// A big cloud spec parses large (aws → ~290MB RSS) and reloads slowly
-/// (~220ms), so this bound is generous: actively-used specs stay warm (every
-/// lookup re-bumps their LRU order), and eviction only fires once more than
-/// this many *distinct* specs are in play — freeing the least-recently-used
-/// so an always-on daemon doesn't grow without limit. Negative entries are
-/// byte-free and don't count. Only the lazy `lookup` / `insert` paths evict;
-/// the eager `load_dir` scan (doctor, short-lived) is exempt.
-const SPEC_CACHE_CAP: usize = 16;
+/// Memory is really bounded by [`SPEC_CACHE_BYTE_BUDGET`]; this count is a
+/// safety net against pathological churn, so it must sit above a day's
+/// working set. At 16 it did not: a normal mix (git/cd/yarn/z/bat/vi/rm/
+/// npx/aws/adb/mv/open/cp/mkdir/brew/pnpm/node …) is 17+ distinct specs, so
+/// the ~120MB aws spec — well inside the byte budget — was evicted by
+/// *count* and paid its ~200ms cold parse (one empty keystroke) again and
+/// again (dogfood, 2026-08-25). Actively-used specs stay warm (every lookup
+/// re-bumps their LRU order); eviction only fires once more than this many
+/// *distinct* specs are in play, or the byte budget is exceeded. Negative
+/// entries are byte-free and don't count. Only the lazy `lookup` / `insert`
+/// paths evict; the eager `load_dir` scan (doctor, short-lived) is exempt.
+const SPEC_CACHE_CAP: usize = 64;
 
 /// Soft byte budget for positive entries, measured in decompressed
 /// source-JSON bytes (the parsed tree runs roughly 2× that). The count
@@ -5764,6 +5768,20 @@ region = us-east-1
         );
     }
 
+    /// A positive cache entry as the lazy loader would insert it, with
+    /// `bytes` standing in for the source-JSON size the byte budget sums.
+    fn positive_entry(reg: &SpecRegistry, name: &str, bytes: usize) -> CacheEntry {
+        CacheEntry {
+            mtime: None,
+            spec: Some(Arc::new(Spec {
+                name: name.into(),
+                ..Default::default()
+            })),
+            bytes,
+            tick: AtomicU64::new(reg.next_tick()),
+        }
+    }
+
     /// The byte budget evicts LRU entries even when the entry COUNT is
     /// under the cap — 16 cloud-scale specs would otherwise be GBs.
     #[test]
@@ -5775,15 +5793,7 @@ region = us-east-1
         for i in 0..3 {
             cache.insert(
                 format!("cloud{i}"),
-                CacheEntry {
-                    mtime: None,
-                    spec: Some(Arc::new(Spec {
-                        name: format!("cloud{i}"),
-                        ..Default::default()
-                    })),
-                    bytes: 80 << 20,
-                    tick: AtomicU64::new(reg.next_tick()),
-                },
+                positive_entry(&reg, &format!("cloud{i}"), 80 << 20),
             );
         }
         SpecRegistry::evict_spec_overflow(&mut cache);
@@ -5799,15 +5809,7 @@ region = us-east-1
         let mut cache = HashMap::new();
         cache.insert(
             "megacloud".to_string(),
-            CacheEntry {
-                mtime: None,
-                spec: Some(Arc::new(Spec {
-                    name: "megacloud".into(),
-                    ..Default::default()
-                })),
-                bytes: 300 << 20,
-                tick: AtomicU64::new(reg.next_tick()),
-            },
+            positive_entry(&reg, "megacloud", 300 << 20),
         );
         SpecRegistry::evict_spec_overflow(&mut cache);
         assert!(cache.contains_key("megacloud"));
@@ -5830,6 +5832,32 @@ region = us-east-1
             });
             assert!(reg.lookup("hot").is_some(), "actively-used spec evicted");
         }
+    }
+
+    /// Regression (2026-08-25): a day's working set — one cloud-scale spec
+    /// plus twenty small ones — fits the byte budget with room to spare, so
+    /// the *count* cap must not be what throws the big spec out. At cap 16
+    /// `aws` was evicted by ordinary `git`/`cd`/`yarn` churn and re-paid its
+    /// ~200ms cold parse (an empty first keystroke) every time.
+    #[test]
+    fn count_cap_survives_daily_working_set() {
+        let reg = SpecRegistry::empty();
+        let mut cache = HashMap::new();
+        // Oldest entry: the big one (aws-sized source, 122MB < 200MB budget).
+        cache.insert("aws".to_string(), positive_entry(&reg, "aws", 122 << 20));
+        // Then twenty small specs (≤ 1MB each), touched after aws.
+        for i in 0..20 {
+            cache.insert(
+                format!("small{i}"),
+                positive_entry(&reg, &format!("small{i}"), 1 << 20),
+            );
+        }
+        SpecRegistry::evict_spec_overflow(&mut cache);
+        assert!(
+            cache.contains_key("aws"),
+            "big spec inside the byte budget must survive small-spec churn"
+        );
+        assert_eq!(cache.len(), 21, "nothing should evict under either bound");
     }
 
     #[test]
