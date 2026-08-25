@@ -5768,6 +5768,20 @@ region = us-east-1
         );
     }
 
+    /// A positive cache entry as the lazy loader would insert it, with
+    /// `bytes` standing in for the source-JSON size the byte budget sums.
+    fn positive_entry(reg: &SpecRegistry, name: &str, bytes: usize) -> CacheEntry {
+        CacheEntry {
+            mtime: None,
+            spec: Some(Arc::new(Spec {
+                name: name.into(),
+                ..Default::default()
+            })),
+            bytes,
+            tick: AtomicU64::new(reg.next_tick()),
+        }
+    }
+
     /// The byte budget evicts LRU entries even when the entry COUNT is
     /// under the cap — 16 cloud-scale specs would otherwise be GBs.
     #[test]
@@ -5779,15 +5793,7 @@ region = us-east-1
         for i in 0..3 {
             cache.insert(
                 format!("cloud{i}"),
-                CacheEntry {
-                    mtime: None,
-                    spec: Some(Arc::new(Spec {
-                        name: format!("cloud{i}"),
-                        ..Default::default()
-                    })),
-                    bytes: 80 << 20,
-                    tick: AtomicU64::new(reg.next_tick()),
-                },
+                positive_entry(&reg, &format!("cloud{i}"), 80 << 20),
             );
         }
         SpecRegistry::evict_spec_overflow(&mut cache);
@@ -5803,15 +5809,7 @@ region = us-east-1
         let mut cache = HashMap::new();
         cache.insert(
             "megacloud".to_string(),
-            CacheEntry {
-                mtime: None,
-                spec: Some(Arc::new(Spec {
-                    name: "megacloud".into(),
-                    ..Default::default()
-                })),
-                bytes: 300 << 20,
-                tick: AtomicU64::new(reg.next_tick()),
-            },
+            positive_entry(&reg, "megacloud", 300 << 20),
         );
         SpecRegistry::evict_spec_overflow(&mut cache);
         assert!(cache.contains_key("megacloud"));
@@ -5846,31 +5844,12 @@ region = us-east-1
         let reg = SpecRegistry::empty();
         let mut cache = HashMap::new();
         // Oldest entry: the big one (aws-sized source, 122MB < 200MB budget).
-        cache.insert(
-            "aws".to_string(),
-            CacheEntry {
-                mtime: None,
-                spec: Some(Arc::new(Spec {
-                    name: "aws".into(),
-                    ..Default::default()
-                })),
-                bytes: 122 << 20,
-                tick: AtomicU64::new(reg.next_tick()),
-            },
-        );
+        cache.insert("aws".to_string(), positive_entry(&reg, "aws", 122 << 20));
         // Then twenty small specs (≤ 1MB each), touched after aws.
         for i in 0..20 {
             cache.insert(
                 format!("small{i}"),
-                CacheEntry {
-                    mtime: None,
-                    spec: Some(Arc::new(Spec {
-                        name: format!("small{i}"),
-                        ..Default::default()
-                    })),
-                    bytes: 1 << 20,
-                    tick: AtomicU64::new(reg.next_tick()),
-                },
+                positive_entry(&reg, &format!("small{i}"), 1 << 20),
             );
         }
         SpecRegistry::evict_spec_overflow(&mut cache);
