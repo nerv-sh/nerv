@@ -1,0 +1,883 @@
+{
+  "name": "claude",
+  "description": "Claude Code — agentic coding in your terminal",
+  "subcommands": [
+    {
+      "name": "agents",
+      "description": "Manage background agents"
+    },
+    {
+      "name": "auth",
+      "description": "Manage authentication",
+      "subcommands": [
+        {
+          "name": "login",
+          "description": "Sign in to your Anthropic account"
+        },
+        {
+          "name": "logout",
+          "description": "Log out from your Anthropic account"
+        },
+        {
+          "name": "status",
+          "description": "Show authentication status"
+        }
+      ]
+    },
+    {
+      "name": "auto-mode",
+      "description": "Inspect or reset auto mode classifier configuration"
+    },
+    {
+      "name": "doctor",
+      "description": "Check the health of your Claude Code installation"
+    },
+    {
+      "name": "gateway",
+      "description": "Run the enterprise auth/telemetry gateway"
+    },
+    {
+      "name": "import",
+      "description": "Import config from another AI coding agent",
+      "args": [
+        {
+          "name": "source",
+          "is_optional": true
+        }
+      ]
+    },
+    {
+      "name": "install",
+      "description": "Install Claude Code native build",
+      "args": [
+        {
+          "name": "target",
+          "is_optional": true,
+          "suggestions": [
+            "stable",
+            "latest"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "mcp",
+      "description": "Configure and manage MCP servers",
+      "subcommands": [
+        {
+          "name": "add",
+          "description": "Add an MCP server",
+          "options": [
+            {
+              "names": [
+                "-s",
+                "--scope"
+              ],
+              "description": "Configuration scope (local, user, or project)",
+              "args": [
+                {
+                  "name": "scope"
+                }
+              ]
+            },
+            {
+              "names": [
+                "-t",
+                "--transport"
+              ],
+              "description": "Transport type (stdio, sse, http)",
+              "args": [
+                {
+                  "name": "transport"
+                }
+              ]
+            },
+            {
+              "names": [
+                "-e",
+                "--env"
+              ],
+              "description": "Set environment variables",
+              "args": [
+                {
+                  "name": "KEY=value"
+                }
+              ]
+            },
+            {
+              "names": [
+                "-H",
+                "--header"
+              ],
+              "description": "Set HTTP headers for SSE and HTTP transports",
+              "args": [
+                {
+                  "name": "header"
+                }
+              ]
+            }
+          ],
+          "args": [
+            {
+              "name": "name"
+            },
+            {
+              "name": "commandOrUrl"
+            },
+            {
+              "name": "args",
+              "is_optional": true,
+              "is_variadic": true
+            }
+          ]
+        },
+        {
+          "name": "add-from-claude-desktop",
+          "description": "Import MCP servers from Claude Desktop"
+        },
+        {
+          "name": "add-json",
+          "description": "Add an MCP server with a JSON string",
+          "args": [
+            {
+              "name": "name"
+            },
+            {
+              "name": "json"
+            }
+          ]
+        },
+        {
+          "name": "get",
+          "description": "Get details about an MCP server",
+          "args": [
+            {
+              "name": "name"
+            }
+          ]
+        },
+        {
+          "name": "list",
+          "description": "List configured MCP servers"
+        },
+        {
+          "name": "login",
+          "description": "Authenticate with an MCP server",
+          "args": [
+            {
+              "name": "name"
+            }
+          ]
+        },
+        {
+          "name": "logout",
+          "description": "Clear stored OAuth credentials for an MCP server",
+          "args": [
+            {
+              "name": "name"
+            }
+          ]
+        },
+        {
+          "name": "remove",
+          "description": "Remove an MCP server",
+          "options": [
+            {
+              "names": [
+                "-s",
+                "--scope"
+              ],
+              "description": "Configuration scope",
+              "args": [
+                {
+                  "name": "scope"
+                }
+              ]
+            }
+          ],
+          "args": [
+            {
+              "name": "name"
+            }
+          ]
+        },
+        {
+          "name": "reset-project-choices",
+          "description": "Reset all approved and rejected project-scoped servers"
+        },
+        {
+          "name": "serve",
+          "description": "Start the Claude Code MCP server"
+        }
+      ]
+    },
+    {
+      "name": "plugin",
+      "description": "Manage Claude Code plugins",
+      "subcommands": [
+        {
+          "name": "details",
+          "description": "Show a plugin's component inventory",
+          "args": [
+            {
+              "name": "name"
+            }
+          ]
+        },
+        {
+          "name": "disable",
+          "description": "Disable an enabled plugin",
+          "args": [
+            {
+              "name": "plugin",
+              "is_optional": true
+            }
+          ]
+        },
+        {
+          "name": "enable",
+          "description": "Enable a disabled plugin",
+          "args": [
+            {
+              "name": "plugin"
+            }
+          ]
+        },
+        {
+          "name": "eval",
+          "description": "Run eval cases",
+          "args": [
+            {
+              "name": "target",
+              "is_optional": true
+            }
+          ]
+        },
+        {
+          "name": "init",
+          "description": "Scaffold a new plugin",
+          "args": [
+            {
+              "name": "name"
+            }
+          ]
+        },
+        {
+          "name": "install",
+          "description": "Install a plugin from available marketplaces",
+          "args": [
+            {
+              "name": "plugin"
+            }
+          ]
+        },
+        {
+          "name": "list",
+          "description": "List installed plugins"
+        },
+        {
+          "name": "marketplace",
+          "description": "Manage Claude Code marketplaces",
+          "subcommands": [
+            {
+              "name": "add",
+              "description": "Add a marketplace",
+              "args": [
+                {
+                  "name": "source"
+                }
+              ]
+            },
+            {
+              "name": "list",
+              "description": "List configured marketplaces"
+            },
+            {
+              "name": "remove",
+              "description": "Remove a marketplace",
+              "args": [
+                {
+                  "name": "name"
+                }
+              ]
+            },
+            {
+              "name": "update",
+              "description": "Update marketplace metadata",
+              "args": [
+                {
+                  "name": "name",
+                  "is_optional": true
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "prune",
+          "description": "Remove auto-installed dependencies that are no longer needed"
+        },
+        {
+          "name": "tag",
+          "description": "Create a {name}--v{version} git tag for a plugin",
+          "args": [
+            {
+              "name": "path",
+              "is_optional": true
+            }
+          ]
+        },
+        {
+          "name": "uninstall",
+          "description": "Uninstall an installed plugin",
+          "args": [
+            {
+              "name": "plugin"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "project",
+      "description": "Manage Claude Code project state"
+    },
+    {
+      "name": "setup-token",
+      "description": "Set up a long-lived authentication token"
+    },
+    {
+      "name": "ultrareview",
+      "description": "Run a cloud-hosted multi-agent code review",
+      "args": [
+        {
+          "name": "target",
+          "is_optional": true
+        }
+      ]
+    },
+    {
+      "name": "update",
+      "description": "Check for updates and install if available"
+    }
+  ],
+  "options": [
+    {
+      "names": [
+        "-p",
+        "--print"
+      ],
+      "description": "Print response and exit (non-interactive)"
+    },
+    {
+      "names": [
+        "-c",
+        "--continue"
+      ],
+      "description": "Continue the most recent conversation in the current directory"
+    },
+    {
+      "names": [
+        "-r",
+        "--resume"
+      ],
+      "description": "Resume a conversation by session ID, or pick one interactively",
+      "args": [
+        {
+          "name": "session"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--model"
+      ],
+      "description": "Model for the current session",
+      "args": [
+        {
+          "name": "model"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--effort"
+      ],
+      "description": "Effort level for the current session",
+      "args": [
+        {
+          "name": "level"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--fallback-model"
+      ],
+      "description": "Enable automatic fallback to the specified model",
+      "args": [
+        {
+          "name": "model"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--add-dir"
+      ],
+      "description": "Additional directories to allow tool access to",
+      "args": [
+        {
+          "name": "directories"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--agent"
+      ],
+      "description": "Agent for the current session",
+      "args": [
+        {
+          "name": "agent"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--agents"
+      ],
+      "description": "JSON object defining custom agents",
+      "args": [
+        {
+          "name": "json"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--allowedTools",
+        "--allowed-tools"
+      ],
+      "description": "Comma or space-separated list of tool names to allow",
+      "args": [
+        {
+          "name": "tools"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--disallowedTools",
+        "--disallowed-tools"
+      ],
+      "description": "Comma or space-separated list of tool names to deny",
+      "args": [
+        {
+          "name": "tools"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--tools"
+      ],
+      "description": "Specify the list of available tools",
+      "args": [
+        {
+          "name": "tools"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--append-system-prompt"
+      ],
+      "description": "Append a system prompt to the default system prompt",
+      "args": [
+        {
+          "name": "prompt"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--system-prompt"
+      ],
+      "description": "System prompt to use for the session",
+      "args": [
+        {
+          "name": "prompt"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--autocompact"
+      ],
+      "description": "Auto-compact window size (auto, or 100k–1M tokens)",
+      "args": [
+        {
+          "name": "auto|tokens"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--permission-mode"
+      ],
+      "description": "Permission mode to use for the session",
+      "args": [
+        {
+          "name": "mode"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--dangerously-skip-permissions"
+      ],
+      "description": "Bypass all permission checks"
+    },
+    {
+      "names": [
+        "--allow-dangerously-skip-permissions"
+      ],
+      "description": "Enable bypassing all permission checks as an option"
+    },
+    {
+      "names": [
+        "--bg",
+        "--background"
+      ],
+      "description": "Start the session as a background agent and return immediately"
+    },
+    {
+      "names": [
+        "--bare"
+      ],
+      "description": "Minimal mode: skip hooks, LSP, plugin sync, auto-memory"
+    },
+    {
+      "names": [
+        "--safe-mode"
+      ],
+      "description": "Start with all customizations disabled"
+    },
+    {
+      "names": [
+        "--betas"
+      ],
+      "description": "Beta headers to include in API requests",
+      "args": [
+        {
+          "name": "betas"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--brief"
+      ],
+      "description": "Enable SendUserMessage tool for agent-to-user communication"
+    },
+    {
+      "names": [
+        "--chrome"
+      ],
+      "description": "Enable Claude in Chrome integration"
+    },
+    {
+      "names": [
+        "--no-chrome"
+      ],
+      "description": "Disable Claude in Chrome integration"
+    },
+    {
+      "names": [
+        "--cloud"
+      ],
+      "description": "Create a cloud session, or attach to an existing one by ID or URL",
+      "args": [
+        {
+          "name": "description|session_id|url"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--environment"
+      ],
+      "description": "Create a new cloud session on the given environment",
+      "args": [
+        {
+          "name": "environment_id"
+        }
+      ]
+    },
+    {
+      "names": [
+        "-d",
+        "--debug"
+      ],
+      "description": "Enable debug mode with optional category filter",
+      "args": [
+        {
+          "name": "filter"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--debug-file"
+      ],
+      "description": "Write debug logs to a specific file path",
+      "args": [
+        {
+          "name": "path"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--verbose"
+      ],
+      "description": "Override verbose mode setting from config"
+    },
+    {
+      "names": [
+        "--ide"
+      ],
+      "description": "Automatically connect to IDE on startup"
+    },
+    {
+      "names": [
+        "--fork-session"
+      ],
+      "description": "When resuming, create a new session ID instead of reusing the original"
+    },
+    {
+      "names": [
+        "--from-pr"
+      ],
+      "description": "Resume a session linked to a PR",
+      "args": [
+        {
+          "name": "pr"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--session-id"
+      ],
+      "description": "Use a specific session ID for the conversation",
+      "args": [
+        {
+          "name": "uuid"
+        }
+      ]
+    },
+    {
+      "names": [
+        "-n",
+        "--name"
+      ],
+      "description": "Set a display name for this session",
+      "args": [
+        {
+          "name": "name"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--no-session-persistence"
+      ],
+      "description": "Disable session persistence"
+    },
+    {
+      "names": [
+        "--input-format"
+      ],
+      "description": "Input format (only with --print): text or stream-json",
+      "args": [
+        {
+          "name": "format"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--output-format"
+      ],
+      "description": "Output format (only with --print): text, json, stream-json",
+      "args": [
+        {
+          "name": "format"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--json-schema"
+      ],
+      "description": "JSON Schema for structured output",
+      "args": [
+        {
+          "name": "schema"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--include-partial-messages"
+      ],
+      "description": "Include partial message chunks as they arrive"
+    },
+    {
+      "names": [
+        "--include-hook-events"
+      ],
+      "description": "Include all hook lifecycle events in the output"
+    },
+    {
+      "names": [
+        "--max-budget-usd"
+      ],
+      "description": "Maximum dollar amount to spend on API calls",
+      "args": [
+        {
+          "name": "amount"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--mcp-config"
+      ],
+      "description": "Load MCP servers from JSON files or strings",
+      "args": [
+        {
+          "name": "configs"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--strict-mcp-config"
+      ],
+      "description": "Only use MCP servers from --mcp-config"
+    },
+    {
+      "names": [
+        "--plugin-dir"
+      ],
+      "description": "Load a plugin from a directory or .zip for this session",
+      "args": [
+        {
+          "name": "path"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--plugin-url"
+      ],
+      "description": "Fetch a plugin .zip from a URL for this session",
+      "args": [
+        {
+          "name": "url"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--settings"
+      ],
+      "description": "Path to a settings JSON file or a JSON string",
+      "args": [
+        {
+          "name": "file-or-json"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--setting-sources"
+      ],
+      "description": "Comma-separated list of setting sources to load",
+      "args": [
+        {
+          "name": "sources"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--disable-slash-commands"
+      ],
+      "description": "Disable all skills"
+    },
+    {
+      "names": [
+        "--remote-control"
+      ],
+      "description": "Start an interactive session with Remote Control enabled",
+      "args": [
+        {
+          "name": "name"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--teleport"
+      ],
+      "description": "Resume a teleport session",
+      "args": [
+        {
+          "name": "session"
+        }
+      ]
+    },
+    {
+      "names": [
+        "--tmux"
+      ],
+      "description": "Create a tmux session for the worktree"
+    },
+    {
+      "names": [
+        "-w",
+        "--worktree"
+      ],
+      "description": "Create a new git worktree for this session",
+      "args": [
+        {
+          "name": "name"
+        }
+      ]
+    },
+    {
+      "names": [
+        "-v",
+        "--version"
+      ],
+      "description": "Output the version number"
+    },
+    {
+      "names": [
+        "-h",
+        "--help"
+      ],
+      "description": "Display help for command"
+    }
+  ],
+  "args": [
+    {
+      "name": "prompt",
+      "is_optional": true
+    }
+  ]
+}

@@ -137,6 +137,29 @@ not `checkout` (checkout starts with c-h-e). Fuzzy matching is a deliberate
 opt-in and only kicks in from 3 typed characters. Restart the daemon after
 editing (`nerv stop && nerv start`).
 
+### Add your own specs
+
+Drop a spec JSON into `~/.config/nerv/specs/` and it is layered over the
+bundled set — one file per command, no rebuild. A file with the same name as
+a bundled spec replaces it wholesale (no merge), so this is also how you
+patch a bundled spec. [`examples/specs/claude.json`](examples/specs/claude.json)
+is a complete example (the `claude` CLI, which upstream never covered):
+
+```sh
+mkdir -p ~/.config/nerv/specs
+cp examples/specs/claude.json ~/.config/nerv/specs/
+nerv stop && nerv start     # once — the dir is watched from then on
+nerv doctor                 # → "user specs   1 in ~/.config/nerv/specs"
+nerv spec list | grep '\*'  # overlay rows are marked *
+```
+
+The format is the engine's plain JSON (`name` / `description` / `subcommands`
+/ `options[].names` / `args`), the same as
+`crates/nerv-engine/tests/fixtures/specs/`. Edits are picked up on the next
+keystroke; a broken file disables only that one command and shows up red in
+`nerv doctor`. `nerv uninstall` removes the dir with the rest of
+`~/.config/nerv/` unless you pass `--keep-config`.
+
 ## Shells and terminals
 
 | | Status |
