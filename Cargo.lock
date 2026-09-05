@@ -1698,6 +1698,7 @@ name = "nerv-daemon"
 version = "0.1.5"
 dependencies = [
  "anyhow",
+ "libc",
  "nerv-engine",
  "serde_json",
  "tempfile",

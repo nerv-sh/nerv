@@ -39,6 +39,7 @@ struct DaemonHandle {
     sock: PathBuf,
     _tmp: tempfile::TempDir,
     frecency: PathBuf,
+    misses: PathBuf,
 }
 
 impl DaemonHandle {
@@ -54,6 +55,9 @@ impl DaemonHandle {
             FrecencyMode::Disabled => PathBuf::from("-"),
             FrecencyMode::Tempfile => tmp.path().join("frecency.tsv"),
         };
+        // Always a temp path: the daemon must never touch the
+        // developer's real `~/Library/Caches/nerv/misses.tsv`.
+        let misses = tmp.path().join("misses.tsv");
         assert!(specs.exists(), "specs dir missing");
 
         let child = tokio::process::Command::new(nervd_bin())
@@ -61,6 +65,7 @@ impl DaemonHandle {
             .env("NERV_PID", &pid)
             .env("NERV_SPECS_DIR", &specs)
             .env("NERV_FRECENCY_FILE", &frecency)
+            .env("NERV_MISSES_FILE", &misses)
             .env("NERV_LOG", "warn")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
@@ -82,6 +87,7 @@ impl DaemonHandle {
             sock,
             _tmp: tmp,
             frecency,
+            misses,
         }
     }
 
@@ -94,6 +100,23 @@ impl DaemonHandle {
     async fn shutdown(mut self) {
         self.child.kill().await.ok();
         self.child.wait().await.ok();
+    }
+
+    /// SIGTERM + wait, so the daemon runs its graceful-shutdown path
+    /// (which force-flushes the throttled miss tally). `Child::kill`
+    /// is SIGKILL and skips that path entirely. Returns the tempdir so
+    /// the caller can inspect files the daemon wrote — dropping it here
+    /// would delete them before the assertions run.
+    async fn terminate(self) -> tempfile::TempDir {
+        let Self {
+            mut child, _tmp, ..
+        } = self;
+        if let Some(pid) = child.id() {
+            // SAFETY: plain `kill(2)` on a child this test owns.
+            unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+        }
+        child.wait().await.ok();
+        _tmp
     }
 }
 
@@ -195,6 +218,57 @@ async fn unknown_binary_returns_empty_with_reason() {
     .await;
     daemon.shutdown().await;
     run.expect("test timeout");
+}
+
+/// A spec-less command is tallied to `misses.tsv` so `nerv doctor` can
+/// point at it later. Writes are throttled (MIN_FLUSH_INTERVAL), so the
+/// durable count is asserted after a graceful shutdown — which is also
+/// the path that must not lose the final window's counts. The row names
+/// the *command*, never the argument being typed, and a command that
+/// does have a spec is never tallied.
+#[tokio::test]
+async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let misses = daemon.misses.clone();
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        for cursor in [10usize, 11, 12] {
+            let line = "nosuchbin sub".to_string();
+            round_trip(
+                &mut stream,
+                &Request::Complete {
+                    line: line[..cursor].to_string(),
+                    cursor,
+                    cwd: None,
+                },
+            )
+            .await;
+        }
+        // A known spec must not be tallied.
+        round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "git ".into(),
+                cursor: 4,
+                cwd: None,
+            },
+        )
+        .await;
+    })
+    .await;
+    let _tmp = daemon.terminate().await;
+    run.expect("test timeout");
+
+    let text = std::fs::read_to_string(&misses).expect("misses.tsv written");
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows.len(), 1, "one row expected, got {text:?}");
+    let mut fields = rows[0].split('\t');
+    assert_eq!(fields.next(), Some("nosuchbin"));
+    assert_eq!(
+        fields.next(),
+        Some("3"),
+        "all three keystrokes must survive the throttle window"
+    );
 }
 
 #[tokio::test]

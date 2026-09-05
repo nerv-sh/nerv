@@ -20,6 +20,7 @@ pub const SOCKET_NAME: &str = "nervd.sock";
 pub const PID_NAME: &str = "nervd.pid";
 pub const DAEMON_LOG_NAME: &str = "nervd.log";
 pub const SPECS_SUBDIR: &str = "specs";
+pub const MISSES_NAME: &str = "misses.tsv";
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
@@ -47,6 +48,14 @@ pub fn pid_path() -> Option<PathBuf> {
 
 pub fn daemon_log_path() -> Option<PathBuf> {
     log_dir().map(|d| d.join(DAEMON_LOG_NAME))
+}
+
+/// `~/Library/Caches/nerv/misses.tsv` — local tally of commands that
+/// completed empty for want of a spec (`crate::misses`). Cache, not
+/// config: it is regenerable diagnostics and `nerv uninstall` sweeps
+/// it with the rest of the cache dir (`docs/uninstall-spec.md` §2).
+pub fn misses_path() -> Option<PathBuf> {
+    cache_dir().map(|c| c.join(MISSES_NAME))
 }
 
 /// `~/Library/Caches/nerv/specs/` — JSON spec cache populated by
@@ -241,6 +250,7 @@ mod tests {
             assert_eq!(socket_path().unwrap(), cache.join("nervd.sock"));
             assert_eq!(pid_path().unwrap(), cache.join("nervd.pid"));
             assert_eq!(specs_dir().unwrap(), cache.join("specs"));
+            assert_eq!(misses_path().unwrap(), cache.join("misses.tsv"));
             assert_eq!(
                 daemon_log_path().unwrap(),
                 home.join("Library/Logs/nerv/nervd.log"),
@@ -261,6 +271,7 @@ mod tests {
             && socket_path().is_none()
             && pid_path().is_none()
             && daemon_log_path().is_none()
+            && misses_path().is_none()
             && specs_dir().is_none();
         if let Some(p) = prev {
             unsafe { std::env::set_var("HOME", p) };

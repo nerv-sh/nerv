@@ -35,3 +35,4 @@ specs-prebuilt/manifest.json
 /docs/dogfood.md
 /docs/first-5-min.md
 /.github/PR_BODY.md
+.claude/

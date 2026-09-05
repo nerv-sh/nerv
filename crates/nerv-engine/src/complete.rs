@@ -581,6 +581,18 @@ fn spec_stem_from_path(path: &Path) -> Option<String> {
     None
 }
 
+/// Leading text of the `CompleteResult::reason` emitted when no layer
+/// has a spec for the typed command. One owner for the string so the
+/// daemon's miss tally ([`crate::misses`]) reads back exactly what the
+/// engine wrote — see [`no_spec_binary`].
+pub const NO_SPEC_REASON_PREFIX: &str = "no spec for ";
+
+/// Recover the command name from a "no spec for …" reason. `None` for
+/// every other reason (empty input, quoted string, schema mismatch).
+pub fn no_spec_binary(reason: &str) -> Option<&str> {
+    reason.strip_prefix(NO_SPEC_REASON_PREFIX)
+}
+
 /// Pipeline result: completion candidates at the cursor.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompleteResult {
@@ -659,7 +671,7 @@ pub fn complete_in(
     let Some(spec) = registry.lookup(binary) else {
         return CompleteResult {
             items: vec![],
-            reason: Some(format!("no spec for {binary}")),
+            reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
         };
     };
     let spec_ref: &Spec = spec.as_ref();
@@ -4672,6 +4684,25 @@ region = us-east-1
         // Negative cache: missing binary stays missing without retry.
         assert!(r.lookup("nonexistent-binary").is_none());
         assert!(r.lookup("nonexistent-binary").is_none()); // 2nd hit ok too
+    }
+
+    /// Producer and consumer of the "no spec for …" reason must agree.
+    /// The engine writes it here and the daemon's miss tally reads it
+    /// back with `no_spec_binary`; if either side drifts, the tally
+    /// silently stops counting. Round-trip through the real pipeline so
+    /// the test breaks on a format change, not just on the helper.
+    #[test]
+    fn no_spec_reason_round_trips_through_no_spec_binary() {
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete("nosuchbin ", 10, &r);
+        assert!(out.items.is_empty());
+        let reason = out.reason.expect("miss carries a reason");
+        assert_eq!(no_spec_binary(&reason), Some("nosuchbin"));
+
+        // Every other empty reason must NOT look like a miss, or the
+        // tally would record noise under a bogus name.
+        let empty = complete("", 0, &r).reason.expect("reason");
+        assert_eq!(no_spec_binary(&empty), None);
     }
 
     #[test]

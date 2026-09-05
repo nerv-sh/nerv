@@ -43,6 +43,7 @@ async fn fuzzy_mode_recovers_checkout_from_chk() {
         .env("NERV_SPECS_DIR", &specs_dir)
         .env("NERV_CONFIG_FILE", &config_path)
         .env("NERV_FRECENCY_FILE", "-")
+        .env("NERV_MISSES_FILE", "-")
         .env("NERV_LOG", "debug")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
@@ -122,6 +123,7 @@ async fn default_prefix_mode_rejects_fuzzy_query() {
         // (Prefix) without leaking the user's real ~/.config.
         .env("NERV_CONFIG_FILE", &bogus_config)
         .env("NERV_FRECENCY_FILE", "-")
+        .env("NERV_MISSES_FILE", "-")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

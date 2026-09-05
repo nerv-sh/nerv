@@ -266,6 +266,31 @@ THEN:
 - 강제 X — `info` 등급 (회색 ℹ 아이콘).
 - exit code 영향 X (성공으로 카운트).
 - 본 항목은 *자동 실행* 시 1줄 요약에 포함되지 *않는다* (소음 방지).
+
+### 3.6.3 spec misses 안내 (soft notice)
+
+데몬은 완성이 "spec 없음" 으로 비어 반환될 때마다 그 명령 이름을
+`~/Library/Caches/nerv/misses.tsv` 에 로컬 집계한다. 기록이 있으면 `nerv doctor` 가
+가장 많이 빈 명령 최대 5개를 한 줄로 표시:
+
+```
+  ✓ spec misses         zeph 12, aic2 9, aicommit2 4
+                        → add a spec in ~/.config/nerv/specs
+```
+
+- **로컬 전용**: 파일은 캐시 디렉터리 안에만 존재하고 어디로도 전송되지 않는다
+  (PLAN §4 비목표 = 텔레메트리). `nerv uninstall` 이 캐시와 함께 삭제
+  (uninstall-spec §2 행 5). 테스트/벤치 격리는 `NERV_MISSES_FILE=-`.
+- **쓰기 정책**: 집계는 in-memory 이고 디스크 쓰기는 **5초에 한 번**으로 throttle
+  (`MIN_FLUSH_INTERVAL`) — 매 키입력마다 전량 재기록하면 위젯이 기다리는 완성 응답 안에서
+  파일 쓰기가 반복된다. 마지막 창의 집계는 데몬 graceful shutdown (SIGTERM) 이
+  강제 flush 해서 보존한다. 쓰기는 temp+rename **원자적** — `nerv doctor` 가 다른
+  프로세스에서 같은 파일을 읽으므로 잘린 파일을 보면 안 된다.
+- 기록이 0건이면 **행 자체가 없다** (신규 설치 출력 불변).
+- `ok` 등급 — exit code 영향 X. 사용자가 overlay spec (spec-conversion-policy §6.1)
+  을 쓸 대상을 고르는 신호지 결함이 아니다.
+- 이름은 래퍼를 벗긴 실제 명령이다 (`sudo foo` → `foo`) — 엔진이 이미
+  wrapped command 를 해석한 뒤의 이름을 reason 에 싣는다.
 - 사용자가 `nerv doctor` 를 직접 실행했을 때만 표시.
 
 ### 3.6.3 디바운스

@@ -12,9 +12,10 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
+use nerv_engine::misses::MissCounter;
 use nerv_engine::{
     FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, Suggestion,
-    complete_in, manifest, paths,
+    complete_in, manifest, no_spec_binary, paths,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -86,6 +87,24 @@ async fn main() -> anyhow::Result<()> {
         "frecency store loaded"
     );
 
+    // Spec-miss tally: which commands completed empty for want of a
+    // spec. Local diagnostics only — `nerv doctor` reads it back so the
+    // user knows which overlay spec is worth writing. Same `-` sentinel
+    // as frecency for test isolation.
+    let misses_path = std::env::var_os("NERV_MISSES_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| cache_dir.join(paths::MISSES_NAME));
+    let misses = if misses_path == std::path::PathBuf::from("-") {
+        Arc::new(MissCounter::empty())
+    } else {
+        Arc::new(MissCounter::load(&misses_path))
+    };
+    info!(
+        path = %misses_path.display(),
+        entries = misses.len(),
+        "spec-miss counter loaded"
+    );
+
     // User matching mode — defaults to prefix; opt-in fuzzy via
     // `~/.config/nerv/nerv.toml` (PLAN §5.1). Loaded once at boot;
     // edits require a daemon restart.
@@ -122,11 +141,13 @@ async fn main() -> anyhow::Result<()> {
                     Ok((stream, _addr)) => {
                         let registry = registry.clone();
                         let frecency = frecency.clone();
+                        let misses = misses.clone();
                         let schema_block = schema_block.clone();
                         tokio::spawn(handle_connection(
                             stream,
                             registry,
                             frecency,
+                            misses,
                             matching.mode,
                             schema_block,
                         ));
@@ -141,6 +162,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Last chance to persist the tally: `flush_if_dirty` is throttled
+    // (MIN_FLUSH_INTERVAL) so the counts from the final window are still
+    // in memory here.
+    misses.flush_now();
+
     let _ = tokio::fs::remove_file(&sock_path).await;
     let _ = tokio::fs::remove_file(&pid_path).await;
     Ok(())
@@ -150,6 +176,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     registry: Arc<SpecRegistry>,
     frecency: Arc<FrecencyStore>,
+    misses: Arc<MissCounter>,
     mode: MatchMode,
     schema_block: Arc<Option<String>>,
 ) {
@@ -179,8 +206,28 @@ async fn handle_connection(
                 None => {
                     let registry = registry.clone();
                     let frecency = frecency.clone();
+                    let misses = misses.clone();
                     tokio::task::spawn_blocking(move || {
-                        engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref(), mode)
+                        let resp = engine_complete(
+                            &registry,
+                            &frecency,
+                            &line,
+                            cursor,
+                            cwd.as_deref(),
+                            mode,
+                        );
+                        // A "no spec for X" empty is the only response the
+                        // tally cares about. Flush here (already on the
+                        // blocking pool) so the count survives a daemon
+                        // kill; the counter is dirty at most once per new
+                        // command name plus one bump per keystroke.
+                        if let Response::Empty { reason: Some(r) } = &resp {
+                            if let Some(binary) = no_spec_binary(r) {
+                                misses.record(binary);
+                                misses.flush_if_dirty();
+                            }
+                        }
+                        resp
                     })
                     .await
                     .unwrap_or_else(|e| Response::Error {

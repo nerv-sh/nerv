@@ -525,9 +525,37 @@ fn build_doctor_report() -> DoctorReport {
     check_shell_hook(&mut r);
     check_daemon(&mut r);
     check_specs(&mut r);
+    check_spec_misses(&mut r);
     check_schema_version(&mut r);
     check_pty_mode(&mut r);
     r
+}
+
+/// Commands the daemon completed empty for want of a spec. Advisory
+/// (never red): it is the pointer toward writing an overlay spec, not a
+/// fault. Silent when nothing has been recorded — a fresh install shows
+/// no row at all.
+fn check_spec_misses(r: &mut DoctorReport) {
+    let Some(path) = paths::misses_path() else {
+        return;
+    };
+    check_spec_misses_in(r, &path);
+}
+
+/// Path-injected half of [`check_spec_misses`], so tests exercise the
+/// row without touching the real cache dir.
+fn check_spec_misses_in(r: &mut DoctorReport, path: &std::path::Path) {
+    let top = nerv_engine::misses::MissCounter::load(path).top_n(5);
+    if top.is_empty() {
+        return;
+    }
+    let detail = top
+        .iter()
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let hint = paths::user_specs_dir().map(|d| format!("add a spec in {}", d.display()));
+    r.push(DoctorLevel::Ok, "spec misses", detail, hint);
 }
 
 /// E5: spec cache schema version vs the daemon's supported version
@@ -2169,6 +2197,42 @@ mod tests {
         let got = resolve_pty_bin_for_init(nerv.to_str().unwrap()).unwrap();
         assert_eq!(std::path::PathBuf::from(got), pty);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A recorded miss tally becomes one advisory row, most-missed
+    /// first, capped at five names.
+    #[test]
+    fn doctor_reports_top_spec_misses() {
+        let path = std::env::temp_dir().join(format!("nerv-misses-doc-{}.tsv", std::process::id()));
+        let counter = nerv_engine::misses::MissCounter::load(&path);
+        for _ in 0..12 {
+            counter.record("zeph");
+        }
+        for _ in 0..9 {
+            counter.record("aic2");
+        }
+        counter.flush_if_dirty();
+
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path);
+        assert_eq!(
+            doctor_labels(&r),
+            [("spec misses".to_string(), "Ok".into())]
+        );
+        assert_eq!(r.entries[0].detail, "zeph 12, aic2 9");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// No recorded misses → no row (a fresh install's doctor output is
+    /// unchanged).
+    #[test]
+    fn doctor_omits_spec_misses_row_when_nothing_recorded() {
+        let path =
+            std::env::temp_dir().join(format!("nerv-misses-none-{}.tsv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path);
+        assert!(r.entries.is_empty());
     }
 
     /// Two-layer fixture: (overlay, primary) under a fresh temp dir.
