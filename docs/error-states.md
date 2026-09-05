@@ -291,6 +291,23 @@ THEN:
   을 쓸 대상을 고르는 신호지 결함이 아니다.
 - 이름은 래퍼를 벗긴 실제 명령이다 (`sudo foo` → `foo`) — 엔진이 이미
   wrapped command 를 해석한 뒤의 이름을 reason 에 싣는다.
+
+### 3.6.4 derived specs 안내 (soft notice)
+
+파생 spec (spec-conversion-policy §6.2) 이 하나라도 있으면 `nerv doctor` 가 표시:
+
+```
+  ✓ derived specs        3 in ~/Library/Caches/nerv/derived
+```
+
+- 하나도 없으면 **행 자체가 없다** (신규 설치 출력 불변).
+- 파생 파일이 깨졌으면 그 행만 red + `delete that file in <dir>` — `specs` 행은
+  green 을 유지한다. overlay 행과 같은 원칙: 남의 문제로 "reinstall" 을 안내하지 않는다.
+  파생본은 nerv 가 스스로 만든 것이므로 조치는 **삭제** (다음 lookup 이 다시 만든다).
+- `nerv doctor` 와 `nerv spec list` 는 파생 층을 **읽기만** 한다 — 진단 명령이 사용자
+  명령을 실행하는 일은 없다 (파생은 데몬의 lookup 경로에서만 일어난다).
+- `nerv spec list` 는 파생 행에 `+`, overlay 행에 `*` 를 붙이고 실제로 쓰인 층의
+  범례만 출력한다.
 - 사용자가 `nerv doctor` 를 직접 실행했을 때만 표시.
 
 ### 3.6.3 디바운스

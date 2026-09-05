@@ -908,9 +908,13 @@ fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
     // as "your file", not as a corrupt install. Every error names its file,
     // so split on which layer the file lives in.
     let overlay = layers.overlay.as_deref();
-    let (overlay_errs, primary_errs): (Vec<_>, Vec<_>) = errs
-        .iter()
-        .partition(|e| overlay.is_some_and(|o| std::path::Path::new(e.path()).starts_with(o)));
+    let derived = layers.derived.as_deref();
+    let in_layer = |e: &nerv_engine::SpecLoadError, layer: Option<&std::path::Path>| {
+        layer.is_some_and(|l| std::path::Path::new(e.path()).starts_with(l))
+    };
+    let (overlay_errs, rest): (Vec<_>, Vec<_>) = errs.iter().partition(|e| in_layer(e, overlay));
+    let (derived_errs, primary_errs): (Vec<_>, Vec<_>) =
+        rest.into_iter().partition(|e| in_layer(e, derived));
     if errs.is_empty() && count == 0 {
         r.push(
             DoctorLevel::Warn,
@@ -944,6 +948,28 @@ fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
                 "user specs",
                 format!("{} disabled: {}", overlay_errs.len(), overlay_errs[0]),
                 Some(format!("fix or remove that file in {}", o.display())),
+            );
+        }
+    }
+    // Derived specs get their own row too, for the same reason: a bad
+    // one is nerv's own scraping, not a corrupt install. The row is
+    // omitted entirely when nothing has been derived yet, so a fresh
+    // install reads exactly as before.
+    if let Some(d) = derived {
+        let served = registry.stems_served_from(d).len();
+        if !derived_errs.is_empty() {
+            r.push(
+                DoctorLevel::Err,
+                "derived specs",
+                format!("{} disabled: {}", derived_errs.len(), derived_errs[0]),
+                Some(format!("delete that file in {}", d.display())),
+            );
+        } else if served > 0 {
+            r.push(
+                DoctorLevel::Ok,
+                "derived specs",
+                format!("{served} in {}", d.display()),
+                None,
             );
         }
     }
@@ -1173,9 +1199,14 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
         return vec![format!("(no specs found in {})", primary.display())];
     }
     let overlay = layers.overlay.as_deref();
-    let from_overlay: std::collections::HashSet<String> = overlay
-        .map(|o| registry.stems_served_from(o).into_iter().collect())
-        .unwrap_or_default();
+    let derived = layers.derived.as_deref();
+    let stems_from = |layer: Option<&std::path::Path>| -> std::collections::HashSet<String> {
+        layer
+            .map(|l| registry.stems_served_from(l).into_iter().collect())
+            .unwrap_or_default()
+    };
+    let from_overlay = stems_from(overlay);
+    let from_derived = stems_from(derived);
 
     let mut lines = vec![format!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS")];
     for name in names {
@@ -1187,14 +1218,27 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
         let tier = compute_tier(spec.as_ref());
         let mark = if from_overlay.contains(&name) {
             "*"
+        } else if from_derived.contains(&name) {
+            "+"
         } else {
             ""
         };
         lines.push(format!("{name:<18} {subs:>5} {opts:>5}  {tier}{mark}"));
     }
-    if let Some(o) = overlay {
+    let legend: Vec<String> = [
+        overlay
+            .filter(|_| !from_overlay.is_empty())
+            .map(|o| format!("* = served from {} (user overlay)", o.display())),
+        derived
+            .filter(|_| !from_derived.is_empty())
+            .map(|d| format!("+ = derived from --help, cached in {}", d.display())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !legend.is_empty() {
         lines.push(String::new());
-        lines.push(format!("* = served from {} (user overlay)", o.display()));
+        lines.extend(legend);
     }
     lines
 }
@@ -2240,6 +2284,110 @@ mod tests {
         let mut r = DoctorReport::default();
         check_spec_misses_in(&mut r, &path);
         assert!(r.entries.is_empty());
+    }
+
+    /// Derived specs count in their own green row, so a user can see
+    /// what nerv scraped without confusing it with the bundled set.
+    #[test]
+    fn doctor_reports_derived_specs_row() {
+        let (_overlay, primary) = overlay_layers("derived-ok");
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("zeph.json"), r#"{"name":"zeph"}"#).unwrap();
+
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_with_derived(primary, Some(derived.clone())));
+        let rows = doctor_labels(&r);
+        assert_eq!(
+            rows,
+            [
+                ("specs".to_string(), "Ok".to_string()),
+                ("derived specs".into(), "Ok".into())
+            ]
+        );
+        assert_eq!(r.entries[1].detail, format!("1 in {}", derived.display()));
+    }
+
+    /// A broken derived file is nerv's own scraping gone wrong, not a
+    /// corrupt install: its own red row, and the primary stays green.
+    #[test]
+    fn doctor_isolates_broken_derived_file() {
+        let (_overlay, primary) = overlay_layers("derived-broken");
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("zeph.json"), "{ not json").unwrap();
+
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_with_derived(primary, Some(derived.clone())));
+        let rows = doctor_labels(&r);
+        assert_eq!(
+            rows,
+            [
+                ("specs".to_string(), "Ok".to_string()),
+                ("derived specs".into(), "Err".into())
+            ]
+        );
+        assert_eq!(
+            r.entries[1].hint.as_deref(),
+            Some(format!("delete that file in {}", derived.display()).as_str())
+        );
+    }
+
+    /// Nothing derived yet → no row at all, so a fresh install's doctor
+    /// output is byte-for-byte what it was before this feature.
+    #[test]
+    fn doctor_omits_derived_row_when_nothing_derived() {
+        let (_overlay, primary) = overlay_layers("derived-empty");
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_with_derived(primary, Some(derived)));
+        assert_eq!(doctor_labels(&r), [("specs".to_string(), "Ok".to_string())]);
+    }
+
+    /// `spec list` marks derived rows `+`, overlay rows `*`, and prints
+    /// a legend line only for the layers that actually served something.
+    #[test]
+    fn spec_list_marks_derived_rows_and_adds_legend() {
+        let (overlay, primary) = overlay_layers("list-derived");
+        std::fs::write(overlay.join("claude.json"), r#"{"name":"claude"}"#).unwrap();
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("zeph.json"), r#"{"name":"zeph"}"#).unwrap();
+
+        let layers = paths::SpecLayers {
+            overlay: Some(overlay.clone()),
+            primary,
+            derived: Some(derived.clone()),
+        };
+        let lines = spec_list_lines(&layers);
+        let row = |name: &str| {
+            lines
+                .iter()
+                .find(|l| l.starts_with(name))
+                .unwrap_or_else(|| panic!("no row for {name} in {lines:?}"))
+                .clone()
+        };
+        assert!(row("claude").ends_with('*'), "{}", row("claude"));
+        assert!(row("zeph").ends_with('+'), "{}", row("zeph"));
+        assert!(!row("git").ends_with(['*', '+']), "{}", row("git"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("+ = derived from --help")),
+            "{lines:?}"
+        );
+    }
+
+    fn layers_with_derived(
+        primary: std::path::PathBuf,
+        derived: Option<std::path::PathBuf>,
+    ) -> paths::SpecLayers {
+        paths::SpecLayers {
+            overlay: None,
+            primary,
+            derived,
+        }
     }
 
     /// Two-layer fixture: (overlay, primary) under a fresh temp dir.
