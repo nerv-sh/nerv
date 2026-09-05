@@ -27,6 +27,7 @@ pub mod spec;
 pub mod spec_loader;
 pub mod spec_parser;
 
+pub mod derived;
 pub mod frecency;
 pub mod misses;
 
