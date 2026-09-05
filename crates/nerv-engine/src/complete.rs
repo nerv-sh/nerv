@@ -4596,13 +4596,14 @@ region = us-east-1
     fn slow_compute_is_stored_with_the_long_ttl() {
         use std::time::Duration;
         let key: GeneratorCacheKey = (vec!["<nerv:test-slow-ttl>".to_string()], None);
-        let out = cached_generator_lines(key.clone(), move || {
+        // Whether this keystroke serves the value or defers it depends on
+        // scheduling (the sync window starts when the caller blocks, not
+        // when the populator spawns) and is covered elsewhere; the claim
+        // here is only what gets stored.
+        let _ = cached_generator_lines(key.clone(), move || {
             std::thread::sleep(GENERATOR_SYNC_WAIT + Duration::from_millis(20));
             Some(vec!["slow".to_string()])
         });
-        // Slow compute misses the sync window, so this keystroke serves
-        // nothing; the value lands in the cache behind it.
-        assert!(out.is_none());
         wait_for_generator_cache(&key, Duration::from_secs(5));
         let stored = GENERATOR_CACHE
             .lock()
@@ -4782,10 +4783,12 @@ region = us-east-1
             2,
             "both generators must contribute once warm: {out:?}"
         );
-        // Parallel, not serial: two overlapping 400ms sleeps warm in
-        // ~max, well under the ~800ms a sequential run would take.
+        // Parallel, not serial. Two sequential 400ms sleeps cannot finish
+        // under 800ms by construction, so that is the bound — any slack
+        // below it is margin a loaded CI runner eats (observed 762ms on
+        // a 3-core macos-14 runner with the suite in parallel).
         assert!(
-            warm_elapsed.as_millis() < 750,
+            warm_elapsed.as_millis() < 800,
             "expected concurrent cold generators, took {warm_elapsed:?}"
         );
     }
