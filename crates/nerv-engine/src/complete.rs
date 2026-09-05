@@ -93,6 +93,11 @@ pub struct SpecRegistry {
     /// Held to keep the watcher thread alive for the registry's lifetime.
     /// Dropping the watcher stops the FS event stream.
     _watcher: Option<Box<dyn notify::Watcher + Send + Sync>>,
+    /// Where to write a spec derived from a command's own `--help` when
+    /// no layer has one (`crate::derived`). `None` disables derivation
+    /// entirely — nothing is ever spawned. Always the last entry of
+    /// `dirs` when set, so a derived file is read back like any other.
+    derive_into: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for SpecRegistry {
@@ -114,6 +119,7 @@ impl Default for SpecRegistry {
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: None,
             _watcher: None,
+            derive_into: None,
         }
     }
 }
@@ -159,6 +165,20 @@ impl SpecRegistry {
     /// is created later is still probed on lookup but not watched (restart
     /// the daemon — `docs/spec-conversion-policy.md` §6.1 "사용자 overlay").
     pub fn at_dirs(dirs: &[PathBuf]) -> Self {
+        Self::at_dirs_deriving(dirs, None)
+    }
+
+    /// The daemon's registry over a resolved layer set. When the layers
+    /// include a derived dir, a stem no layer has is asked for its own
+    /// `--help` and written there (`crate::derived`); the dir is both
+    /// the last read layer and the write target, so the write is read
+    /// straight back. Read-only consumers (doctor, `spec list`) use
+    /// [`at_dirs`](Self::at_dirs) and never derive.
+    pub fn for_layers(layers: &crate::paths::SpecLayers) -> Self {
+        Self::at_dirs_deriving(&layers.dirs(), layers.derived.clone())
+    }
+
+    fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
         let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let watcher = start_spec_watcher(dirs, pending.clone());
         Self {
@@ -168,6 +188,7 @@ impl SpecRegistry {
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: Some(pending),
             _watcher: watcher,
+            derive_into,
         }
     }
 
@@ -282,6 +303,7 @@ impl SpecRegistry {
         let cache = Arc::clone(&self.cache);
         let next_tick = Arc::clone(&self.next_tick);
         let inflight = Arc::clone(&self.inflight);
+        let derive_into = self.derive_into.clone();
         let release_name = name.to_string();
         let load_name = name.to_string();
         spawn_populator_and_maybe_wait(
@@ -293,7 +315,8 @@ impl SpecRegistry {
                 }
             },
             move || {
-                let (mtime, spec, bytes) = Self::load_spec_from_dirs(&dirs, &load_name);
+                let (mtime, spec, bytes) =
+                    Self::load_or_derive(&dirs, derive_into.as_deref(), &load_name);
                 if let Ok(mut cache) = cache.write() {
                     let tick = next_tick.fetch_add(1, Ordering::Relaxed);
                     cache.insert(
@@ -310,6 +333,17 @@ impl SpecRegistry {
                 spec
             },
         )
+    }
+
+    /// Whether a background load (parse, or `--help` derivation) for
+    /// `name` is still running. A `lookup` that returned `None` while
+    /// this is true is not a settled miss — the answer lands on a later
+    /// keystroke — so the daemon's miss tally leaves it alone.
+    pub fn is_loading(&self, name: &str) -> bool {
+        self.inflight
+            .lock()
+            .map(|s| s.contains(name))
+            .unwrap_or(false)
     }
 
     /// Next monotonic tick for LRU stamping.
@@ -373,17 +407,52 @@ impl SpecRegistry {
         })
     }
 
+    /// Load `name` from the layers; if no layer has it and derivation
+    /// is on, ask the command for its own `--help`, write the result
+    /// into the derived layer, and load that.
+    ///
+    /// This runs on the background populator thread, never on the
+    /// keystroke path: a cold `--help` costs up to
+    /// `derived::HELP_TIMEOUT`, far past the widget's budget. The
+    /// keystroke that triggers it gets an empty result and the next one
+    /// gets the spec — the same deal the big bundled specs already
+    /// make.
+    fn load_or_derive(
+        dirs: &[PathBuf],
+        derive_into: Option<&Path>,
+        name: &str,
+    ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
+        if let Some(hit) = Self::resolve_spec_file(dirs, name) {
+            // A file that exists but fails to parse is a negative entry
+            // for its stem, not an invitation to overwrite it with a
+            // derived guess — `load_at` returns `None` for it.
+            return Self::load_at(hit);
+        }
+        let derived = derive_into.and_then(|dir| crate::derived::derive(name, dir));
+        if derived.is_none() {
+            return (None, None, 0);
+        }
+        Self::load_spec_from_dirs(dirs, name)
+    }
+
     fn load_spec_from_dirs(
         dirs: &[PathBuf],
         name: &str,
     ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
-        let Some((path, meta)) = Self::resolve_spec_file(dirs, name) else {
-            return (None, None, 0);
-        };
+        match Self::resolve_spec_file(dirs, name) {
+            Some(hit) => Self::load_at(hit),
+            None => (None, None, 0),
+        }
+    }
+
+    /// Parse the file `resolve_spec_file` found. A parse failure is a
+    /// negative entry for the stem — it shadows any lower layer, so a
+    /// broken overlay file silences that one command rather than
+    /// falling through to the bundled spec.
+    fn load_at(
+        (path, meta): (PathBuf, fs::Metadata),
+    ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
         let mtime = meta.modified().ok();
-        // A file that fails to parse is a negative entry for its stem — it
-        // shadows any lower layer, so a broken overlay file silences that
-        // one command rather than falling through to the bundled spec.
         let (spec, bytes) = match crate::spec_loader::load_spec_file_with_size(&path) {
             Ok((spec, bytes)) => (Some(Arc::new(spec)), bytes),
             Err(_) => (None, 0),
@@ -481,13 +550,24 @@ impl SpecRegistry {
     }
 
     /// Stems whose backing file lives in `layer` *and* is the one the
-    /// registry would read (not shadowed by a higher layer). Lets `spec
-    /// list` / doctor mark overlay entries without re-probing the disk.
+    /// registry would read (not shadowed by a higher layer). One layer's
+    /// view of [`stems_by_origin`](Self::stems_by_origin); a caller that
+    /// wants several layers should take that map once instead.
     pub fn stems_served_from(&self, layer: &Path) -> Vec<String> {
         self.listing_by_origin()
             .into_iter()
             .filter(|(_, origin)| *origin == layer)
             .map(|(stem, _)| stem)
+            .collect()
+    }
+
+    /// Every installed stem → the layer that serves it, in one pass over
+    /// the layers. `spec list` and doctor mark overlay and derived rows
+    /// from this single map rather than scanning per layer.
+    pub fn stems_by_origin(&self) -> std::collections::BTreeMap<String, PathBuf> {
+        self.listing_by_origin()
+            .into_iter()
+            .map(|(stem, origin)| (stem, origin.to_path_buf()))
             .collect()
     }
 
@@ -581,6 +661,18 @@ fn spec_stem_from_path(path: &Path) -> Option<String> {
     None
 }
 
+/// Leading text of the `CompleteResult::reason` emitted when no layer
+/// has a spec for the typed command. One owner for the string so the
+/// daemon's miss tally ([`crate::misses`]) reads back exactly what the
+/// engine wrote — see [`no_spec_binary`].
+pub const NO_SPEC_REASON_PREFIX: &str = "no spec for ";
+
+/// Recover the command name from a "no spec for …" reason. `None` for
+/// every other reason (empty input, quoted string, schema mismatch).
+pub fn no_spec_binary(reason: &str) -> Option<&str> {
+    reason.strip_prefix(NO_SPEC_REASON_PREFIX)
+}
+
 /// Pipeline result: completion candidates at the cursor.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompleteResult {
@@ -656,10 +748,22 @@ pub fn complete_in(
     let prefix = current_prefix(&line[..cursor]);
     let binary = tokens[0].text.as_str();
 
+    // Still typing the command name itself (`gi`, `zep`): there is
+    // nothing a spec could offer yet, so don't look one up. Every prefix
+    // would otherwise be a cold miss — a PATH scan and, with derivation
+    // on, up to three `--help` spawns for `ls` inside `lsof` — and would
+    // land in the miss tally as junk.
+    if tokens.len() == 1 && prefix == binary {
+        return CompleteResult {
+            items: vec![],
+            reason: Some("typing command name".into()),
+        };
+    }
+
     let Some(spec) = registry.lookup(binary) else {
         return CompleteResult {
             items: vec![],
-            reason: Some(format!("no spec for {binary}")),
+            reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
         };
     };
     let spec_ref: &Spec = spec.as_ref();
@@ -1827,7 +1931,41 @@ fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) ->
 }
 
 type GeneratorCacheKey = (Vec<String>, Option<PathBuf>);
-type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Option<Vec<String>>)>;
+type GeneratorCacheMap = HashMap<GeneratorCacheKey, GenEntry>;
+
+/// One memoized generator result, with the lifetime it earned.
+///
+/// The TTL is not a constant because generators are not alike. `git
+/// branch` answers in a millisecond and its answer changes whenever the
+/// user branches, so a short window is right. `brew formulae` takes
+/// most of a second to hand back a list of 16 000 names that changes a
+/// few times a week; re-running it every 5 seconds is pure background
+/// waste, and the cost of being briefly stale is nil. Rather than keep
+/// a list of which commands are which — a list that would rot — the
+/// entry keeps the TTL its own compute time earned.
+#[derive(Debug, Clone)]
+struct GenEntry {
+    at: std::time::Instant,
+    ttl: std::time::Duration,
+    outcome: Option<Vec<String>>,
+}
+
+impl GenEntry {
+    fn fresh(&self) -> bool {
+        self.at.elapsed() < self.ttl
+    }
+
+    /// A compute that outran the keystroke window is a heavy one; give
+    /// it the long TTL. Measuring beats naming: a fast generator on a
+    /// huge repo becomes slow on its own, and this notices.
+    fn ttl_for(elapsed: std::time::Duration) -> std::time::Duration {
+        if elapsed >= GENERATOR_SYNC_WAIT {
+            GENERATOR_CACHE_TTL_SLOW
+        } else {
+            GENERATOR_CACHE_TTL
+        }
+    }
+}
 
 /// Process-wide cache for Tier B generator results.
 /// Key: `(script argv, spawn cwd)`. The cwd is part of the key because
@@ -1845,6 +1983,12 @@ static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>>
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 const GENERATOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// TTL for a generator whose compute outran [`GENERATOR_SYNC_WAIT`].
+/// Those are the large, near-static lists (`brew formulae`, `docker
+/// images`); at 5s the daemon re-ran them twelve times a minute in the
+/// background for output that had not changed.
+const GENERATOR_CACHE_TTL_SLOW: std::time::Duration = std::time::Duration::from_secs(60);
 const GENERATOR_CACHE_MAX: usize = 64;
 
 /// How long a keystroke waits for a cold generator before deferring it
@@ -1865,25 +2009,38 @@ static GENERATOR_INFLIGHT: std::sync::LazyLock<
 type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 
 /// Process-wide cache for `ScriptWithJsonPath` raw stdout, keyed by script
-/// argv. Same TTL / size / eviction policy as [`GENERATOR_CACHE`]; separate
-/// because the value is the verbatim blob (not post-processed lines).
+/// argv. Fixed 5s TTL and the same size / eviction policy as
+/// [`GENERATOR_CACHE`] (which alone earns a longer TTL per entry — see
+/// `GenEntry`); separate because the value is the verbatim blob (not
+/// post-processed lines).
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Insert `outcome` (a hit or a memoized miss) into [`GENERATOR_CACHE`]
 /// under `key`, evicting the oldest entry past the size cap.
-fn store_generator_result(key: GeneratorCacheKey, outcome: Option<Vec<String>>) {
+fn store_generator_result(
+    key: GeneratorCacheKey,
+    outcome: Option<Vec<String>>,
+    elapsed: std::time::Duration,
+) {
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
                 .iter()
-                .min_by_key(|(_, (t, _))| *t)
+                .min_by_key(|(_, e)| e.at)
                 .map(|(k, _)| k.clone())
             {
                 cache.remove(&oldest);
             }
         }
-        cache.insert(key, (std::time::Instant::now(), outcome));
+        cache.insert(
+            key,
+            GenEntry {
+                at: std::time::Instant::now(),
+                ttl: GenEntry::ttl_for(elapsed),
+                outcome,
+            },
+        );
     }
 }
 
@@ -1926,8 +2083,12 @@ where
                 }
             }
         }
-        let _guard = Guard(Some(release));
+        let guard = Guard(Some(release));
         let out = compute();
+        // Release before signalling: `compute` has already stored its
+        // result, so once the caller wakes the key must read as settled
+        // (`SpecRegistry::is_loading`), not as still in flight.
+        drop(guard);
         let _ = tx.send(out);
     });
     if stale.is_some() {
@@ -1954,11 +2115,11 @@ fn cached_generator_lines(
     // boundary; see `spawn_populator_and_maybe_wait`).
     let mut stale: Option<Vec<String>> = None;
     if let Ok(cache) = GENERATOR_CACHE.lock() {
-        if let Some((stamp, outcome)) = cache.get(&key) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return outcome.clone();
+        if let Some(entry) = cache.get(&key) {
+            if entry.fresh() {
+                return entry.outcome.clone();
             }
-            stale = outcome.clone();
+            stale = entry.outcome.clone();
         }
     }
     // Claim the in-flight slot. If a populator is already running for
@@ -1982,8 +2143,9 @@ fn cached_generator_lines(
             }
         },
         move || {
+            let started = std::time::Instant::now();
             let outcome = compute();
-            store_generator_result(store_key, outcome.clone());
+            store_generator_result(store_key, outcome.clone(), started.elapsed());
             outcome
         },
     )
@@ -2570,7 +2732,9 @@ fn cargo_targets(
 /// Bounded with the same LRU policy as `GENERATOR_CACHE`
 /// ([`GENERATOR_CACHE_MAX`] entries, oldest-evicted on overflow)
 /// so a long-running daemon that the user `cd`s through dozens of
-/// cargo workspaces doesn't leak.
+/// cargo workspaces doesn't leak. Fixed 5s TTL — it has not earned
+/// `GenEntry`'s measured TTL yet; do that if a workspace's `cargo
+/// metadata` shows up re-running in the background.
 static CARGO_METADATA_CACHE: std::sync::LazyLock<
     std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, String)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
@@ -3427,21 +3591,41 @@ fn strip_git_status_marker(s: String) -> String {
 /// Remove ANSI CSI escape sequences (`\x1b[...m` etc.) without
 /// pulling in a regex dep. Iterates bytes; preserves UTF-8 by
 /// only skipping ESC + bracket-form sequences.
-fn strip_ansi(input: &str) -> String {
+/// Drop CSI and OSC escape sequences. Generator output and derived
+/// `--help` text both arrive with colour from tools that ignore
+/// `NO_COLOR` / `TERM=dumb`.
+pub(crate) fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next(); // consume '['
-            // Drain until letter (CSI final byte: 0x40..0x7e).
-            for nc in chars.by_ref() {
-                if ('@'..='~').contains(&nc) {
-                    break;
-                }
-            }
+        if c != '\x1b' {
+            out.push(c);
             continue;
         }
-        out.push(c);
+        match chars.next() {
+            // CSI … final byte in @–~
+            Some('[') => {
+                for nc in chars.by_ref() {
+                    if ('@'..='~').contains(&nc) {
+                        break;
+                    }
+                }
+            }
+            // OSC … BEL or ST
+            Some(']') => {
+                while let Some(nc) = chars.next() {
+                    if nc == '\x07' {
+                        break;
+                    }
+                    if nc == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Two-character escape: drop both.
+            Some(_) | None => {}
+        }
     }
     out
 }
@@ -4274,10 +4458,9 @@ region = us-east-1
     fn wait_for_generator_cache(key: &GeneratorCacheKey, timeout: std::time::Duration) {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            let fresh = GENERATOR_CACHE.lock().is_ok_and(|c| {
-                c.get(key)
-                    .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
-            });
+            let fresh = GENERATOR_CACHE
+                .lock()
+                .is_ok_and(|c| c.get(key).is_some_and(|e| e.fresh()));
             if fresh {
                 return;
             }
@@ -4349,6 +4532,89 @@ region = us-east-1
         );
     }
 
+    /// A generator that took real time to answer keeps its result far
+    /// longer than the default window. Before this, `brew formulae`
+    /// (~600ms for a list that changes weekly) was re-run in the
+    /// background twelve times a minute for the life of the daemon.
+    #[test]
+    fn a_slow_generator_stays_fresh_past_the_default_ttl() {
+        use std::time::{Duration, Instant};
+        let entry = GenEntry {
+            // Older than the default TTL, younger than the slow one.
+            at: Instant::now()
+                .checked_sub(GENERATOR_CACHE_TTL + Duration::from_secs(5))
+                .expect("clock far enough from boot"),
+            ttl: GenEntry::ttl_for(Duration::from_millis(600)),
+            outcome: Some(vec!["formula".to_string()]),
+        };
+        assert_eq!(entry.ttl, GENERATOR_CACHE_TTL_SLOW);
+        assert!(entry.fresh(), "a slow generator must not expire in 5s");
+    }
+
+    /// A fast generator keeps the short window: `git branch` output
+    /// changes whenever the user branches, and staleness there is
+    /// visible and annoying.
+    #[test]
+    fn a_fast_generator_keeps_the_default_ttl() {
+        use std::time::{Duration, Instant};
+        let entry = GenEntry {
+            at: Instant::now()
+                .checked_sub(GENERATOR_CACHE_TTL + Duration::from_secs(1))
+                .expect("clock far enough from boot"),
+            ttl: GenEntry::ttl_for(Duration::from_millis(2)),
+            outcome: Some(vec!["main".to_string()]),
+        };
+        assert_eq!(entry.ttl, GENERATOR_CACHE_TTL);
+        assert!(!entry.fresh(), "a fast generator must expire on schedule");
+    }
+
+    /// The TTL is earned by the measured compute, so a generator that
+    /// crosses the keystroke window — whatever it is called — gets the
+    /// long one. This is the whole reason there is no name list.
+    #[test]
+    fn ttl_is_decided_by_measured_compute_time() {
+        use std::time::Duration;
+        assert_eq!(GenEntry::ttl_for(Duration::ZERO), GENERATOR_CACHE_TTL);
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT - Duration::from_millis(1)),
+            GENERATOR_CACHE_TTL
+        );
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT),
+            GENERATOR_CACHE_TTL_SLOW
+        );
+        assert_eq!(
+            GenEntry::ttl_for(Duration::from_secs(2)),
+            GENERATOR_CACHE_TTL_SLOW
+        );
+    }
+
+    /// End to end through the real memo: a compute that crosses the
+    /// window is stored with the long TTL, so the entry is still fresh
+    /// well past 5 seconds and no refresh is spawned.
+    #[test]
+    fn slow_compute_is_stored_with_the_long_ttl() {
+        use std::time::Duration;
+        let key: GeneratorCacheKey = (vec!["<nerv:test-slow-ttl>".to_string()], None);
+        // Whether this keystroke serves the value or defers it depends on
+        // scheduling (the sync window starts when the caller blocks, not
+        // when the populator spawns) and is covered elsewhere; the claim
+        // here is only what gets stored.
+        let _ = cached_generator_lines(key.clone(), move || {
+            std::thread::sleep(GENERATOR_SYNC_WAIT + Duration::from_millis(20));
+            Some(vec!["slow".to_string()])
+        });
+        wait_for_generator_cache(&key, Duration::from_secs(5));
+        let stored = GENERATOR_CACHE
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .expect("populator stored the result");
+        assert_eq!(stored.ttl, GENERATOR_CACHE_TTL_SLOW, "{stored:?}");
+        assert_eq!(stored.outcome.as_deref(), Some(&["slow".to_string()][..]));
+    }
+
     #[test]
     fn revalidation_serves_stale_without_waiting_sync_window() {
         // Root-cause guard for the periodic ~100ms hitch on warm large
@@ -4372,7 +4638,11 @@ region = us-east-1
             .expect("clock far enough from boot");
         GENERATOR_CACHE.lock().unwrap().insert(
             key.clone(),
-            (expired, Some(vec!["cached-stale".to_string()])),
+            GenEntry {
+                at: expired,
+                ttl: GENERATOR_CACHE_TTL,
+                outcome: Some(vec!["cached-stale".to_string()]),
+            },
         );
         let done = Arc::new(AtomicBool::new(false));
         let d = done.clone();
@@ -4513,10 +4783,12 @@ region = us-east-1
             2,
             "both generators must contribute once warm: {out:?}"
         );
-        // Parallel, not serial: two overlapping 400ms sleeps warm in
-        // ~max, well under the ~800ms a sequential run would take.
+        // Parallel, not serial. Two sequential 400ms sleeps cannot finish
+        // under 800ms by construction, so that is the bound — any slack
+        // below it is margin a loaded CI runner eats (observed 762ms on
+        // a 3-core macos-14 runner with the suite in parallel).
         assert!(
-            warm_elapsed.as_millis() < 750,
+            warm_elapsed.as_millis() < 800,
             "expected concurrent cold generators, took {warm_elapsed:?}"
         );
     }
@@ -4672,6 +4944,43 @@ region = us-east-1
         // Negative cache: missing binary stays missing without retry.
         assert!(r.lookup("nonexistent-binary").is_none());
         assert!(r.lookup("nonexistent-binary").is_none()); // 2nd hit ok too
+    }
+
+    /// Producer and consumer of the "no spec for …" reason must agree.
+    /// The engine writes it here and the daemon's miss tally reads it
+    /// back with `no_spec_binary`; if either side drifts, the tally
+    /// silently stops counting. Round-trip through the real pipeline so
+    /// the test breaks on a format change, not just on the helper.
+    /// While the command name itself is being typed there is nothing to
+    /// complete, so the registry is not consulted at all. Every partial
+    /// (`ze`, `zep`) would otherwise be a cold miss — a PATH scan, and
+    /// with derivation on a `--help` spawn for any prefix that happens
+    /// to be a real binary — and would land in the miss tally as junk.
+    #[test]
+    fn typing_the_command_name_does_not_look_up_a_spec() {
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete("gi", 2, &r);
+        assert!(out.items.is_empty());
+        assert_eq!(out.reason.as_deref(), Some("typing command name"));
+        assert!(r.is_empty(), "no lookup may have populated the cache");
+
+        // A completed name followed by a space is the subcommand case.
+        let out = complete("git ", 4, &r);
+        assert!(!out.items.is_empty(), "{:?}", out.reason);
+    }
+
+    #[test]
+    fn no_spec_reason_round_trips_through_no_spec_binary() {
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete("nosuchbin ", 10, &r);
+        assert!(out.items.is_empty());
+        let reason = out.reason.expect("miss carries a reason");
+        assert_eq!(no_spec_binary(&reason), Some("nosuchbin"));
+
+        // Every other empty reason must NOT look like a miss, or the
+        // tally would record noise under a bogus name.
+        let empty = complete("", 0, &r).reason.expect("reason");
+        assert_eq!(no_spec_binary(&empty), None);
     }
 
     #[test]

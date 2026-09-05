@@ -27,13 +27,15 @@ pub mod spec;
 pub mod spec_loader;
 pub mod spec_parser;
 
+pub mod derived;
 pub mod frecency;
+pub mod misses;
 
 #[cfg(feature = "quickjs")]
 pub mod tier_c;
 
-pub use complete::{CompleteResult, SpecRegistry, complete, complete_in};
-pub use config::{MatchMode, MatchingConfig};
+pub use complete::{CompleteResult, SpecRegistry, complete, complete_in, no_spec_binary};
+pub use config::{Config, DerivedConfig, MatchMode, MatchingConfig};
 pub use frecency::FrecencyStore;
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};

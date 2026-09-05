@@ -20,6 +20,64 @@ pub const SOCKET_NAME: &str = "nervd.sock";
 pub const PID_NAME: &str = "nervd.pid";
 pub const DAEMON_LOG_NAME: &str = "nervd.log";
 pub const SPECS_SUBDIR: &str = "specs";
+pub const FRECENCY_NAME: &str = "frecency.tsv";
+pub const MISSES_NAME: &str = "misses.tsv";
+pub const DERIVED_SUBDIR: &str = "derived";
+
+/// Write `content` to `path` through a sibling temp file and a rename.
+///
+/// Every file nerv writes that another process may be reading goes
+/// through here: rc files the user's shell sources, and the cache files
+/// (`frecency.tsv`, `misses.tsv`, `derived/*.json`) that `nerv doctor`
+/// reads while the daemon writes. A plain `fs::write` truncates first,
+/// so a concurrent reader can see a half-written file; rename is atomic
+/// on the same filesystem, so it sees either the old file or the new.
+///
+/// An existing target keeps its permissions — an rc file the user
+/// made `0600` must not come back `0644`. Cache files are created
+/// fresh and take the default.
+pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::other("path has no file name"))?;
+    let tmp = path.with_file_name(format!("{file_name}.nerv-tmp"));
+    // Every early return unlinks the temp file: `nerv uninstall` rewrites
+    // rc files through here and must leave no trace, not even on failure
+    // (uninstall-spec §4).
+    let write = |tmp: &std::path::Path| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(tmp, meta.permissions());
+        }
+        std::fs::rename(tmp, path)
+    };
+    write(&tmp).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
+/// A plain executable stem as the user would type it: 2–64 chars of
+/// `[A-Za-z0-9_.+-]`, starting alphanumeric. Rejects paths (`./x`,
+/// `/usr/bin/x`), single letters, and anything carrying whitespace or a
+/// TSV delimiter. Shared by the miss tally (what to count) and spec
+/// derivation (what to ask for `--help`).
+pub fn is_command_stem(name: &str) -> bool {
+    if name.len() < 2 || name.len() > 64 {
+        return false;
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
+}
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
@@ -47,6 +105,23 @@ pub fn pid_path() -> Option<PathBuf> {
 
 pub fn daemon_log_path() -> Option<PathBuf> {
     log_dir().map(|d| d.join(DAEMON_LOG_NAME))
+}
+
+/// `~/Library/Caches/nerv/misses.tsv` — local tally of commands that
+/// completed empty for want of a spec (`crate::misses`). Cache, not
+/// config: it is regenerable diagnostics and `nerv uninstall` sweeps
+/// it with the rest of the cache dir (`docs/uninstall-spec.md` §2).
+pub fn misses_path() -> Option<PathBuf> {
+    cache_dir().map(|c| c.join(MISSES_NAME))
+}
+
+/// `~/Library/Caches/nerv/derived/` — specs derived from a command's
+/// own `--help` output (`crate::derived`). Cache, not config: every
+/// file here is regenerable from the installed binary, so `nerv
+/// uninstall` sweeps it with the rest of the cache and `--keep-config`
+/// does not preserve it.
+pub fn derived_specs_dir() -> Option<PathBuf> {
+    cache_dir().map(|c| c.join(DERIVED_SUBDIR))
 }
 
 /// `~/Library/Caches/nerv/specs/` — JSON spec cache populated by
@@ -142,38 +217,56 @@ pub struct SpecLayers {
     pub overlay: Option<PathBuf>,
     /// The [`resolve_specs_dir`] chain: env → user cache → bundled.
     pub primary: PathBuf,
+    /// `~/Library/Caches/nerv/derived/` when derivation is enabled.
+    /// Last, so a hand-authored overlay spec and the bundled set both
+    /// beat anything scraped out of `--help`.
+    pub derived: Option<PathBuf>,
 }
 
 impl SpecLayers {
-    /// Registry order: overlay first, primary last.
+    /// Registry order: overlay, primary, derived.
     pub fn dirs(&self) -> Vec<PathBuf> {
         self.overlay
             .iter()
             .cloned()
             .chain(std::iter::once(self.primary.clone()))
+            .chain(self.derived.iter().cloned())
             .collect()
     }
 }
 
 /// Resolve every layer:
 ///
-/// 1. `NERV_SPECS_DIR` set → that dir **alone** as primary, no overlay.
-///    Test isolation must stay airtight, so a developer's real overlay
-///    never leaks into an e2e run.
+/// 1. `NERV_SPECS_DIR` set → that dir **alone** as primary, no overlay
+///    and no derived layer. Test isolation must stay airtight, so
+///    neither a developer's real overlay nor a derived cache ever leaks
+///    into an e2e run.
 /// 2. Otherwise overlay = the user dir if it exists, primary = the
-///    unchanged [`resolve_specs_dir`] chain.
+///    unchanged [`resolve_specs_dir`] chain, derived = the cache dir
+///    when `derive_enabled`.
 ///
-/// Contract: `docs/spec-conversion-policy.md` §6.1 "사용자 overlay".
-pub fn resolve_spec_layers() -> Option<SpecLayers> {
+/// Contract: `docs/spec-conversion-policy.md` §6.1 "사용자 overlay",
+/// §6.2 "파생 spec".
+pub fn resolve_spec_layers(derive_enabled: bool) -> Option<SpecLayers> {
     if let Some(d) = std::env::var_os("NERV_SPECS_DIR") {
         return Some(SpecLayers {
             overlay: None,
             primary: PathBuf::from(d),
+            derived: None,
         });
     }
     let primary = resolve_specs_dir()?;
     let overlay = user_specs_dir().filter(|o| o.is_dir());
-    Some(SpecLayers { overlay, primary })
+    let derived = if derive_enabled {
+        derived_specs_dir()
+    } else {
+        None
+    };
+    Some(SpecLayers {
+        overlay,
+        primary,
+        derived,
+    })
 }
 
 #[cfg(test)]
@@ -210,6 +303,42 @@ mod tests {
         out
     }
 
+    /// A failed write leaves no temp file behind — `nerv uninstall`
+    /// rewrites rc files through here and is specced for trace zero
+    /// even when a step fails.
+    #[test]
+    fn write_atomic_failure_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // The target is a non-empty directory: the temp file is created
+        // and written fine, and only the final rename fails. That is the
+        // branch that must clean up.
+        let target = tmp.path().join("rc");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("occupant"), b"x").unwrap();
+        assert!(write_atomic(&target, "content").is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("nerv-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp left behind: {leftovers:?}");
+    }
+
+    /// The happy path replaces by rename and keeps the target's mode.
+    #[test]
+    fn write_atomic_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("rc");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&target, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a 0600 rc must not come back 0644");
+    }
+
     #[test]
     fn cache_dir_macos_layout() {
         with_temp_home(|home| {
@@ -241,6 +370,7 @@ mod tests {
             assert_eq!(socket_path().unwrap(), cache.join("nervd.sock"));
             assert_eq!(pid_path().unwrap(), cache.join("nervd.pid"));
             assert_eq!(specs_dir().unwrap(), cache.join("specs"));
+            assert_eq!(misses_path().unwrap(), cache.join("misses.tsv"));
             assert_eq!(
                 daemon_log_path().unwrap(),
                 home.join("Library/Logs/nerv/nervd.log"),
@@ -261,6 +391,8 @@ mod tests {
             && socket_path().is_none()
             && pid_path().is_none()
             && daemon_log_path().is_none()
+            && misses_path().is_none()
+            && derived_specs_dir().is_none()
             && specs_dir().is_none();
         if let Some(p) = prev {
             unsafe { std::env::set_var("HOME", p) };
@@ -321,9 +453,39 @@ mod tests {
     #[test]
     fn layers_without_overlay_is_primary_only() {
         with_temp_home(|home| {
-            let got = resolve_spec_layers().unwrap();
+            let got = resolve_spec_layers(false).unwrap();
             assert_eq!(got.overlay, None);
             assert_eq!(got.primary, home.join("Library/Caches/nerv/specs"));
+            assert_eq!(got.dirs(), vec![home.join("Library/Caches/nerv/specs")]);
+        });
+    }
+
+    /// The derived layer goes last: a hand-authored overlay spec and the
+    /// bundled set both beat anything scraped out of `--help`.
+    #[test]
+    fn derived_layer_is_last_when_enabled() {
+        with_temp_home(|home| {
+            let overlay = home.join(".config/nerv/specs");
+            std::fs::create_dir_all(&overlay).unwrap();
+            let got = resolve_spec_layers(true).unwrap();
+            assert_eq!(
+                got.dirs(),
+                vec![
+                    overlay,
+                    home.join("Library/Caches/nerv/specs"),
+                    home.join("Library/Caches/nerv/derived"),
+                ]
+            );
+        });
+    }
+
+    /// Derivation off → the layer is absent entirely, so nothing can
+    /// read a stale derived file either.
+    #[test]
+    fn derived_layer_absent_when_disabled() {
+        with_temp_home(|home| {
+            let got = resolve_spec_layers(false).unwrap();
+            assert_eq!(got.derived, None);
             assert_eq!(got.dirs(), vec![home.join("Library/Caches/nerv/specs")]);
         });
     }
@@ -336,7 +498,7 @@ mod tests {
         with_temp_home(|home| {
             let overlay = home.join(".config/nerv/specs");
             std::fs::create_dir_all(&overlay).unwrap();
-            let got = resolve_spec_layers().unwrap();
+            let got = resolve_spec_layers(false).unwrap();
             assert_eq!(
                 got.dirs(),
                 vec![overlay, home.join("Library/Caches/nerv/specs")]
@@ -355,13 +517,15 @@ mod tests {
             std::fs::write(overlay.join("claude.json"), "{}").unwrap();
             let over = home.join("override-specs");
             unsafe { std::env::set_var("NERV_SPECS_DIR", &over) };
-            let got = resolve_spec_layers();
+            // Even with derivation on, the env override collapses to one dir.
+            let got = resolve_spec_layers(true);
             unsafe { std::env::remove_var("NERV_SPECS_DIR") };
             assert_eq!(
                 got,
                 Some(SpecLayers {
                     overlay: None,
-                    primary: over
+                    primary: over,
+                    derived: None,
                 })
             );
         });

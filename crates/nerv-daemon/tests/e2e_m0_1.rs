@@ -49,6 +49,7 @@ async fn complete_returns_real_engine_suggestions() {
         // Suppress the user's real frecency history so test ordering
         // is deterministic regardless of local accept counts.
         .env("NERV_FRECENCY_FILE", "-")
+        .env("NERV_MISSES_FILE", "-")
         .env("NERV_LOG", "debug")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())

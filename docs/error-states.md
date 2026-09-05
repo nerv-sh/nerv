@@ -266,15 +266,61 @@ THEN:
 - 강제 X — `info` 등급 (회색 ℹ 아이콘).
 - exit code 영향 X (성공으로 카운트).
 - 본 항목은 *자동 실행* 시 1줄 요약에 포함되지 *않는다* (소음 방지).
+
+### 3.6.3 spec misses 안내 (soft notice)
+
+데몬은 완성이 "spec 없음" 으로 비어 반환될 때마다 그 명령 이름을
+`~/Library/Caches/nerv/misses.tsv` 에 로컬 집계한다. 기록이 있으면 `nerv doctor` 가
+가장 많이 빈 명령 최대 5개를 한 줄로 표시:
+
+```
+  ✓ spec misses         zeph 12, aic2 9, aicommit2 4
+                        → add a spec in ~/.config/nerv/specs
+```
+
+- **로컬 전용**: 파일은 캐시 디렉터리 안에만 존재하고 어디로도 전송되지 않는다
+  (PLAN §4 비목표 = 텔레메트리). `nerv uninstall` 이 캐시와 함께 삭제
+  (uninstall-spec §2 행 5). 테스트/벤치 격리는 `NERV_MISSES_FILE=-`.
+- **쓰기 정책**: 집계는 in-memory 이고 디스크 쓰기는 **5초에 한 번**으로 throttle
+  (`MIN_FLUSH_INTERVAL`) — 매 키입력마다 전량 재기록하면 위젯이 기다리는 완성 응답 안에서
+  파일 쓰기가 반복된다. 마지막 창의 집계는 데몬 graceful shutdown (SIGTERM) 이
+  강제 flush 해서 보존한다. 쓰기는 temp+rename **원자적** — `nerv doctor` 가 다른
+  프로세스에서 같은 파일을 읽으므로 잘린 파일을 보면 안 된다.
+- 기록이 0건이면 **행 자체가 없다** (신규 설치 출력 불변).
+- `ok` 등급 — exit code 영향 X. 사용자가 overlay spec (spec-conversion-policy §6.1)
+  을 쓸 대상을 고르는 신호지 결함이 아니다.
+- 이름은 래퍼를 벗긴 실제 명령이다 (`sudo foo` → `foo`) — 엔진이 이미
+  wrapped command 를 해석한 뒤의 이름을 reason 에 싣는다.
+- **확정된 miss 만 센다.** cold stem 의 첫 키는 파싱·파생(§3.6.4)이 백그라운드에서
+  도는 동안 빈 응답을 내는데, 그건 miss 가 아니다 — 다음 키에 완성이 뜬다. 데몬은
+  `SpecRegistry::is_loading` 이 false 일 때만 기록한다. 명령 이름을 치는 중인
+  부분 입력 (`ze`, `zep`) 은 애초에 lookup 을 안 하므로 집계에 안 들어간다.
+
+### 3.6.4 derived specs 안내 (soft notice)
+
+파생 spec (spec-conversion-policy §6.2) 이 하나라도 있으면 `nerv doctor` 가 표시:
+
+```
+  ✓ derived specs        3 in ~/Library/Caches/nerv/derived
+```
+
+- 하나도 없으면 **행 자체가 없다** (신규 설치 출력 불변).
+- 파생 파일이 깨졌으면 그 행만 red + `delete that file in <dir>` — `specs` 행은
+  green 을 유지한다. overlay 행과 같은 원칙: 남의 문제로 "reinstall" 을 안내하지 않는다.
+  파생본은 nerv 가 스스로 만든 것이므로 조치는 **삭제** (다음 lookup 이 다시 만든다).
+- `nerv doctor` 와 `nerv spec list` 는 파생 층을 **읽기만** 한다 — 진단 명령이 사용자
+  명령을 실행하는 일은 없다 (파생은 데몬의 lookup 경로에서만 일어난다).
+- `nerv spec list` 는 파생 행에 `+`, overlay 행에 `*` 를 붙이고 실제로 쓰인 층의
+  범례만 출력한다.
 - 사용자가 `nerv doctor` 를 직접 실행했을 때만 표시.
 
-### 3.6.3 디바운스
+### 3.6.5 디바운스
 
 - `nerv start` 직후 자동 진단은 세션당 1회 만 — 이후 키 입력에 영향 X.
 - 같은 zsh 세션에서 데몬 재시작이 있어도 추가 표시 억제 (24시간).
 - `brew upgrade` 감지 후 진단은 *1회 한정*, 마커 블록 메타 갱신 후 silent.
 
-### 3.6.4 비목표
+### 3.6.6 비목표
 
 - 백그라운드에서 주기적으로 자동 실행하는 daemon timer X.
 - 네트워크 호출 (latest version 확인 등) X. spec age 는 빌드 메타 (`manifest.json` 의 build_date) 만 비교.
@@ -369,3 +415,4 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 
 *문서 v1.1 — PLAN.md §5.5 의 정밀 명세. v1.0 → v1.1 변경: §3.6 doctor 자동 실행 트리거 신설, spec age soft notice 추가, E2 의 잔존 `nerv spec update` 참조 제거 (PLAN GO 조건 ①). 변경 트리거: 새 라이벌 도구 출현, schema v3 도입, doctor 추가 항목 합의 시.*
 *v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: spec 디렉터리 경로 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` (PRD §8 정합), E2 감지 수단에 `nerv-engine::spec_loader` (loadSpec.ts 포팅) 명시, §5.1 에 v0.6 구현 매핑 추가 (nerv-diag 흡수 활용 + cmd_doctor 필터링). 5종 카탈로그 / 메시지 톤 / exit code 규약 모두 무변경. 변경 트리거: figterm path 의 신규 에러 클래스 발견, rquickjs Tier C 실행 실패 시나리오 정의 시 (E6 후보).*
+*v1.4 — 롱테일 spec 커버리지 정합 (2026-09-05). v1.3 → v1.4 변경: §3.6.3 `spec misses` 신설 (데몬의 로컬 miss 집계 `misses.tsv` — throttle 5s, temp+rename, 확정된 miss 만, 텔레메트리 아님), §3.6.4 `derived specs` 신설 (`--help` 파생 spec 행 + 파손 시 "delete that file" 안내, doctor/spec list 는 읽기 전용), 기존 §3.6.3 디바운스 / §3.6.4 비목표 를 §3.6.5 / §3.6.6 으로 재번호. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경. 변경 트리거: 파생 spec 파싱 실패 클래스가 사용자 가시 에러로 승격될 때 (E6 후보), miss 집계에 명령별 조치 hint 추가 시.*

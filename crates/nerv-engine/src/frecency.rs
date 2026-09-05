@@ -118,34 +118,38 @@ impl FrecencyStore {
         if !dirty {
             return;
         }
-        let table = match self.table.lock() {
-            Ok(t) => t,
-            Err(_) => return,
+        // Serialize under the lock, then release it before the write.
+        // `score()` takes this same mutex once per suggestion while
+        // ranking a completion; it must never queue behind an fsync.
+        let out = {
+            let table = match self.table.lock() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            let mut out = String::new();
+            for ((spec, ins), entry) in table.iter() {
+                // Skip entries whose strings contain TAB or newline — the
+                // row encoding can't represent them. Should be unreachable
+                // for normal suggestions but defends the on-disk format.
+                if spec.contains('\t') || spec.contains('\n') {
+                    continue;
+                }
+                if ins.contains('\t') || ins.contains('\n') {
+                    continue;
+                }
+                out.push_str(spec);
+                out.push('\t');
+                out.push_str(ins);
+                out.push('\t');
+                out.push_str(&entry.count.to_string());
+                out.push('\t');
+                out.push_str(&entry.last_unix.to_string());
+                out.push('\n');
+            }
+            out
         };
-        let mut out = String::new();
-        for ((spec, ins), entry) in table.iter() {
-            // Skip entries whose strings contain TAB or newline — the
-            // row encoding can't represent them. Should be unreachable
-            // for normal suggestions but defends the on-disk format.
-            if spec.contains('\t') || spec.contains('\n') {
-                continue;
-            }
-            if ins.contains('\t') || ins.contains('\n') {
-                continue;
-            }
-            out.push_str(spec);
-            out.push('\t');
-            out.push_str(ins);
-            out.push('\t');
-            out.push_str(&entry.count.to_string());
-            out.push('\t');
-            out.push_str(&entry.last_unix.to_string());
-            out.push('\n');
-        }
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::write(path, out).is_ok() {
+        // temp+rename: the CLI reads this file while the daemon writes it.
+        if crate::paths::write_atomic(path, &out).is_ok() {
             if let Ok(mut d) = self.dirty.lock() {
                 *d = false;
             }
@@ -175,7 +179,8 @@ fn parse_row(line: &str) -> Option<((String, String), Entry)> {
     Some(((spec, ins), Entry { count, last_unix }))
 }
 
-fn now_unix() -> u64 {
+/// Seconds since the epoch — the timestamp both TSV tallies stamp.
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

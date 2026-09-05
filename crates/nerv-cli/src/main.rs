@@ -240,7 +240,7 @@ fn apply_init_block(home: &std::path::Path, shell_name: &str, block: &str) {
     if up.action == UpsertAction::Current {
         return;
     }
-    if let Err(e) = write_rc_atomic(&rc, &up.content) {
+    if let Err(e) = paths::write_atomic(&rc, &up.content) {
         eprintln!("[nerv] cannot write ~/{rel} ({e}) — append the printed block manually");
         return;
     }
@@ -253,31 +253,6 @@ fn apply_init_block(home: &std::path::Path, shell_name: &str, block: &str) {
         ),
         UpsertAction::Current => unreachable!("returned above"),
     }
-}
-
-/// Atomic rc write: temp file in the same directory + rename, so a shell
-/// mid-way through sourcing the file keeps reading the old inode and
-/// never sees a half-written rc (uninstall-spec §4 step 3 semantics).
-/// Preserves the original file's permissions across the inode swap.
-fn write_rc_atomic(rc: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = rc.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file_name = rc
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::other("rc path has no file name"))?;
-    let tmp = rc.with_file_name(format!("{file_name}.nerv-tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content.as_bytes())?;
-        f.sync_all()?;
-    }
-    if let Ok(meta) = std::fs::metadata(rc) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    std::fs::rename(&tmp, rc)
 }
 
 /// Shells that reach autocomplete only through the PTY shim (no ZLE).
@@ -525,9 +500,37 @@ fn build_doctor_report() -> DoctorReport {
     check_shell_hook(&mut r);
     check_daemon(&mut r);
     check_specs(&mut r);
+    check_spec_misses(&mut r);
     check_schema_version(&mut r);
     check_pty_mode(&mut r);
     r
+}
+
+/// Commands the daemon completed empty for want of a spec. Advisory
+/// (never red): it is the pointer toward writing an overlay spec, not a
+/// fault. Silent when nothing has been recorded — a fresh install shows
+/// no row at all.
+fn check_spec_misses(r: &mut DoctorReport) {
+    let Some(path) = paths::misses_path() else {
+        return;
+    };
+    check_spec_misses_in(r, &path);
+}
+
+/// Path-injected half of [`check_spec_misses`], so tests exercise the
+/// row without touching the real cache dir.
+fn check_spec_misses_in(r: &mut DoctorReport, path: &std::path::Path) {
+    let top = nerv_engine::misses::MissCounter::load(path).top_n(5);
+    if top.is_empty() {
+        return;
+    }
+    let detail = top
+        .iter()
+        .map(|(name, count)| format!("{name} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let hint = paths::user_specs_dir().map(|d| format!("add a spec in {}", d.display()));
+    r.push(DoctorLevel::Ok, "spec misses", detail, hint);
 }
 
 /// E5: spec cache schema version vs the daemon's supported version
@@ -535,7 +538,7 @@ fn build_doctor_report() -> DoctorReport {
 fn check_schema_version(r: &mut DoctorReport) {
     // env override → populated user cache → bundled (brew share/ or
     // tarball specs/) → user path. Same chain the daemon reads.
-    let Some(layers) = paths::resolve_spec_layers() else {
+    let Some(layers) = paths::resolve_spec_layers(config().derived.enabled) else {
         return;
     };
     match nerv_engine::manifest::check_schema(&layers.primary) {
@@ -840,11 +843,19 @@ fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
     }
 }
 
+/// `nerv.toml`, read once per process — the same file the daemon
+/// reads, so doctor and `spec list` describe the exact layer set
+/// completions use, and every call site in one run agrees.
+fn config() -> &'static nerv_engine::Config {
+    static CONFIG: std::sync::OnceLock<nerv_engine::Config> = std::sync::OnceLock::new();
+    CONFIG.get_or_init(nerv_engine::Config::load_default)
+}
+
 /// E2 + E5: specs loaded + parse errors.
 fn check_specs(r: &mut DoctorReport) {
     // Same layered chain the daemon reads (overlay → env/user cache →
     // bundled), so doctor reports the specs completions actually use.
-    let Some(layers) = paths::resolve_spec_layers() else {
+    let Some(layers) = paths::resolve_spec_layers(config().derived.enabled) else {
         r.push(DoctorLevel::Err, "specs", "HOME unset".into(), None);
         return;
     };
@@ -873,9 +884,13 @@ fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
     // as "your file", not as a corrupt install. Every error names its file,
     // so split on which layer the file lives in.
     let overlay = layers.overlay.as_deref();
-    let (overlay_errs, primary_errs): (Vec<_>, Vec<_>) = errs
-        .iter()
-        .partition(|e| overlay.is_some_and(|o| std::path::Path::new(e.path()).starts_with(o)));
+    let derived = layers.derived.as_deref();
+    let in_layer = |e: &nerv_engine::SpecLoadError, layer: Option<&std::path::Path>| {
+        layer.is_some_and(|l| std::path::Path::new(e.path()).starts_with(l))
+    };
+    let (overlay_errs, rest): (Vec<_>, Vec<_>) = errs.iter().partition(|e| in_layer(e, overlay));
+    let (derived_errs, primary_errs): (Vec<_>, Vec<_>) =
+        rest.into_iter().partition(|e| in_layer(e, derived));
     if errs.is_empty() && count == 0 {
         r.push(
             DoctorLevel::Warn,
@@ -894,8 +909,11 @@ fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
         );
     }
     r.push(DoctorLevel::Ok, "specs", format!("{count} loaded"), None);
+    // One pass over the layers for both rows below.
+    let by_origin = registry.stems_by_origin();
+    let served_by = |layer: &std::path::Path| by_origin.values().filter(|o| *o == layer).count();
     if let Some(o) = overlay {
-        let served = registry.stems_served_from(o).len();
+        let served = served_by(o);
         if overlay_errs.is_empty() {
             r.push(
                 DoctorLevel::Ok,
@@ -909,6 +927,28 @@ fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
                 "user specs",
                 format!("{} disabled: {}", overlay_errs.len(), overlay_errs[0]),
                 Some(format!("fix or remove that file in {}", o.display())),
+            );
+        }
+    }
+    // Derived specs get their own row too, for the same reason: a bad
+    // one is nerv's own scraping, not a corrupt install. The row is
+    // omitted entirely when nothing has been derived yet, so a fresh
+    // install reads exactly as before.
+    if let Some(d) = derived {
+        let served = served_by(d);
+        if !derived_errs.is_empty() {
+            r.push(
+                DoctorLevel::Err,
+                "derived specs",
+                format!("{} disabled: {}", derived_errs.len(), derived_errs[0]),
+                Some(format!("delete that file in {}", d.display())),
+            );
+        } else if served > 0 {
+            r.push(
+                DoctorLevel::Ok,
+                "derived specs",
+                format!("{served} in {}", d.display()),
+                None,
             );
         }
     }
@@ -1114,7 +1154,7 @@ fn process_alive(_pid: u32) -> bool {
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
-    let layers = paths::resolve_spec_layers()
+    let layers = paths::resolve_spec_layers(config().derived.enabled)
         .ok_or_else(|| anyhow::anyhow!("HOME unset and NERV_SPECS_DIR not set"))?;
     for line in spec_list_lines(&layers) {
         println!("{line}");
@@ -1138,9 +1178,18 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
         return vec![format!("(no specs found in {})", primary.display())];
     }
     let overlay = layers.overlay.as_deref();
-    let from_overlay: std::collections::HashSet<String> = overlay
-        .map(|o| registry.stems_served_from(o).into_iter().collect())
-        .unwrap_or_default();
+    let derived = layers.derived.as_deref();
+    // One pass over the layers: stem → the layer that serves it.
+    let by_origin = registry.stems_by_origin();
+    let served_by = |layer: Option<&std::path::Path>| -> std::collections::HashSet<&str> {
+        by_origin
+            .iter()
+            .filter(|(_, o)| layer.is_some_and(|l| o.as_path() == l))
+            .map(|(stem, _)| stem.as_str())
+            .collect()
+    };
+    let from_overlay = served_by(overlay);
+    let from_derived = served_by(derived);
 
     let mut lines = vec![format!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS")];
     for name in names {
@@ -1150,16 +1199,29 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
         };
         let (subs, opts) = count_tree(spec.as_ref());
         let tier = compute_tier(spec.as_ref());
-        let mark = if from_overlay.contains(&name) {
+        let mark = if from_overlay.contains(name.as_str()) {
             "*"
+        } else if from_derived.contains(name.as_str()) {
+            "+"
         } else {
             ""
         };
         lines.push(format!("{name:<18} {subs:>5} {opts:>5}  {tier}{mark}"));
     }
-    if let Some(o) = overlay {
+    let legend: Vec<String> = [
+        overlay
+            .filter(|_| !from_overlay.is_empty())
+            .map(|o| format!("* = served from {} (user overlay)", o.display())),
+        derived
+            .filter(|_| !from_derived.is_empty())
+            .map(|d| format!("+ = derived from --help, cached in {}", d.display())),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !legend.is_empty() {
         lines.push(String::new());
-        lines.push(format!("* = served from {} (user overlay)", o.display()));
+        lines.extend(legend);
     }
     lines
 }
@@ -1395,16 +1457,11 @@ fn strip_shell_hooks(
             log.warn("shell hook", &format!("backup {}: {e}", backup.display()));
             continue;
         }
-        // Atomic: write to temp file in same dir, then rename.
-        let tmp = path.with_extension("nerv-tmp");
-        if let Err(e) = fs::write(&tmp, &stripped) {
-            log.warn("shell hook", &format!("temp write: {e}"));
-            let _ = fs::remove_file(&tmp);
-            continue;
-        }
-        if let Err(e) = fs::rename(&tmp, &path) {
-            log.warn("shell hook", &format!("rename: {e}"));
-            let _ = fs::remove_file(&tmp);
+        // temp+rename through the shared writer, same as `nerv init`
+        // writes this file — a `0600` rc must not come back `0644`, and
+        // a torn read must not be possible for a shell sourcing it.
+        if let Err(e) = paths::write_atomic(&path, &stripped) {
+            log.warn("shell hook", &format!("write {}: {e}", path.display()));
             continue;
         }
         total_blocks_removed += count;
@@ -2171,6 +2228,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// A recorded miss tally becomes one advisory row, most-missed
+    /// first, capped at five names.
+    #[test]
+    fn doctor_reports_top_spec_misses() {
+        let path = std::env::temp_dir().join(format!("nerv-misses-doc-{}.tsv", std::process::id()));
+        let counter = nerv_engine::misses::MissCounter::load(&path);
+        for _ in 0..12 {
+            counter.record("zeph");
+        }
+        for _ in 0..9 {
+            counter.record("aic2");
+        }
+        counter.flush_if_dirty();
+
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path);
+        assert_eq!(
+            doctor_labels(&r),
+            [("spec misses".to_string(), "Ok".into())]
+        );
+        assert_eq!(r.entries[0].detail, "zeph 12, aic2 9");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// No recorded misses → no row (a fresh install's doctor output is
+    /// unchanged).
+    #[test]
+    fn doctor_omits_spec_misses_row_when_nothing_recorded() {
+        let path =
+            std::env::temp_dir().join(format!("nerv-misses-none-{}.tsv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path);
+        assert!(r.entries.is_empty());
+    }
+
+    /// Derived specs count in their own green row, so a user can see
+    /// what nerv scraped without confusing it with the bundled set.
+    #[test]
+    fn doctor_reports_derived_specs_row() {
+        let (_overlay, primary) = overlay_layers("derived-ok");
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("zeph.json"), r#"{"name":"zeph"}"#).unwrap();
+
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_with_derived(primary, Some(derived.clone())));
+        let rows = doctor_labels(&r);
+        assert_eq!(
+            rows,
+            [
+                ("specs".to_string(), "Ok".to_string()),
+                ("derived specs".into(), "Ok".into())
+            ]
+        );
+        assert_eq!(r.entries[1].detail, format!("1 in {}", derived.display()));
+    }
+
+    /// A broken derived file is nerv's own scraping gone wrong, not a
+    /// corrupt install: its own red row, and the primary stays green.
+    #[test]
+    fn doctor_isolates_broken_derived_file() {
+        let (_overlay, primary) = overlay_layers("derived-broken");
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("zeph.json"), "{ not json").unwrap();
+
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_with_derived(primary, Some(derived.clone())));
+        let rows = doctor_labels(&r);
+        assert_eq!(
+            rows,
+            [
+                ("specs".to_string(), "Ok".to_string()),
+                ("derived specs".into(), "Err".into())
+            ]
+        );
+        assert_eq!(
+            r.entries[1].hint.as_deref(),
+            Some(format!("delete that file in {}", derived.display()).as_str())
+        );
+    }
+
+    /// Nothing derived yet → no row at all, so a fresh install's doctor
+    /// output is byte-for-byte what it was before this feature.
+    #[test]
+    fn doctor_omits_derived_row_when_nothing_derived() {
+        let (_overlay, primary) = overlay_layers("derived-empty");
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        let mut r = DoctorReport::default();
+        check_specs_in(&mut r, &layers_with_derived(primary, Some(derived)));
+        assert_eq!(doctor_labels(&r), [("specs".to_string(), "Ok".to_string())]);
+    }
+
+    /// `spec list` marks derived rows `+`, overlay rows `*`, and prints
+    /// a legend line only for the layers that actually served something.
+    #[test]
+    fn spec_list_marks_derived_rows_and_adds_legend() {
+        let (overlay, primary) = overlay_layers("list-derived");
+        std::fs::write(overlay.join("claude.json"), r#"{"name":"claude"}"#).unwrap();
+        let derived = primary.parent().unwrap().join("derived");
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("zeph.json"), r#"{"name":"zeph"}"#).unwrap();
+
+        let layers = paths::SpecLayers {
+            overlay: Some(overlay.clone()),
+            primary,
+            derived: Some(derived.clone()),
+        };
+        let lines = spec_list_lines(&layers);
+        let row = |name: &str| {
+            lines
+                .iter()
+                .find(|l| l.starts_with(name))
+                .unwrap_or_else(|| panic!("no row for {name} in {lines:?}"))
+                .clone()
+        };
+        assert!(row("claude").ends_with('*'), "{}", row("claude"));
+        assert!(row("zeph").ends_with('+'), "{}", row("zeph"));
+        assert!(!row("git").ends_with(['*', '+']), "{}", row("git"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("+ = derived from --help")),
+            "{lines:?}"
+        );
+    }
+
+    fn layers_with_derived(
+        primary: std::path::PathBuf,
+        derived: Option<std::path::PathBuf>,
+    ) -> paths::SpecLayers {
+        paths::SpecLayers {
+            overlay: None,
+            primary,
+            derived,
+        }
+    }
+
     /// Two-layer fixture: (overlay, primary) under a fresh temp dir.
     fn overlay_layers(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!("nerv-layers-{tag}-{}", std::process::id()));
@@ -2192,7 +2389,11 @@ mod tests {
         overlay: Option<std::path::PathBuf>,
         primary: std::path::PathBuf,
     ) -> paths::SpecLayers {
-        paths::SpecLayers { overlay, primary }
+        paths::SpecLayers {
+            overlay,
+            primary,
+            derived: None,
+        }
     }
 
     fn doctor_labels(r: &DoctorReport) -> Vec<(String, String)> {

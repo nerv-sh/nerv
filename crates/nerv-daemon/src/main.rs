@@ -12,9 +12,10 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
+use nerv_engine::misses::MissCounter;
 use nerv_engine::{
-    FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, Suggestion,
-    complete_in, manifest, paths,
+    Config, FrecencyStore, MatchMode, Request, Response, SpecRegistry, Suggestion, complete_in,
+    manifest, no_spec_binary, paths,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -41,11 +42,18 @@ async fn main() -> anyhow::Result<()> {
     // user overlay `~/.config/nerv/specs/` (if the dir exists) is layered
     // on top — a stem there replaces the bundled file wholesale. The E5
     // schema gate below looks at the primary dir only.
-    let layers = paths::resolve_spec_layers().expect("HOME present (just checked)");
+    // `~/.config/nerv/nerv.toml`, read once at boot — matching mode
+    // (PLAN §5.1) and derivation switch. Edits need a daemon restart.
+    let config = Config::load_default();
+    info!(mode = ?config.matching.mode, derive = config.derived.enabled, "config loaded");
+    let layers =
+        paths::resolve_spec_layers(config.derived.enabled).expect("HOME present (just checked)");
 
     // Lazy registry: no upfront disk scan. Specs are read on first
-    // lookup and cached. Startup stays O(1) even with 700+ specs.
-    let registry = Arc::new(SpecRegistry::at_dirs(&layers.dirs()));
+    // lookup and cached. Startup stays O(1) even with 700+ specs. With
+    // a derived layer present, a command with no spec anywhere gets one
+    // from its own `--help` on the background populator thread.
+    let registry = Arc::new(SpecRegistry::for_layers(&layers));
     info!(layers = ?layers, "spec registry initialized (lazy)");
 
     // E5: reject a spec cache built for a different schema version
@@ -74,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     // benchmarks that don't want the user's real history bleeding in).
     let frecency_path = std::env::var_os("NERV_FRECENCY_FILE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| cache_dir.join("frecency.tsv"));
+        .unwrap_or_else(|| cache_dir.join(paths::FRECENCY_NAME));
     let frecency = if frecency_path == std::path::PathBuf::from("-") {
         Arc::new(FrecencyStore::empty())
     } else {
@@ -86,11 +94,23 @@ async fn main() -> anyhow::Result<()> {
         "frecency store loaded"
     );
 
-    // User matching mode — defaults to prefix; opt-in fuzzy via
-    // `~/.config/nerv/nerv.toml` (PLAN §5.1). Loaded once at boot;
-    // edits require a daemon restart.
-    let matching = MatchingConfig::load_default();
-    info!(mode = ?matching.mode, "matching config loaded");
+    // Spec-miss tally: which commands completed empty for want of a
+    // spec. Local diagnostics only — `nerv doctor` reads it back so the
+    // user knows which overlay spec is worth writing. Same `-` sentinel
+    // as frecency for test isolation.
+    let misses_path = std::env::var_os("NERV_MISSES_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| cache_dir.join(paths::MISSES_NAME));
+    let misses = if misses_path == std::path::PathBuf::from("-") {
+        Arc::new(MissCounter::empty())
+    } else {
+        Arc::new(MissCounter::load(&misses_path))
+    };
+    info!(
+        path = %misses_path.display(),
+        entries = misses.len(),
+        "spec-miss counter loaded"
+    );
 
     // Best-effort cleanup of any stale socket from a previous run.
     let _ = tokio::fs::remove_file(&sock_path).await;
@@ -122,12 +142,14 @@ async fn main() -> anyhow::Result<()> {
                     Ok((stream, _addr)) => {
                         let registry = registry.clone();
                         let frecency = frecency.clone();
+                        let misses = misses.clone();
                         let schema_block = schema_block.clone();
                         tokio::spawn(handle_connection(
                             stream,
                             registry,
                             frecency,
-                            matching.mode,
+                            misses,
+                            config.matching.mode,
                             schema_block,
                         ));
                     }
@@ -141,6 +163,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Last chance to persist the tally: `flush_if_dirty` is throttled
+    // (MIN_FLUSH_INTERVAL) so the counts from the final window are still
+    // in memory here.
+    misses.flush_now();
+
     let _ = tokio::fs::remove_file(&sock_path).await;
     let _ = tokio::fs::remove_file(&pid_path).await;
     Ok(())
@@ -150,6 +177,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     registry: Arc<SpecRegistry>,
     frecency: Arc<FrecencyStore>,
+    misses: Arc<MissCounter>,
     mode: MatchMode,
     schema_block: Arc<Option<String>>,
 ) {
@@ -179,8 +207,32 @@ async fn handle_connection(
                 None => {
                     let registry = registry.clone();
                     let frecency = frecency.clone();
+                    let misses = misses.clone();
                     tokio::task::spawn_blocking(move || {
-                        engine_complete(&registry, &frecency, &line, cursor, cwd.as_deref(), mode)
+                        let resp = engine_complete(
+                            &registry,
+                            &frecency,
+                            &line,
+                            cursor,
+                            cwd.as_deref(),
+                            mode,
+                        );
+                        // A "no spec for X" empty is the only response the
+                        // tally cares about — and only once it is settled.
+                        // The first keystroke on a cold stem returns empty
+                        // while the spec is still parsing or being derived
+                        // from `--help`; counting that would list commands
+                        // that complete fine one key later. The flush is
+                        // throttled inside the counter.
+                        if let Response::Empty { reason: Some(r) } = &resp {
+                            if let Some(binary) = no_spec_binary(r) {
+                                if !registry.is_loading(binary) {
+                                    misses.record(binary);
+                                    misses.flush_if_dirty();
+                                }
+                            }
+                        }
+                        resp
                     })
                     .await
                     .unwrap_or_else(|e| Response::Error {

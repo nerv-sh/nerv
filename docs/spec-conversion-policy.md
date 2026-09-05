@@ -378,6 +378,28 @@ upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없�
 소비자 3곳 (daemon / `nerv doctor` / `nerv spec list`) 은 전부 `resolve_spec_layers()` 를
 쓴다 — 한 곳이라도 `resolve_specs_dir()` 단독으로 남으면 doctor 가 데몬과 다른 spec 을 진단한다.
 
+### 6.2 파생 spec — `~/Library/Caches/nerv/derived/` (2026-09-05)
+
+§6.1 이 **손으로 쓰는** 경로라면 이건 **자동** 경로다. 어느 층에도 spec 이 없는 명령을
+만나면 데몬이 그 명령에게 자기 `--help` 를 물어 spec 을 만든다. 동기는 §6.1 과 같다
+(upstream 정지) — 다르게 푼다: 롱테일은 아무도 손으로 안 쓴다.
+
+| 항목 | 규칙 |
+|------|------|
+| 경로 | `~/Library/Caches/nerv/derived/<name>.json`. **config 가 아니라 cache** — 설치된 바이너리에서 언제든 재생성되므로 `nerv uninstall` 이 캐시째 지우고 `--keep-config` 도 보존하지 않는다 |
+| 층 순서 | `SpecLayers { overlay, primary, derived }` → `[overlay, primary, derived]`. **맨 뒤** — 손으로 쓴 overlay 와 번들이 항상 `--help` 추출본을 이긴다. `NERV_SPECS_DIR` 설정 시 derived 층 없음 |
+| 스위치 | `~/.config/nerv/nerv.toml` 의 `[derived] enabled = false` → 층 자체가 사라지고 **어떤 명령도 spawn 되지 않는다**. 기본값 on. 데몬 부팅 시 1회 로드 (변경엔 재시작) |
+| 추출 대상 | subcommand 이름 / option 이름 / arg placeholder **만**. generator·동적 값 없음 (`--help` 가 그 의미를 안 담는다) |
+| 소스 우선순위 | `--help` → `-h` → `help` → `man`. 선택 기준은 "help 처럼 보이는가" 가 아니라 **파싱 성공** — `ls -h` 는 디렉터리 목록을 뱉는데 길고 여러 줄이라 모양만으로는 통과한다. 그러면 실제로 되는 `man ls` 폴백이 죽는다 (실측: 선택 기준 교체로 `ls` 42 옵션 회복) |
+| 임계값 | subcommand ≥ 1 **또는** option ≥ 3. 미달이면 파일을 쓰지 않는다 — usage 에러·버전 배너가 spec 이 되는 것을 막는다 |
+| 제외 | 경로 형태(`./x`, `/usr/bin/x`), 1글자, 셸 builtin/keyword (`cd`·`export`·`eval`·`if` …) |
+| 실행 안전장치 | 셸 경유 없음 (`sh -c` 금지 — alias·rc 영향 0, 인젝션 면 0), `which` 로 **절대경로** 해석 후 argv 배열로 spawn, env 초기화 (`LANG=C`·`TERM=dumb`·`NO_COLOR=1`·`COLUMNS=200`), stdin `/dev/null`, cwd = 임시 디렉터리, 1초 timeout, 출력 256KB cap, ANSI strip. **`PATH` 만 상속** — `#!/usr/bin/env node` 류 스크립트는 최소 PATH 에서 인터프리터를 못 찾는다 (실측: `zeph --help` → `env: node: No such file or directory`). 바이너리는 이미 절대경로로 확정돼 있어 상속이 안전을 깎지 않는다 |
+| 실행 시점 | `SpecRegistry::lookup` 의 **백그라운드 populator 스레드** — 키스트로크 경로 아님. 파생을 유발한 키는 빈 결과, 다음 키에 spec 이 온다 (대형 번들 spec 과 같은 계약) |
+| 재파생 | 파일 mtime < 바이너리 mtime 일 때만. 그 외엔 디스크 파일 재사용 — 명령을 키입력마다 spawn 하지 않는다 |
+| 파손 파일 | 어느 층에 파일이 있는데 파싱만 실패하면 그 stem 은 negative — 파생이 **덮어쓰지 않는다** |
+| manifest (E5) | derived 에는 두지 않는다. 게이트는 primary 만 |
+| doctor / spec list | derived 층을 **읽기만** 한다 (`load_dirs` 는 파생을 안 한다) — 진단 명령이 사용자 명령을 실행하는 일은 없다 |
+
 ---
 
 ## 7. 회귀 정책
@@ -467,3 +489,4 @@ v0.5 의 M0-9 산출물 5개 중 3개는 v0.5 에서 완료, 2개는 v0.6 폐기
 *v1.1 → v1.2: §5.1 실제 pin (`aef52acff8…`) 기록, §5.2 를 5.2.A (자체 PR) + **5.2.B (upstream 커뮤니티 PR 흡수)** 로 분할 — `upstream-prs.yml` + `vendor-patches/{upstream,self}/` + `AUTHORS.md`. M1 0–6주차 산출물 체크리스트 §10.B 신설. 사용자 제안 (upstream issue/PR 활용) 반영.*
 *v1.3 — PLAN.md v0.6 §0.2 / §5.7 정합. v1.2 → v1.3 변경: §0 헤더에 자작 transpile 폐기 + loadSpec.ts 포팅 명시, §4 빌드 파이프라인 전면 재정의 (build/spec-transpile/ → nerv-engine::{shell_parser, spec_parser, spec_loader}), **§4.4 rquickjs opt-in 신설** (M1 Tier C 회복, deno_core 금지), §5.0 신설 (두 upstream 의 역할 + matrix 모니터링), §5.1 라이선스 ISC 정정, §6 라이선스 표 정정 + 흡수 crate 라이선스 처리, §10 체크리스트를 v0.6 M0-1~6 산출물로 재구성. Tier A/B/C 분류 알고리즘 / classifier 자체 / §3 대체 큐 / §5.2 / §5.3 / §7 회귀 정책은 모두 무변경. 변경 트리거: M1 rquickjs 활성, withfig→fork 트리거 발동, aws-autocomplete EOL 신호 발견 시.*
 *v1.4 — `limited_args` / §5.1 힌트 UX 폐기 반영. v1.3 → v1.4 변경: §1 v1.0 결정을 "동적 generator 런타임 실행" (Tier B 직접 spawn + recognizer 회복) 으로 갱신 + v1.4 갱신 박스 추가, §4.1 manifest 예제에서 `limited_args` 제거 (스키마 v2 `SpecMeta = {name, tier, sha256}`). 폐기 근거: M1 에서 Tier B 실행 + well-known recognizer 가 동적완성을 실제로 작동시켜 마킹/힌트 메커니즘 (`Response::DynamicHint` / `LimitedArg`) 이 불필요해짐 → 코드 삭제 (CLAUDE.md §3, first-5-min §8, PLAN §5.1). §2 Tier 분류 / §3~§11 정책 본문은 무변경 (본문의 `limited_args` 언급은 역사적 설계 기록).*
+*v1.5 — 파생 spec 층 신설 (2026-09-05). v1.4 → v1.5 변경: **§6.2 신설** — 어느 층에도 spec 이 없는 명령의 `--help`(fallback `man`) 를 데몬이 파싱해 `~/Library/Caches/nerv/derived/` 에 캐시하는 자동 경로. 층 순서 `[overlay, primary, derived]`, `[derived] enabled = false` 스위치, 소스 선택 기준 = 파싱 성공 (모양 기준은 `ls -h` 목록에 속음), 실행 안전장치 (셸 미경유·절대경로·env 초기화·PATH 만 상속·timeout·cap), 백그라운드 populator 에서만 실행, binary mtime 재파생, 파손 파일 negative 유지, doctor/spec list 읽기 전용. §6.1 overlay 계약 무변경 — 파생은 그 *뒤*에 붙는다. Tier A/B/C 분류 / §3~§5 / §7 무변경. 변경 트리거: 새 help 레이아웃 (fixture 4종 밖) 이 파싱 실패로 보고될 때, 컬럼 히스토그램 파서 재설계 착수 시.*
