@@ -28,7 +28,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+
+use crate::frecency::now_unix;
 
 /// Upper bound on tracked command names. The tally only ever feeds a
 /// top-5 doctor row, so an unbounded file would be pure waste — a
@@ -237,13 +239,6 @@ fn parse_row(line: &str) -> Option<(String, Entry)> {
         return None;
     }
     Some((name, Entry { count, last_unix }))
-}
-
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

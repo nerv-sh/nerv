@@ -314,13 +314,13 @@ THEN:
   범례만 출력한다.
 - 사용자가 `nerv doctor` 를 직접 실행했을 때만 표시.
 
-### 3.6.3 디바운스
+### 3.6.5 디바운스
 
 - `nerv start` 직후 자동 진단은 세션당 1회 만 — 이후 키 입력에 영향 X.
 - 같은 zsh 세션에서 데몬 재시작이 있어도 추가 표시 억제 (24시간).
 - `brew upgrade` 감지 후 진단은 *1회 한정*, 마커 블록 메타 갱신 후 silent.
 
-### 3.6.4 비목표
+### 3.6.6 비목표
 
 - 백그라운드에서 주기적으로 자동 실행하는 daemon timer X.
 - 네트워크 호출 (latest version 확인 등) X. spec age 는 빌드 메타 (`manifest.json` 의 build_date) 만 비교.
@@ -415,3 +415,4 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 
 *문서 v1.1 — PLAN.md §5.5 의 정밀 명세. v1.0 → v1.1 변경: §3.6 doctor 자동 실행 트리거 신설, spec age soft notice 추가, E2 의 잔존 `nerv spec update` 참조 제거 (PLAN GO 조건 ①). 변경 트리거: 새 라이벌 도구 출현, schema v3 도입, doctor 추가 항목 합의 시.*
 *v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: spec 디렉터리 경로 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` (PRD §8 정합), E2 감지 수단에 `nerv-engine::spec_loader` (loadSpec.ts 포팅) 명시, §5.1 에 v0.6 구현 매핑 추가 (nerv-diag 흡수 활용 + cmd_doctor 필터링). 5종 카탈로그 / 메시지 톤 / exit code 규약 모두 무변경. 변경 트리거: figterm path 의 신규 에러 클래스 발견, rquickjs Tier C 실행 실패 시나리오 정의 시 (E6 후보).*
+*v1.4 — 롱테일 spec 커버리지 정합 (2026-09-05). v1.3 → v1.4 변경: §3.6.3 `spec misses` 신설 (데몬의 로컬 miss 집계 `misses.tsv` — throttle 5s, temp+rename, 확정된 miss 만, 텔레메트리 아님), §3.6.4 `derived specs` 신설 (`--help` 파생 spec 행 + 파손 시 "delete that file" 안내, doctor/spec list 는 읽기 전용), 기존 §3.6.3 디바운스 / §3.6.4 비목표 를 §3.6.5 / §3.6.6 으로 재번호. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경. 변경 트리거: 파생 spec 파싱 실패 클래스가 사용자 가시 에러로 승격될 때 (E6 후보), miss 집계에 명령별 조치 hint 추가 시.*

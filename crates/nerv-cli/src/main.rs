@@ -1457,16 +1457,11 @@ fn strip_shell_hooks(
             log.warn("shell hook", &format!("backup {}: {e}", backup.display()));
             continue;
         }
-        // Atomic: write to temp file in same dir, then rename.
-        let tmp = path.with_extension("nerv-tmp");
-        if let Err(e) = fs::write(&tmp, &stripped) {
-            log.warn("shell hook", &format!("temp write: {e}"));
-            let _ = fs::remove_file(&tmp);
-            continue;
-        }
-        if let Err(e) = fs::rename(&tmp, &path) {
-            log.warn("shell hook", &format!("rename: {e}"));
-            let _ = fs::remove_file(&tmp);
+        // temp+rename through the shared writer, same as `nerv init`
+        // writes this file — a `0600` rc must not come back `0644`, and
+        // a torn read must not be possible for a shell sourcing it.
+        if let Err(e) = paths::write_atomic(&path, &stripped) {
+            log.warn("shell hook", &format!("write {}: {e}", path.display()));
             continue;
         }
         total_blocks_removed += count;

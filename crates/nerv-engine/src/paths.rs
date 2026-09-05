@@ -46,15 +46,21 @@ pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()
         .and_then(|n| n.to_str())
         .ok_or_else(|| std::io::Error::other("path has no file name"))?;
     let tmp = path.with_file_name(format!("{file_name}.nerv-tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
+    // Every early return unlinks the temp file: `nerv uninstall` rewrites
+    // rc files through here and must leave no trace, not even on failure
+    // (uninstall-spec §4).
+    let write = |tmp: &std::path::Path| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(tmp)?;
         f.write_all(content.as_bytes())?;
         f.sync_all()?;
-    }
-    if let Ok(meta) = std::fs::metadata(path) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    std::fs::rename(&tmp, path)
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(tmp, meta.permissions());
+        }
+        std::fs::rename(tmp, path)
+    };
+    write(&tmp).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// A plain executable stem as the user would type it: 2–64 chars of
@@ -295,6 +301,42 @@ mod tests {
             None => unsafe { std::env::remove_var("HOME") },
         }
         out
+    }
+
+    /// A failed write leaves no temp file behind — `nerv uninstall`
+    /// rewrites rc files through here and is specced for trace zero
+    /// even when a step fails.
+    #[test]
+    fn write_atomic_failure_leaves_no_temp_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // The target is a non-empty directory: the temp file is created
+        // and written fine, and only the final rename fails. That is the
+        // branch that must clean up.
+        let target = tmp.path().join("rc");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("occupant"), b"x").unwrap();
+        assert!(write_atomic(&target, "content").is_err());
+        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("nerv-tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp left behind: {leftovers:?}");
+    }
+
+    /// The happy path replaces by rename and keeps the target's mode.
+    #[test]
+    fn write_atomic_preserves_existing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("rc");
+        std::fs::write(&target, "old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&target, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a 0600 rc must not come back 0644");
     }
 
     #[test]
