@@ -93,6 +93,11 @@ pub struct SpecRegistry {
     /// Held to keep the watcher thread alive for the registry's lifetime.
     /// Dropping the watcher stops the FS event stream.
     _watcher: Option<Box<dyn notify::Watcher + Send + Sync>>,
+    /// Where to write a spec derived from a command's own `--help` when
+    /// no layer has one (`crate::derived`). `None` disables derivation
+    /// entirely — nothing is ever spawned. Always the last entry of
+    /// `dirs` when set, so a derived file is read back like any other.
+    derive_into: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for SpecRegistry {
@@ -114,6 +119,7 @@ impl Default for SpecRegistry {
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: None,
             _watcher: None,
+            derive_into: None,
         }
     }
 }
@@ -159,6 +165,14 @@ impl SpecRegistry {
     /// is created later is still probed on lookup but not watched (restart
     /// the daemon — `docs/spec-conversion-policy.md` §6.1 "사용자 overlay").
     pub fn at_dirs(dirs: &[PathBuf]) -> Self {
+        Self::at_dirs_deriving(dirs, None)
+    }
+
+    /// [`at_dirs`](Self::at_dirs) plus a derivation target: when no
+    /// layer has a stem, the command is asked for its own `--help` and
+    /// the result is written into `derive_into`, which must also be the
+    /// last entry of `dirs` so the write is read straight back.
+    pub fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
         let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let watcher = start_spec_watcher(dirs, pending.clone());
         Self {
@@ -168,6 +182,7 @@ impl SpecRegistry {
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: Some(pending),
             _watcher: watcher,
+            derive_into,
         }
     }
 
@@ -282,6 +297,7 @@ impl SpecRegistry {
         let cache = Arc::clone(&self.cache);
         let next_tick = Arc::clone(&self.next_tick);
         let inflight = Arc::clone(&self.inflight);
+        let derive_into = self.derive_into.clone();
         let release_name = name.to_string();
         let load_name = name.to_string();
         spawn_populator_and_maybe_wait(
@@ -293,7 +309,8 @@ impl SpecRegistry {
                 }
             },
             move || {
-                let (mtime, spec, bytes) = Self::load_spec_from_dirs(&dirs, &load_name);
+                let (mtime, spec, bytes) =
+                    Self::load_or_derive(&dirs, derive_into.as_deref(), &load_name);
                 if let Ok(mut cache) = cache.write() {
                     let tick = next_tick.fetch_add(1, Ordering::Relaxed);
                     cache.insert(
@@ -371,6 +388,37 @@ impl SpecRegistry {
             .into_iter()
             .find_map(|p| p.metadata().ok().map(|m| (p, m)))
         })
+    }
+
+    /// Load `name` from the layers; if no layer has it and derivation
+    /// is on, ask the command for its own `--help`, write the result
+    /// into the derived layer, and load that.
+    ///
+    /// This runs on the background populator thread, never on the
+    /// keystroke path: a cold `--help` costs up to
+    /// `derived::HELP_TIMEOUT`, far past the widget's budget. The
+    /// keystroke that triggers it gets an empty result and the next one
+    /// gets the spec — the same deal the big bundled specs already
+    /// make.
+    fn load_or_derive(
+        dirs: &[PathBuf],
+        derive_into: Option<&Path>,
+        name: &str,
+    ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
+        let found = Self::load_spec_from_dirs(dirs, name);
+        if found.1.is_some() || Self::resolve_spec_file(dirs, name).is_some() {
+            // Either it loaded, or a file exists but failed to parse —
+            // a broken file is a negative entry for its stem, not an
+            // invitation to overwrite it with a derived guess.
+            return found;
+        }
+        let Some(dir) = derive_into else {
+            return found;
+        };
+        if crate::derived::derive(name, dir).is_none() {
+            return found;
+        }
+        Self::load_spec_from_dirs(dirs, name)
     }
 
     fn load_spec_from_dirs(

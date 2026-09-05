@@ -378,6 +378,28 @@ upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없�
 소비자 3곳 (daemon / `nerv doctor` / `nerv spec list`) 은 전부 `resolve_spec_layers()` 를
 쓴다 — 한 곳이라도 `resolve_specs_dir()` 단독으로 남으면 doctor 가 데몬과 다른 spec 을 진단한다.
 
+### 6.2 파생 spec — `~/Library/Caches/nerv/derived/` (2026-09-05)
+
+§6.1 이 **손으로 쓰는** 경로라면 이건 **자동** 경로다. 어느 층에도 spec 이 없는 명령을
+만나면 데몬이 그 명령에게 자기 `--help` 를 물어 spec 을 만든다. 동기는 §6.1 과 같다
+(upstream 정지) — 다르게 푼다: 롱테일은 아무도 손으로 안 쓴다.
+
+| 항목 | 규칙 |
+|------|------|
+| 경로 | `~/Library/Caches/nerv/derived/<name>.json`. **config 가 아니라 cache** — 설치된 바이너리에서 언제든 재생성되므로 `nerv uninstall` 이 캐시째 지우고 `--keep-config` 도 보존하지 않는다 |
+| 층 순서 | `SpecLayers { overlay, primary, derived }` → `[overlay, primary, derived]`. **맨 뒤** — 손으로 쓴 overlay 와 번들이 항상 `--help` 추출본을 이긴다. `NERV_SPECS_DIR` 설정 시 derived 층 없음 |
+| 스위치 | `~/.config/nerv/nerv.toml` 의 `[derived] enabled = false` → 층 자체가 사라지고 **어떤 명령도 spawn 되지 않는다**. 기본값 on. 데몬 부팅 시 1회 로드 (변경엔 재시작) |
+| 추출 대상 | subcommand 이름 / option 이름 / arg placeholder **만**. generator·동적 값 없음 (`--help` 가 그 의미를 안 담는다) |
+| 소스 우선순위 | `--help` → `-h` → `help` → `man`. 선택 기준은 "help 처럼 보이는가" 가 아니라 **파싱 성공** — `ls -h` 는 디렉터리 목록을 뱉는데 길고 여러 줄이라 모양만으로는 통과한다. 그러면 실제로 되는 `man ls` 폴백이 죽는다 (실측: 선택 기준 교체로 `ls` 42 옵션 회복) |
+| 임계값 | subcommand ≥ 1 **또는** option ≥ 3. 미달이면 파일을 쓰지 않는다 — usage 에러·버전 배너가 spec 이 되는 것을 막는다 |
+| 제외 | 경로 형태(`./x`, `/usr/bin/x`), 1글자, 셸 builtin/keyword (`cd`·`export`·`eval`·`if` …) |
+| 실행 안전장치 | 셸 경유 없음 (`sh -c` 금지 — alias·rc 영향 0, 인젝션 면 0), `which` 로 **절대경로** 해석 후 argv 배열로 spawn, env 초기화 (`LANG=C`·`TERM=dumb`·`NO_COLOR=1`·`COLUMNS=200`), stdin `/dev/null`, cwd = 임시 디렉터리, 1초 timeout, 출력 256KB cap, ANSI strip. **`PATH` 만 상속** — `#!/usr/bin/env node` 류 스크립트는 최소 PATH 에서 인터프리터를 못 찾는다 (실측: `zeph --help` → `env: node: No such file or directory`). 바이너리는 이미 절대경로로 확정돼 있어 상속이 안전을 깎지 않는다 |
+| 실행 시점 | `SpecRegistry::lookup` 의 **백그라운드 populator 스레드** — 키스트로크 경로 아님. 파생을 유발한 키는 빈 결과, 다음 키에 spec 이 온다 (대형 번들 spec 과 같은 계약) |
+| 재파생 | 파일 mtime < 바이너리 mtime 일 때만. 그 외엔 디스크 파일 재사용 — 명령을 키입력마다 spawn 하지 않는다 |
+| 파손 파일 | 어느 층에 파일이 있는데 파싱만 실패하면 그 stem 은 negative — 파생이 **덮어쓰지 않는다** |
+| manifest (E5) | derived 에는 두지 않는다. 게이트는 primary 만 |
+| doctor / spec list | derived 층을 **읽기만** 한다 (`load_dirs` 는 파생을 안 한다) — 진단 명령이 사용자 명령을 실행하는 일은 없다 |
+
 ---
 
 ## 7. 회귀 정책

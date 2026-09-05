@@ -20,6 +20,9 @@ path = "src/lib.rs"
 quickjs = ["dep:nerv-quickjs"]
 
 [dependencies]
+# Resolve a command to an absolute path before asking it for `--help`
+# (crate::derived) — never a PATH string the shell could reinterpret.
+which = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -14,8 +14,8 @@
 use anyhow::Context;
 use nerv_engine::misses::MissCounter;
 use nerv_engine::{
-    FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry, Suggestion,
-    complete_in, manifest, no_spec_binary, paths,
+    DerivedConfig, FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry,
+    Suggestion, complete_in, manifest, no_spec_binary, paths,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -42,12 +42,26 @@ async fn main() -> anyhow::Result<()> {
     // user overlay `~/.config/nerv/specs/` (if the dir exists) is layered
     // on top — a stem there replaces the bundled file wholesale. The E5
     // schema gate below looks at the primary dir only.
-    let layers = paths::resolve_spec_layers().expect("HOME present (just checked)");
+    // Derivation reads the same config file as matching; both are read
+    // once at boot, so a change needs a daemon restart.
+    let derived_cfg = DerivedConfig::load_default();
+    let layers =
+        paths::resolve_spec_layers(derived_cfg.enabled).expect("HOME present (just checked)");
 
     // Lazy registry: no upfront disk scan. Specs are read on first
     // lookup and cached. Startup stays O(1) even with 700+ specs.
-    let registry = Arc::new(SpecRegistry::at_dirs(&layers.dirs()));
-    info!(layers = ?layers, "spec registry initialized (lazy)");
+    // The derived layer doubles as the write target, so a command with
+    // no spec anywhere gets one from its own `--help` on the background
+    // populator thread.
+    let registry = Arc::new(SpecRegistry::at_dirs_deriving(
+        &layers.dirs(),
+        layers.derived.clone(),
+    ));
+    info!(
+        layers = ?layers,
+        derive = derived_cfg.enabled,
+        "spec registry initialized (lazy)"
+    );
 
     // E5: reject a spec cache built for a different schema version
     // (error-states.md §3.5). On mismatch the daemon stays up but every

@@ -563,7 +563,7 @@ fn check_spec_misses_in(r: &mut DoctorReport, path: &std::path::Path) {
 fn check_schema_version(r: &mut DoctorReport) {
     // env override → populated user cache → bundled (brew share/ or
     // tarball specs/) → user path. Same chain the daemon reads.
-    let Some(layers) = paths::resolve_spec_layers() else {
+    let Some(layers) = paths::resolve_spec_layers(derive_enabled()) else {
         return;
     };
     match nerv_engine::manifest::check_schema(&layers.primary) {
@@ -868,11 +868,18 @@ fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
     }
 }
 
+/// Whether the derived layer is part of the chain. Read from the same
+/// `nerv.toml` the daemon reads, so doctor and `spec list` describe the
+/// exact layer set completions use.
+fn derive_enabled() -> bool {
+    nerv_engine::DerivedConfig::load_default().enabled
+}
+
 /// E2 + E5: specs loaded + parse errors.
 fn check_specs(r: &mut DoctorReport) {
     // Same layered chain the daemon reads (overlay → env/user cache →
     // bundled), so doctor reports the specs completions actually use.
-    let Some(layers) = paths::resolve_spec_layers() else {
+    let Some(layers) = paths::resolve_spec_layers(derive_enabled()) else {
         r.push(DoctorLevel::Err, "specs", "HOME unset".into(), None);
         return;
     };
@@ -1142,7 +1149,7 @@ fn process_alive(_pid: u32) -> bool {
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
-    let layers = paths::resolve_spec_layers()
+    let layers = paths::resolve_spec_layers(derive_enabled())
         .ok_or_else(|| anyhow::anyhow!("HOME unset and NERV_SPECS_DIR not set"))?;
     for line in spec_list_lines(&layers) {
         println!("{line}");
@@ -2256,7 +2263,11 @@ mod tests {
         overlay: Option<std::path::PathBuf>,
         primary: std::path::PathBuf,
     ) -> paths::SpecLayers {
-        paths::SpecLayers { overlay, primary }
+        paths::SpecLayers {
+            overlay,
+            primary,
+            derived: None,
+        }
     }
 
     fn doctor_labels(r: &DoctorReport) -> Vec<(String, String)> {

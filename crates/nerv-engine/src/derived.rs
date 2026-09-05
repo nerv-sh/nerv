@@ -15,6 +15,33 @@
 //! is the whole seam under test, and it never spawns anything.
 
 use crate::spec_parser::{Arg, Opt, Subcommand};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long one help invocation may take. A CLI that has not printed
+/// its own usage in a second is not going to.
+const HELP_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Cap on captured output. Real help texts are a few KB; the cap is
+/// there so a command that streams instead of printing usage cannot
+/// grow the daemon's memory.
+const MAX_HELP_BYTES: usize = 256 * 1024;
+
+/// Tried in order until one produces text that parses. `--help` first
+/// because it is near-universal; `help` last because on a command that
+/// does not know it, it can look like a real subcommand invocation.
+const HELP_ARGS: [&[&str]; 3] = [&["--help"], &["-h"], &["help"]];
+
+/// Shell builtins and keywords. They have no binary to ask, and the
+/// bundled set already covers the ones worth completing.
+const NOT_DERIVABLE: &[&str] = &[
+    "alias", "bg", "bind", "break", "builtin", "case", "cd", "command", "continue", "declare",
+    "do", "done", "echo", "elif", "else", "esac", "eval", "exec", "exit", "export", "fc", "fg",
+    "fi", "for", "function", "getopts", "hash", "if", "in", "jobs", "kill", "let", "local",
+    "logout", "popd", "printf", "pushd", "pwd", "read", "readonly", "return", "select", "set",
+    "shift", "source", "test", "then", "times", "trap", "type", "typeset", "ulimit", "umask",
+    "unalias", "unset", "until", "wait", "while",
+];
 
 /// A derived spec must clear one of these bars, or it is not written.
 /// A usage error, a version banner, or a paragraph of prose can all
@@ -98,6 +125,260 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
     }
     truncate_descriptions(&mut spec);
     Some(spec)
+}
+
+/// Whether `name` may be asked for its own help. Rejects anything that
+/// is not a plain executable stem — a path, a single letter, or a shell
+/// builtin that has no binary behind it.
+pub fn is_derivable(name: &str) -> bool {
+    if name.len() < 2 || name.len() > 64 {
+        return false;
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
+    {
+        return false;
+    }
+    !NOT_DERIVABLE.contains(&name)
+}
+
+/// Derive a spec for `name` into `dir`, returning the file written (or
+/// the still-current one already there). `None` when the command is not
+/// on `PATH`, refuses to describe itself, or says too little to be a
+/// spec.
+///
+/// Runs the command. That is safe only because of what it does *not*
+/// do: no shell, no string-built command line, and a resolved absolute
+/// path — see [`run_help`].
+pub fn derive(name: &str, dir: &Path) -> Option<PathBuf> {
+    if !is_derivable(name) {
+        return None;
+    }
+    let bin = which::which(name).ok()?;
+    derive_from_binary(name, &bin, dir)
+}
+
+/// The half of [`derive`] that takes an already-resolved binary, so
+/// tests can point at a fixture executable without touching `PATH`.
+pub fn derive_from_binary(name: &str, bin: &Path, dir: &Path) -> Option<PathBuf> {
+    let out = dir.join(format!("{name}.json"));
+    // A derived file older than the binary it came from is stale: the
+    // tool was upgraded and its help may list new commands. Anything
+    // else is reused as-is, so a command is asked for help once, not
+    // once per keystroke.
+    if is_current(&out, bin) {
+        return Some(out);
+    }
+    let spec = help_spec(name, bin)?;
+    let json = crate::spec_loader::write_spec_str(&spec).ok()?;
+    write_atomic(&out, &json).ok()?;
+    Some(out)
+}
+
+/// True when `out` exists and is at least as new as `bin`.
+fn is_current(out: &Path, bin: &Path) -> bool {
+    let (Ok(out_meta), Ok(bin_meta)) = (std::fs::metadata(out), std::fs::metadata(bin)) else {
+        return false;
+    };
+    let (Ok(out_time), Ok(bin_time)) = (out_meta.modified(), bin_meta.modified()) else {
+        return false;
+    };
+    out_time >= bin_time
+}
+
+/// First candidate whose output actually *parses* into a spec, trying
+/// each help flag in turn and falling back to `man`.
+///
+/// Selecting on "looks like help" instead of "is a spec" is a trap:
+/// `ls -h` prints a directory listing, which is long, multi-line, and
+/// utterly unlike help — yet it would be accepted, and the `man ls`
+/// fallback that does work would never run. Only the parser can tell.
+fn help_spec(name: &str, bin: &Path) -> Option<Subcommand> {
+    for args in HELP_ARGS {
+        if let Some(text) = run_help(bin, args) {
+            if let Some(spec) = parse_help(name, &text) {
+                return Some(spec);
+            }
+        }
+    }
+    let text = man_text(bin)?;
+    parse_help(name, &text)
+}
+
+/// Cheap pre-check so a one-line error or a version banner never
+/// reaches the parser as if it were help.
+fn looks_like_help(text: &str) -> bool {
+    text.lines().filter(|l| !l.trim().is_empty()).count() >= 4
+}
+
+/// Run `bin args…` and capture stdout+stderr.
+///
+/// Every property here is deliberate. No shell, so the user's aliases
+/// and rc files cannot change what runs and there is no string to
+/// inject into. An absolute path, already resolved, so nothing about
+/// the child's environment can change *which* binary runs. An
+/// otherwise cleared environment, so nothing leaks into the child and
+/// colour is off. stdin at `/dev/null`, so a command that would prompt
+/// exits instead of hanging. A temp cwd, so a tool that writes on
+/// startup does it somewhere harmless.
+///
+/// `PATH` is the one variable inherited rather than fixed. Interpreted
+/// tools start with `#!/usr/bin/env <interp>`, and a minimal `PATH`
+/// cannot find an interpreter installed under Homebrew or a version
+/// manager — `zeph --help` printed `env: node: No such file or
+/// directory` and derived nothing. Inheriting costs no safety here,
+/// because the binary is already resolved to an absolute path.
+fn run_help(bin: &Path, args: &[&str]) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .env_clear()
+        .env("PATH", inherited_path())
+        .env("HOME", std::env::temp_dir())
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("TERM", "dumb")
+        .env("NO_COLOR", "1")
+        .env("COLUMNS", "200")
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    capture(cmd)
+}
+
+/// The daemon's own `PATH`, or a POSIX minimum when it has none.
+fn inherited_path() -> std::ffi::OsString {
+    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into())
+}
+
+/// `man <name>` as a last resort, for tools that predate `--help`.
+/// The absolute path matters: many users alias `man` to something else
+/// entirely, and an alias would not be a man page.
+fn man_text(bin: &Path) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let name = bin.file_name()?.to_str()?;
+    let man = Path::new("/usr/bin/man");
+    if !man.exists() {
+        return None;
+    }
+    let mut cmd = Command::new(man);
+    cmd.arg(name)
+        .env_clear()
+        .env("PATH", inherited_path())
+        .env("MANWIDTH", "200")
+        .env("MANPAGER", "cat")
+        .env("PAGER", "cat")
+        .env("LANG", "C")
+        .env("LC_ALL", "C")
+        .env("TERM", "dumb")
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let text = capture(cmd)?;
+    looks_like_help(&text).then_some(text)
+}
+
+/// Spawn, read both pipes on their own threads (a child that fills one
+/// pipe while the parent reads the other deadlocks), and give up after
+/// [`HELP_TIMEOUT`].
+fn capture(mut cmd: std::process::Command) -> Option<String> {
+    use std::io::Read;
+    use std::sync::mpsc;
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel::<(Vec<u8>, Vec<u8>)>();
+    std::thread::spawn(move || {
+        let mut o = Vec::new();
+        let mut e = Vec::new();
+        if let Some(s) = stdout {
+            let _ = s.take(MAX_HELP_BYTES as u64).read_to_end(&mut o);
+        }
+        if let Some(s) = stderr {
+            let _ = s.take(MAX_HELP_BYTES as u64).read_to_end(&mut e);
+        }
+        let _ = tx.send((o, e));
+    });
+    let (out, err) = match rx.recv_timeout(HELP_TIMEOUT) {
+        Ok(pair) => {
+            let _ = child.wait();
+            pair
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    // Many CLIs print usage to stderr, and some split it across both.
+    // Whichever carries more text is the help.
+    let text = if out.len() >= err.len() { out } else { err };
+    let text = String::from_utf8_lossy(&text).into_owned();
+    strip_ansi(&text).into()
+}
+
+/// Drop CSI/OSC escape sequences. `NO_COLOR` and `TERM=dumb` handle
+/// most tools; this catches the ones that colour unconditionally.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI … final byte in @–~
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC … BEL or ST
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\u{7}' {
+                        break;
+                    }
+                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Two-character escape: drop both.
+            Some(_) | None => {}
+        }
+    }
+    out
+}
+
+/// temp + rename, so a reader (the registry's own loader, or `nerv
+/// doctor`) never sees a partially written spec.
+fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::other("derived path has no file name"))?;
+    let tmp = path.with_file_name(format!("{file_name}.nerv-tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 #[derive(Clone, Copy)]

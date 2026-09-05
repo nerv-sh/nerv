@@ -29,7 +29,7 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 | 2 | 데몬 프로세스 | `nervd` (PID 추적: `~/Library/Caches/nerv/nervd.pid`) | `nerv start` 또는 자동 기동 | **종료** |
 | 3 | 데몬 소켓 | `~/Library/Caches/nerv/nervd.sock` | nervd | 삭제 |
 | 4 | 데몬 로그 | `~/Library/Logs/nerv/nervd.log` (+ 회전 파일) | nervd | 삭제 |
-| 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 — `specs/`, `frecency.tsv`, **`misses.tsv`** (spec 없는 명령 로컬 집계, `nerv doctor` 의 `spec misses` 행 출처) 포함 | 다양 | 삭제 |
+| 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 — `specs/`, `frecency.tsv`, **`misses.tsv`** (spec 없는 명령 로컬 집계, `nerv doctor` 의 `spec misses` 행 출처), **`derived/`** (명령의 `--help` 에서 자동 추출한 spec — spec-conversion-policy §6.2) 포함 | 다양 | 삭제 |
 | 6 | 설정 디렉터리 | `~/.config/nerv/` (XDG_CONFIG_HOME 존중) — `nerv.toml` + **`specs/` 사용자 overlay spec** (spec-conversion-policy §6.1) 포함 | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존 — overlay spec 도 `--keep-config` 로만 살아남는다) |
 | 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, 동봉 spec (`…/share/nerv/specs/`), formula 메타 | `brew install` | brew 가 처리 |
 

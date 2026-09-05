@@ -24,16 +24,40 @@ pub struct MatchingConfig {
     pub mode: MatchMode,
 }
 
+/// Whether a command with no spec in any layer may have one derived
+/// from its own `--help` output (`crate::derived`). On by default —
+/// the whole point is that the long tail completes without the user
+/// doing anything. `[derived] enabled = false` turns it off, and then
+/// nothing is ever spawned.
+#[derive(Debug, Clone, Copy)]
+pub struct DerivedConfig {
+    pub enabled: bool,
+}
+
+impl Default for DerivedConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct RawConfig {
     #[serde(default)]
     matching: Option<RawMatching>,
+    #[serde(default)]
+    derived: Option<RawDerived>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct RawMatching {
     #[serde(default)]
     mode: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawDerived {
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 impl MatchingConfig {
@@ -62,19 +86,52 @@ impl MatchingConfig {
     }
 
     fn parse(text: &str) -> Self {
-        let raw: RawConfig = match toml::from_str(text) {
-            Ok(r) => r,
-            Err(_) => return Self::default(),
-        };
-        let mode = raw
-            .matching
-            .and_then(|m| m.mode)
-            .map(|s| s.to_ascii_lowercase())
-            .as_deref()
-            .map(parse_mode)
-            .unwrap_or_default();
-        Self { mode }
+        parse_config(text).0
     }
+}
+
+impl DerivedConfig {
+    /// Same file, same failure policy as [`MatchingConfig`]: anything
+    /// unreadable or malformed leaves the default in place.
+    pub fn load_from_path(path: &Path) -> Self {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        parse_config(&text).1
+    }
+
+    /// Read from `~/.config/nerv/nerv.toml`, honouring the same
+    /// `NERV_CONFIG_FILE` override as [`MatchingConfig::load_default`].
+    pub fn load_default() -> Self {
+        if let Some(override_path) = std::env::var_os("NERV_CONFIG_FILE") {
+            return Self::load_from_path(Path::new(&override_path));
+        }
+        match crate::paths::config_dir() {
+            Some(dir) => Self::load_from_path(&dir.join("nerv.toml")),
+            None => Self::default(),
+        }
+    }
+}
+
+/// One parse for both sections — the file is read once per consumer,
+/// and a malformed file must degrade both settings the same way.
+fn parse_config(text: &str) -> (MatchingConfig, DerivedConfig) {
+    let raw: RawConfig = match toml::from_str(text) {
+        Ok(r) => r,
+        Err(_) => return (MatchingConfig::default(), DerivedConfig::default()),
+    };
+    let mode = raw
+        .matching
+        .and_then(|m| m.mode)
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+        .map(parse_mode)
+        .unwrap_or_default();
+    let enabled = raw
+        .derived
+        .and_then(|d| d.enabled)
+        .unwrap_or(DerivedConfig::default().enabled);
+    (MatchingConfig { mode }, DerivedConfig { enabled })
 }
 
 fn parse_mode(s: &str) -> MatchMode {
@@ -87,6 +144,32 @@ fn parse_mode(s: &str) -> MatchMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derived_defaults_to_enabled() {
+        let (_, d) = parse_config("");
+        assert!(d.enabled, "the long tail completes without opt-in");
+    }
+
+    #[test]
+    fn derived_can_be_disabled() {
+        let (_, d) = parse_config("[derived]\nenabled = false\n");
+        assert!(!d.enabled);
+    }
+
+    #[test]
+    fn derived_and_matching_read_from_one_file() {
+        let (m, d) = parse_config("[matching]\nmode = \"fuzzy\"\n\n[derived]\nenabled = false\n");
+        assert_eq!(m.mode, MatchMode::Fuzzy);
+        assert!(!d.enabled);
+    }
+
+    #[test]
+    fn malformed_toml_leaves_both_sections_at_default() {
+        let (m, d) = parse_config("[matching\nmode = ");
+        assert_eq!(m.mode, MatchMode::Prefix);
+        assert!(d.enabled);
+    }
 
     #[test]
     fn default_is_prefix() {

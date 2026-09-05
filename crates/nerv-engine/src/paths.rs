@@ -21,6 +21,7 @@ pub const PID_NAME: &str = "nervd.pid";
 pub const DAEMON_LOG_NAME: &str = "nervd.log";
 pub const SPECS_SUBDIR: &str = "specs";
 pub const MISSES_NAME: &str = "misses.tsv";
+pub const DERIVED_SUBDIR: &str = "derived";
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
@@ -56,6 +57,15 @@ pub fn daemon_log_path() -> Option<PathBuf> {
 /// it with the rest of the cache dir (`docs/uninstall-spec.md` §2).
 pub fn misses_path() -> Option<PathBuf> {
     cache_dir().map(|c| c.join(MISSES_NAME))
+}
+
+/// `~/Library/Caches/nerv/derived/` — specs derived from a command's
+/// own `--help` output (`crate::derived`). Cache, not config: every
+/// file here is regenerable from the installed binary, so `nerv
+/// uninstall` sweeps it with the rest of the cache and `--keep-config`
+/// does not preserve it.
+pub fn derived_specs_dir() -> Option<PathBuf> {
+    cache_dir().map(|c| c.join(DERIVED_SUBDIR))
 }
 
 /// `~/Library/Caches/nerv/specs/` — JSON spec cache populated by
@@ -151,38 +161,56 @@ pub struct SpecLayers {
     pub overlay: Option<PathBuf>,
     /// The [`resolve_specs_dir`] chain: env → user cache → bundled.
     pub primary: PathBuf,
+    /// `~/Library/Caches/nerv/derived/` when derivation is enabled.
+    /// Last, so a hand-authored overlay spec and the bundled set both
+    /// beat anything scraped out of `--help`.
+    pub derived: Option<PathBuf>,
 }
 
 impl SpecLayers {
-    /// Registry order: overlay first, primary last.
+    /// Registry order: overlay, primary, derived.
     pub fn dirs(&self) -> Vec<PathBuf> {
         self.overlay
             .iter()
             .cloned()
             .chain(std::iter::once(self.primary.clone()))
+            .chain(self.derived.iter().cloned())
             .collect()
     }
 }
 
 /// Resolve every layer:
 ///
-/// 1. `NERV_SPECS_DIR` set → that dir **alone** as primary, no overlay.
-///    Test isolation must stay airtight, so a developer's real overlay
-///    never leaks into an e2e run.
+/// 1. `NERV_SPECS_DIR` set → that dir **alone** as primary, no overlay
+///    and no derived layer. Test isolation must stay airtight, so
+///    neither a developer's real overlay nor a derived cache ever leaks
+///    into an e2e run.
 /// 2. Otherwise overlay = the user dir if it exists, primary = the
-///    unchanged [`resolve_specs_dir`] chain.
+///    unchanged [`resolve_specs_dir`] chain, derived = the cache dir
+///    when `derive_enabled`.
 ///
-/// Contract: `docs/spec-conversion-policy.md` §6.1 "사용자 overlay".
-pub fn resolve_spec_layers() -> Option<SpecLayers> {
+/// Contract: `docs/spec-conversion-policy.md` §6.1 "사용자 overlay",
+/// §6.2 "파생 spec".
+pub fn resolve_spec_layers(derive_enabled: bool) -> Option<SpecLayers> {
     if let Some(d) = std::env::var_os("NERV_SPECS_DIR") {
         return Some(SpecLayers {
             overlay: None,
             primary: PathBuf::from(d),
+            derived: None,
         });
     }
     let primary = resolve_specs_dir()?;
     let overlay = user_specs_dir().filter(|o| o.is_dir());
-    Some(SpecLayers { overlay, primary })
+    let derived = if derive_enabled {
+        derived_specs_dir()
+    } else {
+        None
+    };
+    Some(SpecLayers {
+        overlay,
+        primary,
+        derived,
+    })
 }
 
 #[cfg(test)]
@@ -272,6 +300,7 @@ mod tests {
             && pid_path().is_none()
             && daemon_log_path().is_none()
             && misses_path().is_none()
+            && derived_specs_dir().is_none()
             && specs_dir().is_none();
         if let Some(p) = prev {
             unsafe { std::env::set_var("HOME", p) };
@@ -332,9 +361,39 @@ mod tests {
     #[test]
     fn layers_without_overlay_is_primary_only() {
         with_temp_home(|home| {
-            let got = resolve_spec_layers().unwrap();
+            let got = resolve_spec_layers(false).unwrap();
             assert_eq!(got.overlay, None);
             assert_eq!(got.primary, home.join("Library/Caches/nerv/specs"));
+            assert_eq!(got.dirs(), vec![home.join("Library/Caches/nerv/specs")]);
+        });
+    }
+
+    /// The derived layer goes last: a hand-authored overlay spec and the
+    /// bundled set both beat anything scraped out of `--help`.
+    #[test]
+    fn derived_layer_is_last_when_enabled() {
+        with_temp_home(|home| {
+            let overlay = home.join(".config/nerv/specs");
+            std::fs::create_dir_all(&overlay).unwrap();
+            let got = resolve_spec_layers(true).unwrap();
+            assert_eq!(
+                got.dirs(),
+                vec![
+                    overlay,
+                    home.join("Library/Caches/nerv/specs"),
+                    home.join("Library/Caches/nerv/derived"),
+                ]
+            );
+        });
+    }
+
+    /// Derivation off → the layer is absent entirely, so nothing can
+    /// read a stale derived file either.
+    #[test]
+    fn derived_layer_absent_when_disabled() {
+        with_temp_home(|home| {
+            let got = resolve_spec_layers(false).unwrap();
+            assert_eq!(got.derived, None);
             assert_eq!(got.dirs(), vec![home.join("Library/Caches/nerv/specs")]);
         });
     }
@@ -347,7 +406,7 @@ mod tests {
         with_temp_home(|home| {
             let overlay = home.join(".config/nerv/specs");
             std::fs::create_dir_all(&overlay).unwrap();
-            let got = resolve_spec_layers().unwrap();
+            let got = resolve_spec_layers(false).unwrap();
             assert_eq!(
                 got.dirs(),
                 vec![overlay, home.join("Library/Caches/nerv/specs")]
@@ -366,13 +425,15 @@ mod tests {
             std::fs::write(overlay.join("claude.json"), "{}").unwrap();
             let over = home.join("override-specs");
             unsafe { std::env::set_var("NERV_SPECS_DIR", &over) };
-            let got = resolve_spec_layers();
+            // Even with derivation on, the env override collapses to one dir.
+            let got = resolve_spec_layers(true);
             unsafe { std::env::remove_var("NERV_SPECS_DIR") };
             assert_eq!(
                 got,
                 Some(SpecLayers {
                     overlay: None,
-                    primary: over
+                    primary: over,
+                    derived: None,
                 })
             );
         });

@@ -37,7 +37,7 @@ pub mod tier_c;
 pub use complete::{
     CompleteResult, NO_SPEC_REASON_PREFIX, SpecRegistry, complete, complete_in, no_spec_binary,
 };
-pub use config::{MatchMode, MatchingConfig};
+pub use config::{DerivedConfig, MatchMode, MatchingConfig};
 pub use frecency::FrecencyStore;
 pub use ipc::{Request, Response, Suggestion, SuggestionKind};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};
