@@ -1887,7 +1887,41 @@ fn infer_filepaths_kind_from_opt_names(opt: Option<&crate::spec_parser::Opt>) ->
 }
 
 type GeneratorCacheKey = (Vec<String>, Option<PathBuf>);
-type GeneratorCacheMap = HashMap<GeneratorCacheKey, (std::time::Instant, Option<Vec<String>>)>;
+type GeneratorCacheMap = HashMap<GeneratorCacheKey, GenEntry>;
+
+/// One memoized generator result, with the lifetime it earned.
+///
+/// The TTL is not a constant because generators are not alike. `git
+/// branch` answers in a millisecond and its answer changes whenever the
+/// user branches, so a short window is right. `brew formulae` takes
+/// most of a second to hand back a list of 16 000 names that changes a
+/// few times a week; re-running it every 5 seconds is pure background
+/// waste, and the cost of being briefly stale is nil. Rather than keep
+/// a list of which commands are which — a list that would rot — the
+/// entry keeps the TTL its own compute time earned.
+#[derive(Debug, Clone)]
+struct GenEntry {
+    at: std::time::Instant,
+    ttl: std::time::Duration,
+    outcome: Option<Vec<String>>,
+}
+
+impl GenEntry {
+    fn fresh(&self) -> bool {
+        self.at.elapsed() < self.ttl
+    }
+
+    /// A compute that outran the keystroke window is a heavy one; give
+    /// it the long TTL. Measuring beats naming: a fast generator on a
+    /// huge repo becomes slow on its own, and this notices.
+    fn ttl_for(elapsed: std::time::Duration) -> std::time::Duration {
+        if elapsed >= GENERATOR_SYNC_WAIT {
+            GENERATOR_CACHE_TTL_SLOW
+        } else {
+            GENERATOR_CACHE_TTL
+        }
+    }
+}
 
 /// Process-wide cache for Tier B generator results.
 /// Key: `(script argv, spawn cwd)`. The cwd is part of the key because
@@ -1905,6 +1939,12 @@ static GENERATOR_CACHE: std::sync::LazyLock<std::sync::Mutex<GeneratorCacheMap>>
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 const GENERATOR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// TTL for a generator whose compute outran [`GENERATOR_SYNC_WAIT`].
+/// Those are the large, near-static lists (`brew formulae`, `docker
+/// images`); at 5s the daemon re-ran them twelve times a minute in the
+/// background for output that had not changed.
+const GENERATOR_CACHE_TTL_SLOW: std::time::Duration = std::time::Duration::from_secs(60);
 const GENERATOR_CACHE_MAX: usize = 64;
 
 /// How long a keystroke waits for a cold generator before deferring it
@@ -1932,18 +1972,29 @@ static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>
 
 /// Insert `outcome` (a hit or a memoized miss) into [`GENERATOR_CACHE`]
 /// under `key`, evicting the oldest entry past the size cap.
-fn store_generator_result(key: GeneratorCacheKey, outcome: Option<Vec<String>>) {
+fn store_generator_result(
+    key: GeneratorCacheKey,
+    outcome: Option<Vec<String>>,
+    elapsed: std::time::Duration,
+) {
     if let Ok(mut cache) = GENERATOR_CACHE.lock() {
         if cache.len() >= GENERATOR_CACHE_MAX {
             if let Some(oldest) = cache
                 .iter()
-                .min_by_key(|(_, (t, _))| *t)
+                .min_by_key(|(_, e)| e.at)
                 .map(|(k, _)| k.clone())
             {
                 cache.remove(&oldest);
             }
         }
-        cache.insert(key, (std::time::Instant::now(), outcome));
+        cache.insert(
+            key,
+            GenEntry {
+                at: std::time::Instant::now(),
+                ttl: GenEntry::ttl_for(elapsed),
+                outcome,
+            },
+        );
     }
 }
 
@@ -2014,11 +2065,11 @@ fn cached_generator_lines(
     // boundary; see `spawn_populator_and_maybe_wait`).
     let mut stale: Option<Vec<String>> = None;
     if let Ok(cache) = GENERATOR_CACHE.lock() {
-        if let Some((stamp, outcome)) = cache.get(&key) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return outcome.clone();
+        if let Some(entry) = cache.get(&key) {
+            if entry.fresh() {
+                return entry.outcome.clone();
             }
-            stale = outcome.clone();
+            stale = entry.outcome.clone();
         }
     }
     // Claim the in-flight slot. If a populator is already running for
@@ -2042,8 +2093,9 @@ fn cached_generator_lines(
             }
         },
         move || {
+            let started = std::time::Instant::now();
             let outcome = compute();
-            store_generator_result(store_key, outcome.clone());
+            store_generator_result(store_key, outcome.clone(), started.elapsed());
             outcome
         },
     )
@@ -4334,10 +4386,9 @@ region = us-east-1
     fn wait_for_generator_cache(key: &GeneratorCacheKey, timeout: std::time::Duration) {
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            let fresh = GENERATOR_CACHE.lock().is_ok_and(|c| {
-                c.get(key)
-                    .is_some_and(|(t, _)| t.elapsed() < GENERATOR_CACHE_TTL)
-            });
+            let fresh = GENERATOR_CACHE
+                .lock()
+                .is_ok_and(|c| c.get(key).is_some_and(|e| e.fresh()));
             if fresh {
                 return;
             }
@@ -4409,6 +4460,88 @@ region = us-east-1
         );
     }
 
+    /// A generator that took real time to answer keeps its result far
+    /// longer than the default window. Before this, `brew formulae`
+    /// (~600ms for a list that changes weekly) was re-run in the
+    /// background twelve times a minute for the life of the daemon.
+    #[test]
+    fn a_slow_generator_stays_fresh_past_the_default_ttl() {
+        use std::time::{Duration, Instant};
+        let entry = GenEntry {
+            // Older than the default TTL, younger than the slow one.
+            at: Instant::now()
+                .checked_sub(GENERATOR_CACHE_TTL + Duration::from_secs(5))
+                .expect("clock far enough from boot"),
+            ttl: GenEntry::ttl_for(Duration::from_millis(600)),
+            outcome: Some(vec!["formula".to_string()]),
+        };
+        assert_eq!(entry.ttl, GENERATOR_CACHE_TTL_SLOW);
+        assert!(entry.fresh(), "a slow generator must not expire in 5s");
+    }
+
+    /// A fast generator keeps the short window: `git branch` output
+    /// changes whenever the user branches, and staleness there is
+    /// visible and annoying.
+    #[test]
+    fn a_fast_generator_keeps_the_default_ttl() {
+        use std::time::{Duration, Instant};
+        let entry = GenEntry {
+            at: Instant::now()
+                .checked_sub(GENERATOR_CACHE_TTL + Duration::from_secs(1))
+                .expect("clock far enough from boot"),
+            ttl: GenEntry::ttl_for(Duration::from_millis(2)),
+            outcome: Some(vec!["main".to_string()]),
+        };
+        assert_eq!(entry.ttl, GENERATOR_CACHE_TTL);
+        assert!(!entry.fresh(), "a fast generator must expire on schedule");
+    }
+
+    /// The TTL is earned by the measured compute, so a generator that
+    /// crosses the keystroke window — whatever it is called — gets the
+    /// long one. This is the whole reason there is no name list.
+    #[test]
+    fn ttl_is_decided_by_measured_compute_time() {
+        use std::time::Duration;
+        assert_eq!(GenEntry::ttl_for(Duration::ZERO), GENERATOR_CACHE_TTL);
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT - Duration::from_millis(1)),
+            GENERATOR_CACHE_TTL
+        );
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT),
+            GENERATOR_CACHE_TTL_SLOW
+        );
+        assert_eq!(
+            GenEntry::ttl_for(Duration::from_secs(2)),
+            GENERATOR_CACHE_TTL_SLOW
+        );
+    }
+
+    /// End to end through the real memo: a compute that crosses the
+    /// window is stored with the long TTL, so the entry is still fresh
+    /// well past 5 seconds and no refresh is spawned.
+    #[test]
+    fn slow_compute_is_stored_with_the_long_ttl() {
+        use std::time::Duration;
+        let key: GeneratorCacheKey = (vec!["<nerv:test-slow-ttl>".to_string()], None);
+        let out = cached_generator_lines(key.clone(), move || {
+            std::thread::sleep(GENERATOR_SYNC_WAIT + Duration::from_millis(20));
+            Some(vec!["slow".to_string()])
+        });
+        // Slow compute misses the sync window, so this keystroke serves
+        // nothing; the value lands in the cache behind it.
+        assert!(out.is_none());
+        wait_for_generator_cache(&key, Duration::from_secs(5));
+        let stored = GENERATOR_CACHE
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .expect("populator stored the result");
+        assert_eq!(stored.ttl, GENERATOR_CACHE_TTL_SLOW, "{stored:?}");
+        assert_eq!(stored.outcome.as_deref(), Some(&["slow".to_string()][..]));
+    }
+
     #[test]
     fn revalidation_serves_stale_without_waiting_sync_window() {
         // Root-cause guard for the periodic ~100ms hitch on warm large
@@ -4432,7 +4565,11 @@ region = us-east-1
             .expect("clock far enough from boot");
         GENERATOR_CACHE.lock().unwrap().insert(
             key.clone(),
-            (expired, Some(vec!["cached-stale".to_string()])),
+            GenEntry {
+                at: expired,
+                ttl: GENERATOR_CACHE_TTL,
+                outcome: Some(vec!["cached-stale".to_string()]),
+            },
         );
         let done = Arc::new(AtomicBool::new(false));
         let d = done.clone();
