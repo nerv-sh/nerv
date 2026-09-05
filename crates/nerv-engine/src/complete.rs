@@ -168,11 +168,17 @@ impl SpecRegistry {
         Self::at_dirs_deriving(dirs, None)
     }
 
-    /// [`at_dirs`](Self::at_dirs) plus a derivation target: when no
-    /// layer has a stem, the command is asked for its own `--help` and
-    /// the result is written into `derive_into`, which must also be the
-    /// last entry of `dirs` so the write is read straight back.
-    pub fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
+    /// The daemon's registry over a resolved layer set. When the layers
+    /// include a derived dir, a stem no layer has is asked for its own
+    /// `--help` and written there (`crate::derived`); the dir is both
+    /// the last read layer and the write target, so the write is read
+    /// straight back. Read-only consumers (doctor, `spec list`) use
+    /// [`at_dirs`](Self::at_dirs) and never derive.
+    pub fn for_layers(layers: &crate::paths::SpecLayers) -> Self {
+        Self::at_dirs_deriving(&layers.dirs(), layers.derived.clone())
+    }
+
+    fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
         let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
         let watcher = start_spec_watcher(dirs, pending.clone());
         Self {
@@ -329,6 +335,17 @@ impl SpecRegistry {
         )
     }
 
+    /// Whether a background load (parse, or `--help` derivation) for
+    /// `name` is still running. A `lookup` that returned `None` while
+    /// this is true is not a settled miss — the answer lands on a later
+    /// keystroke — so the daemon's miss tally leaves it alone.
+    pub fn is_loading(&self, name: &str) -> bool {
+        self.inflight
+            .lock()
+            .map(|s| s.contains(name))
+            .unwrap_or(false)
+    }
+
     /// Next monotonic tick for LRU stamping.
     fn next_tick(&self) -> u64 {
         self.next_tick.fetch_add(1, Ordering::Relaxed)
@@ -405,18 +422,15 @@ impl SpecRegistry {
         derive_into: Option<&Path>,
         name: &str,
     ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
-        let found = Self::load_spec_from_dirs(dirs, name);
-        if found.1.is_some() || Self::resolve_spec_file(dirs, name).is_some() {
-            // Either it loaded, or a file exists but failed to parse —
-            // a broken file is a negative entry for its stem, not an
-            // invitation to overwrite it with a derived guess.
-            return found;
+        if let Some(hit) = Self::resolve_spec_file(dirs, name) {
+            // A file that exists but fails to parse is a negative entry
+            // for its stem, not an invitation to overwrite it with a
+            // derived guess — `load_at` returns `None` for it.
+            return Self::load_at(hit);
         }
-        let Some(dir) = derive_into else {
-            return found;
-        };
-        if crate::derived::derive(name, dir).is_none() {
-            return found;
+        let derived = derive_into.and_then(|dir| crate::derived::derive(name, dir));
+        if derived.is_none() {
+            return (None, None, 0);
         }
         Self::load_spec_from_dirs(dirs, name)
     }
@@ -425,13 +439,20 @@ impl SpecRegistry {
         dirs: &[PathBuf],
         name: &str,
     ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
-        let Some((path, meta)) = Self::resolve_spec_file(dirs, name) else {
-            return (None, None, 0);
-        };
+        match Self::resolve_spec_file(dirs, name) {
+            Some(hit) => Self::load_at(hit),
+            None => (None, None, 0),
+        }
+    }
+
+    /// Parse the file `resolve_spec_file` found. A parse failure is a
+    /// negative entry for the stem — it shadows any lower layer, so a
+    /// broken overlay file silences that one command rather than
+    /// falling through to the bundled spec.
+    fn load_at(
+        (path, meta): (PathBuf, fs::Metadata),
+    ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
         let mtime = meta.modified().ok();
-        // A file that fails to parse is a negative entry for its stem — it
-        // shadows any lower layer, so a broken overlay file silences that
-        // one command rather than falling through to the bundled spec.
         let (spec, bytes) = match crate::spec_loader::load_spec_file_with_size(&path) {
             Ok((spec, bytes)) => (Some(Arc::new(spec)), bytes),
             Err(_) => (None, 0),
@@ -529,13 +550,24 @@ impl SpecRegistry {
     }
 
     /// Stems whose backing file lives in `layer` *and* is the one the
-    /// registry would read (not shadowed by a higher layer). Lets `spec
-    /// list` / doctor mark overlay entries without re-probing the disk.
+    /// registry would read (not shadowed by a higher layer). One layer's
+    /// view of [`stems_by_origin`](Self::stems_by_origin); a caller that
+    /// wants several layers should take that map once instead.
     pub fn stems_served_from(&self, layer: &Path) -> Vec<String> {
         self.listing_by_origin()
             .into_iter()
             .filter(|(_, origin)| *origin == layer)
             .map(|(stem, _)| stem)
+            .collect()
+    }
+
+    /// Every installed stem → the layer that serves it, in one pass over
+    /// the layers. `spec list` and doctor mark overlay and derived rows
+    /// from this single map rather than scanning per layer.
+    pub fn stems_by_origin(&self) -> std::collections::BTreeMap<String, PathBuf> {
+        self.listing_by_origin()
+            .into_iter()
+            .map(|(stem, origin)| (stem, origin.to_path_buf()))
             .collect()
     }
 
@@ -715,6 +747,18 @@ pub fn complete_in(
 
     let prefix = current_prefix(&line[..cursor]);
     let binary = tokens[0].text.as_str();
+
+    // Still typing the command name itself (`gi`, `zep`): there is
+    // nothing a spec could offer yet, so don't look one up. Every prefix
+    // would otherwise be a cold miss — a PATH scan and, with derivation
+    // on, up to three `--help` spawns for `ls` inside `lsof` — and would
+    // land in the miss tally as junk.
+    if tokens.len() == 1 && prefix == binary {
+        return CompleteResult {
+            items: vec![],
+            reason: Some("typing command name".into()),
+        };
+    }
 
     let Some(spec) = registry.lookup(binary) else {
         return CompleteResult {
@@ -1965,8 +2009,10 @@ static GENERATOR_INFLIGHT: std::sync::LazyLock<
 type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
 
 /// Process-wide cache for `ScriptWithJsonPath` raw stdout, keyed by script
-/// argv. Same TTL / size / eviction policy as [`GENERATOR_CACHE`]; separate
-/// because the value is the verbatim blob (not post-processed lines).
+/// argv. Fixed 5s TTL and the same size / eviction policy as
+/// [`GENERATOR_CACHE`] (which alone earns a longer TTL per entry — see
+/// `GenEntry`); separate because the value is the verbatim blob (not
+/// post-processed lines).
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
@@ -2037,8 +2083,12 @@ where
                 }
             }
         }
-        let _guard = Guard(Some(release));
+        let guard = Guard(Some(release));
         let out = compute();
+        // Release before signalling: `compute` has already stored its
+        // result, so once the caller wakes the key must read as settled
+        // (`SpecRegistry::is_loading`), not as still in flight.
+        drop(guard);
         let _ = tx.send(out);
     });
     if stale.is_some() {
@@ -2682,7 +2732,9 @@ fn cargo_targets(
 /// Bounded with the same LRU policy as `GENERATOR_CACHE`
 /// ([`GENERATOR_CACHE_MAX`] entries, oldest-evicted on overflow)
 /// so a long-running daemon that the user `cd`s through dozens of
-/// cargo workspaces doesn't leak.
+/// cargo workspaces doesn't leak. Fixed 5s TTL — it has not earned
+/// `GenEntry`'s measured TTL yet; do that if a workspace's `cargo
+/// metadata` shows up re-running in the background.
 static CARGO_METADATA_CACHE: std::sync::LazyLock<
     std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, String)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
@@ -3539,21 +3591,41 @@ fn strip_git_status_marker(s: String) -> String {
 /// Remove ANSI CSI escape sequences (`\x1b[...m` etc.) without
 /// pulling in a regex dep. Iterates bytes; preserves UTF-8 by
 /// only skipping ESC + bracket-form sequences.
-fn strip_ansi(input: &str) -> String {
+/// Drop CSI and OSC escape sequences. Generator output and derived
+/// `--help` text both arrive with colour from tools that ignore
+/// `NO_COLOR` / `TERM=dumb`.
+pub(crate) fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next(); // consume '['
-            // Drain until letter (CSI final byte: 0x40..0x7e).
-            for nc in chars.by_ref() {
-                if ('@'..='~').contains(&nc) {
-                    break;
-                }
-            }
+        if c != '\x1b' {
+            out.push(c);
             continue;
         }
-        out.push(c);
+        match chars.next() {
+            // CSI … final byte in @–~
+            Some('[') => {
+                for nc in chars.by_ref() {
+                    if ('@'..='~').contains(&nc) {
+                        break;
+                    }
+                }
+            }
+            // OSC … BEL or ST
+            Some(']') => {
+                while let Some(nc) = chars.next() {
+                    if nc == '\x07' {
+                        break;
+                    }
+                    if nc == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Two-character escape: drop both.
+            Some(_) | None => {}
+        }
     }
     out
 }
@@ -4876,6 +4948,24 @@ region = us-east-1
     /// back with `no_spec_binary`; if either side drifts, the tally
     /// silently stops counting. Round-trip through the real pipeline so
     /// the test breaks on a format change, not just on the helper.
+    /// While the command name itself is being typed there is nothing to
+    /// complete, so the registry is not consulted at all. Every partial
+    /// (`ze`, `zep`) would otherwise be a cold miss — a PATH scan, and
+    /// with derivation on a `--help` spawn for any prefix that happens
+    /// to be a real binary — and would land in the miss tally as junk.
+    #[test]
+    fn typing_the_command_name_does_not_look_up_a_spec() {
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete("gi", 2, &r);
+        assert!(out.items.is_empty());
+        assert_eq!(out.reason.as_deref(), Some("typing command name"));
+        assert!(r.is_empty(), "no lookup may have populated the cache");
+
+        // A completed name followed by a space is the subcommand case.
+        let out = complete("git ", 4, &r);
+        assert!(!out.items.is_empty(), "{:?}", out.reason);
+    }
+
     #[test]
     fn no_spec_reason_round_trips_through_no_spec_binary() {
         let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());

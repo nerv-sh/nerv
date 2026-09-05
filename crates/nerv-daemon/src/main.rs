@@ -14,8 +14,8 @@
 use anyhow::Context;
 use nerv_engine::misses::MissCounter;
 use nerv_engine::{
-    DerivedConfig, FrecencyStore, MatchMode, MatchingConfig, Request, Response, SpecRegistry,
-    Suggestion, complete_in, manifest, no_spec_binary, paths,
+    Config, FrecencyStore, MatchMode, Request, Response, SpecRegistry, Suggestion, complete_in,
+    manifest, no_spec_binary, paths,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -42,26 +42,19 @@ async fn main() -> anyhow::Result<()> {
     // user overlay `~/.config/nerv/specs/` (if the dir exists) is layered
     // on top — a stem there replaces the bundled file wholesale. The E5
     // schema gate below looks at the primary dir only.
-    // Derivation reads the same config file as matching; both are read
-    // once at boot, so a change needs a daemon restart.
-    let derived_cfg = DerivedConfig::load_default();
+    // `~/.config/nerv/nerv.toml`, read once at boot — matching mode
+    // (PLAN §5.1) and derivation switch. Edits need a daemon restart.
+    let config = Config::load_default();
+    info!(mode = ?config.matching.mode, derive = config.derived.enabled, "config loaded");
     let layers =
-        paths::resolve_spec_layers(derived_cfg.enabled).expect("HOME present (just checked)");
+        paths::resolve_spec_layers(config.derived.enabled).expect("HOME present (just checked)");
 
     // Lazy registry: no upfront disk scan. Specs are read on first
-    // lookup and cached. Startup stays O(1) even with 700+ specs.
-    // The derived layer doubles as the write target, so a command with
-    // no spec anywhere gets one from its own `--help` on the background
-    // populator thread.
-    let registry = Arc::new(SpecRegistry::at_dirs_deriving(
-        &layers.dirs(),
-        layers.derived.clone(),
-    ));
-    info!(
-        layers = ?layers,
-        derive = derived_cfg.enabled,
-        "spec registry initialized (lazy)"
-    );
+    // lookup and cached. Startup stays O(1) even with 700+ specs. With
+    // a derived layer present, a command with no spec anywhere gets one
+    // from its own `--help` on the background populator thread.
+    let registry = Arc::new(SpecRegistry::for_layers(&layers));
+    info!(layers = ?layers, "spec registry initialized (lazy)");
 
     // E5: reject a spec cache built for a different schema version
     // (error-states.md §3.5). On mismatch the daemon stays up but every
@@ -89,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     // benchmarks that don't want the user's real history bleeding in).
     let frecency_path = std::env::var_os("NERV_FRECENCY_FILE")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| cache_dir.join("frecency.tsv"));
+        .unwrap_or_else(|| cache_dir.join(paths::FRECENCY_NAME));
     let frecency = if frecency_path == std::path::PathBuf::from("-") {
         Arc::new(FrecencyStore::empty())
     } else {
@@ -118,12 +111,6 @@ async fn main() -> anyhow::Result<()> {
         entries = misses.len(),
         "spec-miss counter loaded"
     );
-
-    // User matching mode — defaults to prefix; opt-in fuzzy via
-    // `~/.config/nerv/nerv.toml` (PLAN §5.1). Loaded once at boot;
-    // edits require a daemon restart.
-    let matching = MatchingConfig::load_default();
-    info!(mode = ?matching.mode, "matching config loaded");
 
     // Best-effort cleanup of any stale socket from a previous run.
     let _ = tokio::fs::remove_file(&sock_path).await;
@@ -162,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
                             registry,
                             frecency,
                             misses,
-                            matching.mode,
+                            config.matching.mode,
                             schema_block,
                         ));
                     }
@@ -231,14 +218,18 @@ async fn handle_connection(
                             mode,
                         );
                         // A "no spec for X" empty is the only response the
-                        // tally cares about. Flush here (already on the
-                        // blocking pool) so the count survives a daemon
-                        // kill; the counter is dirty at most once per new
-                        // command name plus one bump per keystroke.
+                        // tally cares about — and only once it is settled.
+                        // The first keystroke on a cold stem returns empty
+                        // while the spec is still parsing or being derived
+                        // from `--help`; counting that would list commands
+                        // that complete fine one key later. The flush is
+                        // throttled inside the counter.
                         if let Response::Empty { reason: Some(r) } = &resp {
                             if let Some(binary) = no_spec_binary(r) {
-                                misses.record(binary);
-                                misses.flush_if_dirty();
+                                if !registry.is_loading(binary) {
+                                    misses.record(binary);
+                                    misses.flush_if_dirty();
+                                }
                             }
                         }
                         resp

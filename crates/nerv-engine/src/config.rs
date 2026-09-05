@@ -42,28 +42,34 @@ impl Default for DerivedConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawConfig {
-    #[serde(default)]
     matching: Option<RawMatching>,
-    #[serde(default)]
     derived: Option<RawDerived>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct RawMatching {
-    #[serde(default)]
     mode: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct RawDerived {
-    #[serde(default)]
     enabled: Option<bool>,
 }
 
-impl MatchingConfig {
+/// Everything `~/.config/nerv/nerv.toml` carries, read once. The
+/// daemon reads it at boot; the CLI reads it once per process. A
+/// missing file or malformed TOML leaves every section at its default
+/// so the daemon always starts cleanly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Config {
+    pub matching: MatchingConfig,
+    pub derived: DerivedConfig,
+}
+
+impl Config {
     /// Read the config file at `path`. Any failure (missing file,
     /// permission denied, malformed TOML, unknown mode value) returns
-    /// the default so the daemon stays up.
+    /// the default.
     pub fn load_from_path(path: &Path) -> Self {
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
@@ -86,52 +92,23 @@ impl MatchingConfig {
     }
 
     fn parse(text: &str) -> Self {
-        parse_config(text).0
-    }
-}
-
-impl DerivedConfig {
-    /// Same file, same failure policy as [`MatchingConfig`]: anything
-    /// unreadable or malformed leaves the default in place.
-    pub fn load_from_path(path: &Path) -> Self {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
+        let raw: RawConfig = match toml::from_str(text) {
+            Ok(r) => r,
+            Err(_) => return Self::default(),
         };
-        parse_config(&text).1
-    }
-
-    /// Read from `~/.config/nerv/nerv.toml`, honouring the same
-    /// `NERV_CONFIG_FILE` override as [`MatchingConfig::load_default`].
-    pub fn load_default() -> Self {
-        if let Some(override_path) = std::env::var_os("NERV_CONFIG_FILE") {
-            return Self::load_from_path(Path::new(&override_path));
+        let mode = raw
+            .matching
+            .and_then(|m| m.mode)
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref()
+            .map(parse_mode)
+            .unwrap_or_default();
+        let enabled = raw.derived.and_then(|d| d.enabled).unwrap_or(true);
+        Self {
+            matching: MatchingConfig { mode },
+            derived: DerivedConfig { enabled },
         }
-        match crate::paths::config_dir() {
-            Some(dir) => Self::load_from_path(&dir.join("nerv.toml")),
-            None => Self::default(),
-        }
     }
-}
-
-/// One parse for both sections — the file is read once per consumer,
-/// and a malformed file must degrade both settings the same way.
-fn parse_config(text: &str) -> (MatchingConfig, DerivedConfig) {
-    let raw: RawConfig = match toml::from_str(text) {
-        Ok(r) => r,
-        Err(_) => return (MatchingConfig::default(), DerivedConfig::default()),
-    };
-    let mode = raw
-        .matching
-        .and_then(|m| m.mode)
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-        .map(parse_mode)
-        .unwrap_or_default();
-    let enabled = raw
-        .derived
-        .and_then(|d| d.enabled)
-        .unwrap_or(DerivedConfig::default().enabled);
-    (MatchingConfig { mode }, DerivedConfig { enabled })
 }
 
 fn parse_mode(s: &str) -> MatchMode {
@@ -147,28 +124,28 @@ mod tests {
 
     #[test]
     fn derived_defaults_to_enabled() {
-        let (_, d) = parse_config("");
+        let d = Config::parse("").derived;
         assert!(d.enabled, "the long tail completes without opt-in");
     }
 
     #[test]
     fn derived_can_be_disabled() {
-        let (_, d) = parse_config("[derived]\nenabled = false\n");
+        let d = Config::parse("[derived]\nenabled = false\n").derived;
         assert!(!d.enabled);
     }
 
     #[test]
     fn derived_and_matching_read_from_one_file() {
-        let (m, d) = parse_config("[matching]\nmode = \"fuzzy\"\n\n[derived]\nenabled = false\n");
-        assert_eq!(m.mode, MatchMode::Fuzzy);
-        assert!(!d.enabled);
+        let c = Config::parse("[matching]\nmode = \"fuzzy\"\n\n[derived]\nenabled = false\n");
+        assert_eq!(c.matching.mode, MatchMode::Fuzzy);
+        assert!(!c.derived.enabled);
     }
 
     #[test]
     fn malformed_toml_leaves_both_sections_at_default() {
-        let (m, d) = parse_config("[matching\nmode = ");
-        assert_eq!(m.mode, MatchMode::Prefix);
-        assert!(d.enabled);
+        let c = Config::parse("[matching\nmode = ");
+        assert_eq!(c.matching.mode, MatchMode::Prefix);
+        assert!(c.derived.enabled);
     }
 
     #[test]
@@ -179,49 +156,49 @@ mod tests {
 
     #[test]
     fn missing_file_is_default() {
-        let cfg = MatchingConfig::load_from_path(Path::new("/does/not/exist"));
+        let cfg = Config::load_from_path(Path::new("/does/not/exist")).matching;
         assert_eq!(cfg.mode, MatchMode::Prefix);
     }
 
     #[test]
     fn fuzzy_mode_parses() {
-        let cfg = MatchingConfig::parse("[matching]\nmode = \"fuzzy\"\n");
+        let cfg = Config::parse("[matching]\nmode = \"fuzzy\"\n").matching;
         assert_eq!(cfg.mode, MatchMode::Fuzzy);
     }
 
     #[test]
     fn prefix_mode_parses() {
-        let cfg = MatchingConfig::parse("[matching]\nmode = \"prefix\"\n");
+        let cfg = Config::parse("[matching]\nmode = \"prefix\"\n").matching;
         assert_eq!(cfg.mode, MatchMode::Prefix);
     }
 
     #[test]
     fn unknown_mode_falls_back_to_prefix() {
-        let cfg = MatchingConfig::parse("[matching]\nmode = \"banana\"\n");
+        let cfg = Config::parse("[matching]\nmode = \"banana\"\n").matching;
         assert_eq!(cfg.mode, MatchMode::Prefix);
     }
 
     #[test]
     fn empty_toml_is_default() {
-        let cfg = MatchingConfig::parse("");
+        let cfg = Config::parse("").matching;
         assert_eq!(cfg.mode, MatchMode::Prefix);
     }
 
     #[test]
     fn missing_matching_section_is_default() {
-        let cfg = MatchingConfig::parse("[other]\nfoo = 1\n");
+        let cfg = Config::parse("[other]\nfoo = 1\n").matching;
         assert_eq!(cfg.mode, MatchMode::Prefix);
     }
 
     #[test]
     fn malformed_toml_is_default() {
-        let cfg = MatchingConfig::parse("not = valid = toml");
+        let cfg = Config::parse("not = valid = toml").matching;
         assert_eq!(cfg.mode, MatchMode::Prefix);
     }
 
     #[test]
     fn mode_is_case_insensitive() {
-        let cfg = MatchingConfig::parse("[matching]\nmode = \"FUZZY\"\n");
+        let cfg = Config::parse("[matching]\nmode = \"FUZZY\"\n").matching;
         assert_eq!(cfg.mode, MatchMode::Fuzzy);
     }
 }

@@ -291,6 +291,10 @@ THEN:
   을 쓸 대상을 고르는 신호지 결함이 아니다.
 - 이름은 래퍼를 벗긴 실제 명령이다 (`sudo foo` → `foo`) — 엔진이 이미
   wrapped command 를 해석한 뒤의 이름을 reason 에 싣는다.
+- **확정된 miss 만 센다.** cold stem 의 첫 키는 파싱·파생(§3.6.4)이 백그라운드에서
+  도는 동안 빈 응답을 내는데, 그건 miss 가 아니다 — 다음 키에 완성이 뜬다. 데몬은
+  `SpecRegistry::is_loading` 이 false 일 때만 기록한다. 명령 이름을 치는 중인
+  부분 입력 (`ze`, `zep`) 은 애초에 lookup 을 안 하므로 집계에 안 들어간다.
 
 ### 3.6.4 derived specs 안내 (soft notice)
 

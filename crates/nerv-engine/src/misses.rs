@@ -20,10 +20,10 @@
 //! table plus [`MissCounter::flush_if_dirty`], which callers invoke
 //! freely. Two policies make that safe — writes are throttled to one
 //! per [`MIN_FLUSH_INTERVAL`] (a miss happens on every keystroke of a
-//! spec-less command) and go through temp+rename, so `nerv doctor`
-//! reading concurrently never sees a half-written tally. Daemon
-//! shutdown calls [`MissCounter::flush_now`] to persist the last
-//! window.
+//! spec-less command) and go through [`crate::paths::write_atomic`],
+//! so `nerv doctor` reading concurrently never sees a half-written
+//! tally. Daemon shutdown calls [`MissCounter::flush_now`] to persist
+//! the last window.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -51,14 +51,27 @@ struct Entry {
     last_unix: u64,
 }
 
+/// Everything a flush has to see consistently, under one lock: the
+/// rows, whether they changed since the last write, and when that
+/// write was. Three separate mutexes would let a `record` slip between
+/// "read dirty" and "clear dirty" and be lost.
+#[derive(Debug, Default)]
+struct State {
+    table: HashMap<String, Entry>,
+    dirty: bool,
+    /// Bumped by every `record`. A flush clears `dirty` only if nothing
+    /// was recorded while the lock was released for the write —
+    /// otherwise that record would sit unflushed until the next one.
+    version: u64,
+    /// When the last successful write finished. `None` until the first
+    /// one, so the opening flush of a session is never delayed.
+    last_flush: Option<Instant>,
+}
+
 #[derive(Debug, Default)]
 pub struct MissCounter {
     path: Option<PathBuf>,
-    table: Mutex<HashMap<String, Entry>>,
-    dirty: Mutex<bool>,
-    /// When the last successful write finished. `None` until the first
-    /// one, so the opening flush of a session is never delayed.
-    last_flush: Mutex<Option<Instant>>,
+    state: Mutex<State>,
 }
 
 impl MissCounter {
@@ -82,9 +95,10 @@ impl MissCounter {
         }
         Self {
             path: Some(path.to_path_buf()),
-            table: Mutex::new(map),
-            dirty: Mutex::new(false),
-            last_flush: Mutex::new(None),
+            state: Mutex::new(State {
+                table: map,
+                ..Default::default()
+            }),
         }
     }
 
@@ -92,34 +106,34 @@ impl MissCounter {
     /// executable stem (too short, path-like, or carrying the TSV
     /// delimiters) are ignored rather than stored.
     pub fn record(&self, name: &str) {
-        if !is_recordable(name) {
+        if !crate::paths::is_command_stem(name) {
             return;
         }
         let now = now_unix();
-        if let Ok(mut table) = self.table.lock() {
-            if !table.contains_key(name) && table.len() >= MAX_ENTRIES {
-                evict_one(&mut table);
-            }
-            let e = table.entry(name.to_string()).or_insert(Entry {
-                count: 0,
-                last_unix: now,
-            });
-            e.count = e.count.saturating_add(1);
-            e.last_unix = now;
+        let Ok(mut st) = self.state.lock() else {
+            return;
+        };
+        if !st.table.contains_key(name) && st.table.len() >= MAX_ENTRIES {
+            evict_one(&mut st.table);
         }
-        if let Ok(mut dirty) = self.dirty.lock() {
-            *dirty = true;
-        }
+        let e = st.table.entry(name.to_string()).or_insert(Entry {
+            count: 0,
+            last_unix: now,
+        });
+        e.count = e.count.saturating_add(1);
+        e.last_unix = now;
+        st.dirty = true;
+        st.version = st.version.wrapping_add(1);
     }
 
     /// The `n` most-recorded commands, highest count first. Ties break
     /// on the more recent timestamp, then the name, so the row is
     /// stable across runs.
     pub fn top_n(&self, n: usize) -> Vec<(String, u32)> {
-        let Ok(table) = self.table.lock() else {
+        let Ok(st) = self.state.lock() else {
             return Vec::new();
         };
-        let mut rows: Vec<(&String, &Entry)> = table.iter().collect();
+        let mut rows: Vec<(&String, &Entry)> = st.table.iter().collect();
         rows.sort_by(|a, b| {
             b.1.count
                 .cmp(&a.1.count)
@@ -150,79 +164,53 @@ impl MissCounter {
         let Some(path) = &self.path else {
             return;
         };
-        {
-            let Ok(dirty) = self.dirty.lock() else {
+        // Serialize the rows under the lock, then release it before the
+        // write. `record` runs inside the completion the widget is
+        // waiting on; it must never queue behind an fsync.
+        let (out, version) = {
+            let Ok(st) = self.state.lock() else {
                 return;
             };
-            if !*dirty {
+            if !st.dirty {
                 return;
             }
-        }
-        if !force {
-            let Ok(last) = self.last_flush.lock() else {
+            if !force
+                && st
+                    .last_flush
+                    .is_some_and(|t| t.elapsed() < MIN_FLUSH_INTERVAL)
+            {
                 return;
-            };
-            if let Some(t) = *last {
-                if t.elapsed() < MIN_FLUSH_INTERVAL {
-                    return;
-                }
             }
-        }
-        let Ok(table) = self.table.lock() else {
-            return;
+            let mut out = String::new();
+            for (name, entry) in st.table.iter() {
+                out.push_str(name);
+                out.push('\t');
+                out.push_str(&entry.count.to_string());
+                out.push('\t');
+                out.push_str(&entry.last_unix.to_string());
+                out.push('\n');
+            }
+            (out, st.version)
         };
-        let mut out = String::new();
-        for (name, entry) in table.iter() {
-            out.push_str(name);
-            out.push('\t');
-            out.push_str(&entry.count.to_string());
-            out.push('\t');
-            out.push_str(&entry.last_unix.to_string());
-            out.push('\n');
-        }
-        if write_atomic(path, &out).is_ok() {
-            if let Ok(mut d) = self.dirty.lock() {
-                *d = false;
-            }
-            if let Ok(mut last) = self.last_flush.lock() {
-                *last = Some(Instant::now());
+        if crate::paths::write_atomic(path, &out).is_ok() {
+            if let Ok(mut st) = self.state.lock() {
+                if st.version == version {
+                    st.dirty = false;
+                }
+                st.last_flush = Some(Instant::now());
             }
         }
     }
 
     /// Live entry count — diagnostics only.
     pub fn len(&self) -> usize {
-        self.table.lock().map(|t| t.len()).unwrap_or(0)
+        self.state.lock().map(|st| st.table.len()).unwrap_or(0)
     }
 
     /// Whether anything has been recorded.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-}
-
-/// Write `content` to `path` through a sibling temp file and a rename.
-/// `nerv doctor` reads this file from another process while the daemon
-/// may be writing it; a plain `fs::write` truncates first, so a doctor
-/// run could observe a half-written tally. Rename is atomic on the same
-/// filesystem, so a reader sees either the old file or the new one.
-/// Mirrors `nerv-cli::write_rc_atomic`.
-fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::other("misses path has no file name"))?;
-    let tmp = path.with_file_name(format!("{file_name}.nerv-tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content.as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
 }
 
 /// Drop the least-recorded entry (oldest wins the tie).
@@ -240,27 +228,12 @@ fn evict_one(table: &mut HashMap<String, Entry>) {
     }
 }
 
-/// A recordable name is a plain executable stem: two or more chars of
-/// `[A-Za-z0-9_.+-]`, starting alphanumeric. This rejects paths
-/// (`./x`, `/usr/bin/x`), single letters, and anything carrying a TAB
-/// or newline the row format can't encode.
-fn is_recordable(name: &str) -> bool {
-    if name.len() < 2 || name.len() > 64 {
-        return false;
-    }
-    if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
-        return false;
-    }
-    name.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
-}
-
 fn parse_row(line: &str) -> Option<(String, Entry)> {
     let mut parts = line.splitn(3, '\t');
     let name = parts.next()?.to_string();
     let count: u32 = parts.next()?.parse().ok()?;
     let last_unix: u64 = parts.next()?.parse().ok()?;
-    if !is_recordable(&name) {
+    if !crate::paths::is_command_stem(&name) {
         return None;
     }
     Some((name, Entry { count, last_unix }))

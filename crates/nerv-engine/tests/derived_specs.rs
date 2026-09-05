@@ -263,8 +263,11 @@ fn registry_derives_a_stem_no_layer_has() {
     fake_bin(&bin_dir, "derivable", HELP);
     let _guard = PathGuard::prepend(&bin_dir);
 
-    let registry =
-        SpecRegistry::at_dirs_deriving(&[bundled.clone(), derived.clone()], Some(derived.clone()));
+    let registry = SpecRegistry::for_layers(&nerv_engine::paths::SpecLayers {
+        overlay: None,
+        primary: bundled.clone(),
+        derived: Some(derived.clone()),
+    });
 
     let spec = lookup_until(&registry, "derivable").expect("derived spec lands");
     let subs: Vec<&str> = spec.subcommands.iter().map(|c| c.name.as_str()).collect();
@@ -316,8 +319,11 @@ fn a_broken_spec_file_is_not_overwritten_by_derivation() {
     fake_bin(&bin_dir, "broken", HELP);
     let _guard = PathGuard::prepend(&bin_dir);
 
-    let registry =
-        SpecRegistry::at_dirs_deriving(&[bundled, derived.clone()], Some(derived.clone()));
+    let registry = SpecRegistry::for_layers(&nerv_engine::paths::SpecLayers {
+        overlay: None,
+        primary: bundled,
+        derived: Some(derived.clone()),
+    });
     for _ in 0..5 {
         assert!(registry.lookup("broken").is_none());
         std::thread::sleep(std::time::Duration::from_millis(100));

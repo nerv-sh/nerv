@@ -43,10 +43,10 @@ const NOT_DERIVABLE: &[&str] = &[
     "unalias", "unset", "until", "wait", "while",
 ];
 
-/// A derived spec must clear one of these bars, or it is not written.
-/// A usage error, a version banner, or a paragraph of prose can all
-/// come back on stdout; none of them should become a spec.
-const MIN_SUBCOMMANDS: usize = 1;
+/// A derived spec must have at least one subcommand or this many
+/// options, or it is not written. A usage error, a version banner, or a
+/// paragraph of prose can all come back on stdout; none of them should
+/// become a spec.
 const MIN_OPTIONS: usize = 3;
 
 /// Longest description kept. `--help` descriptions run to several
@@ -56,7 +56,7 @@ const MAX_DESCRIPTION: usize = 80;
 
 /// Parse `--help` (or `man`) output into a spec shaped like the ones
 /// `build-specs` writes. `None` when the text carries too little
-/// structure to be a spec — see [`MIN_SUBCOMMANDS`] / [`MIN_OPTIONS`].
+/// structure to be a spec — see [`MIN_OPTIONS`].
 ///
 /// `name` is the command the text came from; it becomes `spec.name`.
 pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
@@ -65,16 +65,17 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
         ..Default::default()
     };
     let mut section = Section::None;
-    // Index of the item the next continuation line belongs to, plus the
-    // column its name started at. A continuation is any line indented
-    // past that column which does not itself parse as an item.
-    let mut pending: Option<(Pending, usize)> = None;
+    // Column the current entry's name started at, while one is open. A
+    // continuation is any line indented past it that does not itself
+    // parse as an entry; it belongs to the last entry of the section's
+    // list. `None` after a blank line or a heading.
+    let mut open_at: Option<usize> = None;
 
     for raw in text.lines() {
         let line = strip_overstrike(raw);
         let trimmed = line.trim_end();
         if trimmed.trim().is_empty() {
-            pending = None;
+            open_at = None;
             continue;
         }
         let indent = trimmed.len() - trimmed.trim_start().len();
@@ -82,8 +83,8 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
         if indent == 0 {
             // A flush-left line is either a section heading or prose;
             // either way the previous section ends here.
-            section = classify_heading(trimmed.trim());
-            pending = None;
+            section = heading_kind(trimmed.trim()).unwrap_or(Section::None);
+            open_at = None;
             continue;
         }
 
@@ -92,58 +93,42 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
         // ordinary item that happens to end in `:` is not swallowed.
         if let Some(kind) = heading_kind(trimmed.trim()) {
             section = kind;
-            pending = None;
+            open_at = None;
             continue;
         }
 
-        match section {
-            Section::None => pending = None,
+        let pushed = match section {
+            Section::None => continue,
             Section::Subcommands => {
-                if let Some(item) = parse_subcommand_line(trimmed) {
-                    push_subcommand(&mut spec, item);
-                    pending = Some((Pending::Subcommand(spec.subcommands.len() - 1), indent));
-                } else {
-                    absorb_continuation(&mut spec, &pending, indent, trimmed.trim());
-                }
+                parse_subcommand_line(trimmed).map(|item| push_subcommand(&mut spec, item))
             }
-            Section::Options => {
-                if let Some(item) = parse_option_line(trimmed) {
-                    if push_option(&mut spec, item) {
-                        pending = Some((Pending::Option(spec.options.len() - 1), indent));
-                    } else {
-                        pending = None;
-                    }
-                } else {
-                    absorb_continuation(&mut spec, &pending, indent, trimmed.trim());
+            Section::Options => parse_option_line(trimmed).map(|item| push_option(&mut spec, item)),
+        };
+        match pushed {
+            // A new entry opens; a duplicate closes whatever was open so
+            // its continuation lines do not land on the earlier copy.
+            Some(true) => open_at = Some(indent),
+            Some(false) => open_at = None,
+            // Not an entry: a wrapped line of the open one, if deeper.
+            None => {
+                if open_at.is_some_and(|col| indent > col) {
+                    absorb_continuation(&mut spec, section, trimmed.trim());
                 }
             }
         }
     }
 
-    if spec.subcommands.len() < MIN_SUBCOMMANDS && spec.options.len() < MIN_OPTIONS {
+    if spec.subcommands.is_empty() && spec.options.len() < MIN_OPTIONS {
         return None;
     }
     truncate_descriptions(&mut spec);
     Some(spec)
 }
 
-/// Whether `name` may be asked for its own help. Rejects anything that
-/// is not a plain executable stem — a path, a single letter, or a shell
-/// builtin that has no binary behind it.
+/// Whether `name` may be asked for its own help: a plain executable
+/// stem ([`crate::paths::is_command_stem`]) that is not a shell builtin.
 pub fn is_derivable(name: &str) -> bool {
-    if name.len() < 2 || name.len() > 64 {
-        return false;
-    }
-    if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
-        return false;
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
-    {
-        return false;
-    }
-    !NOT_DERIVABLE.contains(&name)
+    crate::paths::is_command_stem(name) && !NOT_DERIVABLE.contains(&name)
 }
 
 /// Derive a spec for `name` into `dir`, returning the file written (or
@@ -175,7 +160,7 @@ pub fn derive_from_binary(name: &str, bin: &Path, dir: &Path) -> Option<PathBuf>
     }
     let spec = help_spec(name, bin)?;
     let json = crate::spec_loader::write_spec_str(&spec).ok()?;
-    write_atomic(&out, &json).ok()?;
+    crate::paths::write_atomic(&out, &json).ok()?;
     Some(out)
 }
 
@@ -209,12 +194,6 @@ fn help_spec(name: &str, bin: &Path) -> Option<Subcommand> {
     parse_help(name, &text)
 }
 
-/// Cheap pre-check so a one-line error or a version banner never
-/// reaches the parser as if it were help.
-fn looks_like_help(text: &str) -> bool {
-    text.lines().filter(|l| !l.trim().is_empty()).count() >= 4
-}
-
 /// Run `bin args…` and capture stdout+stderr.
 ///
 /// Every property here is deliberate. No shell, so the user's aliases
@@ -233,22 +212,30 @@ fn looks_like_help(text: &str) -> bool {
 /// directory` and derived nothing. Inheriting costs no safety here,
 /// because the binary is already resolved to an absolute path.
 fn run_help(bin: &Path, args: &[&str]) -> Option<String> {
+    let mut cmd = sandboxed(bin);
+    cmd.args(args)
+        .env("HOME", std::env::temp_dir())
+        .env("NO_COLOR", "1")
+        .env("COLUMNS", "200")
+        .stderr(std::process::Stdio::piped());
+    capture(cmd)
+}
+
+/// The hardening every child gets — one place, so `man` and `--help`
+/// cannot drift apart. Callers add only what their program needs on
+/// top and choose what to do with stderr.
+fn sandboxed(bin: &Path) -> std::process::Command {
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(bin);
-    cmd.args(args)
-        .env_clear()
+    cmd.env_clear()
         .env("PATH", inherited_path())
-        .env("HOME", std::env::temp_dir())
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .env("TERM", "dumb")
-        .env("NO_COLOR", "1")
-        .env("COLUMNS", "200")
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    capture(cmd)
+        .stdout(Stdio::piped());
+    cmd
 }
 
 /// The daemon's own `PATH`, or a POSIX minimum when it has none.
@@ -260,28 +247,18 @@ fn inherited_path() -> std::ffi::OsString {
 /// The absolute path matters: many users alias `man` to something else
 /// entirely, and an alias would not be a man page.
 fn man_text(bin: &Path) -> Option<String> {
-    use std::process::{Command, Stdio};
     let name = bin.file_name()?.to_str()?;
     let man = Path::new("/usr/bin/man");
     if !man.exists() {
         return None;
     }
-    let mut cmd = Command::new(man);
+    let mut cmd = sandboxed(man);
     cmd.arg(name)
-        .env_clear()
-        .env("PATH", inherited_path())
         .env("MANWIDTH", "200")
         .env("MANPAGER", "cat")
         .env("PAGER", "cat")
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("TERM", "dumb")
-        .current_dir(std::env::temp_dir())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let text = capture(cmd)?;
-    looks_like_help(&text).then_some(text)
+        .stderr(std::process::Stdio::null());
+    capture(cmd)
 }
 
 /// Spawn, read both pipes on their own threads (a child that fills one
@@ -320,65 +297,7 @@ fn capture(mut cmd: std::process::Command) -> Option<String> {
     // Whichever carries more text is the help.
     let text = if out.len() >= err.len() { out } else { err };
     let text = String::from_utf8_lossy(&text).into_owned();
-    strip_ansi(&text).into()
-}
-
-/// Drop CSI/OSC escape sequences. `NO_COLOR` and `TERM=dumb` handle
-/// most tools; this catches the ones that colour unconditionally.
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            // CSI … final byte in @–~
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if ('\u{40}'..='\u{7e}').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            // OSC … BEL or ST
-            Some(']') => {
-                while let Some(c) = chars.next() {
-                    if c == '\u{7}' {
-                        break;
-                    }
-                    if c == '\u{1b}' && chars.peek() == Some(&'\\') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            // Two-character escape: drop both.
-            Some(_) | None => {}
-        }
-    }
-    out
-}
-
-/// temp + rename, so a reader (the registry's own loader, or `nerv
-/// doctor`) never sees a partially written spec.
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::other("derived path has no file name"))?;
-    let tmp = path.with_file_name(format!("{file_name}.nerv-tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content.as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
+    Some(crate::complete::strip_ansi(&text))
 }
 
 #[derive(Clone, Copy)]
@@ -386,12 +305,6 @@ enum Section {
     None,
     Subcommands,
     Options,
-}
-
-#[derive(Clone, Copy)]
-enum Pending {
-    Subcommand(usize),
-    Option(usize),
 }
 
 /// `man` renders bold as `X\x08X` and underline as `_\x08X`. Collapse
@@ -410,11 +323,6 @@ fn strip_overstrike(line: &str) -> String {
         }
     }
     out
-}
-
-/// A flush-left line either opens a section or closes the current one.
-fn classify_heading(line: &str) -> Section {
-    heading_kind(line).unwrap_or(Section::None)
 }
 
 /// Does this line name a section? Handles `Commands:`, `Available
@@ -578,22 +486,15 @@ fn description_of(rest: &str) -> Option<std::sync::Arc<str>> {
     }
 }
 
-/// Append a wrapped line to whichever item is still open.
-fn absorb_continuation(
-    spec: &mut Subcommand,
-    pending: &Option<(Pending, usize)>,
-    indent: usize,
-    text: &str,
-) {
-    let Some((slot, name_indent)) = pending else {
-        return;
+/// Append a wrapped line to the last entry of the open section.
+fn absorb_continuation(spec: &mut Subcommand, section: Section, text: &str) {
+    let existing = match section {
+        Section::Subcommands => spec.subcommands.last_mut().map(|c| &mut c.description),
+        Section::Options => spec.options.last_mut().map(|o| &mut o.description),
+        Section::None => None,
     };
-    if indent <= *name_indent {
+    let Some(existing) = existing else {
         return;
-    }
-    let existing = match slot {
-        Pending::Subcommand(i) => &mut spec.subcommands[*i].description,
-        Pending::Option(i) => &mut spec.options[*i].description,
     };
     let joined = match existing.as_deref() {
         Some(d) => format!("{d} {text}"),
@@ -603,12 +504,14 @@ fn absorb_continuation(
 }
 
 /// Keep the first spelling of a repeated name — help texts list the
-/// same command under several headings (gh's `help`, aliases).
-fn push_subcommand(spec: &mut Subcommand, item: Subcommand) {
+/// same command under several headings (gh's `help`, aliases). Returns
+/// whether it was added.
+fn push_subcommand(spec: &mut Subcommand, item: Subcommand) -> bool {
     if spec.subcommands.iter().any(|c| c.name == item.name) {
-        return;
+        return false;
     }
     spec.subcommands.push(item);
+    true
 }
 
 /// Returns whether the option was added (a duplicate is dropped, and

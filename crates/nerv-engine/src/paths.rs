@@ -20,8 +20,58 @@ pub const SOCKET_NAME: &str = "nervd.sock";
 pub const PID_NAME: &str = "nervd.pid";
 pub const DAEMON_LOG_NAME: &str = "nervd.log";
 pub const SPECS_SUBDIR: &str = "specs";
+pub const FRECENCY_NAME: &str = "frecency.tsv";
 pub const MISSES_NAME: &str = "misses.tsv";
 pub const DERIVED_SUBDIR: &str = "derived";
+
+/// Write `content` to `path` through a sibling temp file and a rename.
+///
+/// Every file nerv writes that another process may be reading goes
+/// through here: rc files the user's shell sources, and the cache files
+/// (`frecency.tsv`, `misses.tsv`, `derived/*.json`) that `nerv doctor`
+/// reads while the daemon writes. A plain `fs::write` truncates first,
+/// so a concurrent reader can see a half-written file; rename is atomic
+/// on the same filesystem, so it sees either the old file or the new.
+///
+/// An existing target keeps its permissions — an rc file the user
+/// made `0600` must not come back `0644`. Cache files are created
+/// fresh and take the default.
+pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| std::io::Error::other("path has no file name"))?;
+    let tmp = path.with_file_name(format!("{file_name}.nerv-tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// A plain executable stem as the user would type it: 2–64 chars of
+/// `[A-Za-z0-9_.+-]`, starting alphanumeric. Rejects paths (`./x`,
+/// `/usr/bin/x`), single letters, and anything carrying whitespace or a
+/// TSV delimiter. Shared by the miss tally (what to count) and spec
+/// derivation (what to ask for `--help`).
+pub fn is_command_stem(name: &str) -> bool {
+    if name.len() < 2 || name.len() > 64 {
+        return false;
+    }
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '+'))
+}
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)

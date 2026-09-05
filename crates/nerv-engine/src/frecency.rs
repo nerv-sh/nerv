@@ -142,10 +142,8 @@ impl FrecencyStore {
             out.push_str(&entry.last_unix.to_string());
             out.push('\n');
         }
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if std::fs::write(path, out).is_ok() {
+        // temp+rename: the CLI reads this file while the daemon writes it.
+        if crate::paths::write_atomic(path, &out).is_ok() {
             if let Ok(mut d) = self.dirty.lock() {
                 *d = false;
             }

@@ -240,7 +240,7 @@ fn apply_init_block(home: &std::path::Path, shell_name: &str, block: &str) {
     if up.action == UpsertAction::Current {
         return;
     }
-    if let Err(e) = write_rc_atomic(&rc, &up.content) {
+    if let Err(e) = paths::write_atomic(&rc, &up.content) {
         eprintln!("[nerv] cannot write ~/{rel} ({e}) — append the printed block manually");
         return;
     }
@@ -253,31 +253,6 @@ fn apply_init_block(home: &std::path::Path, shell_name: &str, block: &str) {
         ),
         UpsertAction::Current => unreachable!("returned above"),
     }
-}
-
-/// Atomic rc write: temp file in the same directory + rename, so a shell
-/// mid-way through sourcing the file keeps reading the old inode and
-/// never sees a half-written rc (uninstall-spec §4 step 3 semantics).
-/// Preserves the original file's permissions across the inode swap.
-fn write_rc_atomic(rc: &std::path::Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = rc.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let file_name = rc
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::other("rc path has no file name"))?;
-    let tmp = rc.with_file_name(format!("{file_name}.nerv-tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(content.as_bytes())?;
-        f.sync_all()?;
-    }
-    if let Ok(meta) = std::fs::metadata(rc) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions());
-    }
-    std::fs::rename(&tmp, rc)
 }
 
 /// Shells that reach autocomplete only through the PTY shim (no ZLE).
@@ -563,7 +538,7 @@ fn check_spec_misses_in(r: &mut DoctorReport, path: &std::path::Path) {
 fn check_schema_version(r: &mut DoctorReport) {
     // env override → populated user cache → bundled (brew share/ or
     // tarball specs/) → user path. Same chain the daemon reads.
-    let Some(layers) = paths::resolve_spec_layers(derive_enabled()) else {
+    let Some(layers) = paths::resolve_spec_layers(config().derived.enabled) else {
         return;
     };
     match nerv_engine::manifest::check_schema(&layers.primary) {
@@ -868,18 +843,19 @@ fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
     }
 }
 
-/// Whether the derived layer is part of the chain. Read from the same
-/// `nerv.toml` the daemon reads, so doctor and `spec list` describe the
-/// exact layer set completions use.
-fn derive_enabled() -> bool {
-    nerv_engine::DerivedConfig::load_default().enabled
+/// `nerv.toml`, read once per process — the same file the daemon
+/// reads, so doctor and `spec list` describe the exact layer set
+/// completions use, and every call site in one run agrees.
+fn config() -> &'static nerv_engine::Config {
+    static CONFIG: std::sync::OnceLock<nerv_engine::Config> = std::sync::OnceLock::new();
+    CONFIG.get_or_init(nerv_engine::Config::load_default)
 }
 
 /// E2 + E5: specs loaded + parse errors.
 fn check_specs(r: &mut DoctorReport) {
     // Same layered chain the daemon reads (overlay → env/user cache →
     // bundled), so doctor reports the specs completions actually use.
-    let Some(layers) = paths::resolve_spec_layers(derive_enabled()) else {
+    let Some(layers) = paths::resolve_spec_layers(config().derived.enabled) else {
         r.push(DoctorLevel::Err, "specs", "HOME unset".into(), None);
         return;
     };
@@ -933,8 +909,11 @@ fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
         );
     }
     r.push(DoctorLevel::Ok, "specs", format!("{count} loaded"), None);
+    // One pass over the layers for both rows below.
+    let by_origin = registry.stems_by_origin();
+    let served_by = |layer: &std::path::Path| by_origin.values().filter(|o| *o == layer).count();
     if let Some(o) = overlay {
-        let served = registry.stems_served_from(o).len();
+        let served = served_by(o);
         if overlay_errs.is_empty() {
             r.push(
                 DoctorLevel::Ok,
@@ -956,7 +935,7 @@ fn check_specs_in(r: &mut DoctorReport, layers: &paths::SpecLayers) {
     // omitted entirely when nothing has been derived yet, so a fresh
     // install reads exactly as before.
     if let Some(d) = derived {
-        let served = registry.stems_served_from(d).len();
+        let served = served_by(d);
         if !derived_errs.is_empty() {
             r.push(
                 DoctorLevel::Err,
@@ -1175,7 +1154,7 @@ fn process_alive(_pid: u32) -> bool {
 }
 
 fn cmd_spec_list() -> anyhow::Result<()> {
-    let layers = paths::resolve_spec_layers(derive_enabled())
+    let layers = paths::resolve_spec_layers(config().derived.enabled)
         .ok_or_else(|| anyhow::anyhow!("HOME unset and NERV_SPECS_DIR not set"))?;
     for line in spec_list_lines(&layers) {
         println!("{line}");
@@ -1200,13 +1179,17 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
     }
     let overlay = layers.overlay.as_deref();
     let derived = layers.derived.as_deref();
-    let stems_from = |layer: Option<&std::path::Path>| -> std::collections::HashSet<String> {
-        layer
-            .map(|l| registry.stems_served_from(l).into_iter().collect())
-            .unwrap_or_default()
+    // One pass over the layers: stem → the layer that serves it.
+    let by_origin = registry.stems_by_origin();
+    let served_by = |layer: Option<&std::path::Path>| -> std::collections::HashSet<&str> {
+        by_origin
+            .iter()
+            .filter(|(_, o)| layer.is_some_and(|l| o.as_path() == l))
+            .map(|(stem, _)| stem.as_str())
+            .collect()
     };
-    let from_overlay = stems_from(overlay);
-    let from_derived = stems_from(derived);
+    let from_overlay = served_by(overlay);
+    let from_derived = served_by(derived);
 
     let mut lines = vec![format!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS")];
     for name in names {
@@ -1216,9 +1199,9 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
         };
         let (subs, opts) = count_tree(spec.as_ref());
         let tier = compute_tier(spec.as_ref());
-        let mark = if from_overlay.contains(&name) {
+        let mark = if from_overlay.contains(name.as_str()) {
             "*"
-        } else if from_derived.contains(&name) {
+        } else if from_derived.contains(name.as_str()) {
             "+"
         } else {
             ""
