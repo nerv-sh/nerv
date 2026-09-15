@@ -1319,6 +1319,7 @@ fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Sug
                 kind: SuggestionKind::Subcommand,
                 priority: sc.priority,
                 icon: sanitize_icon(sc.icon.as_deref()),
+                source_ranked: false,
             }
         })
         .collect();
@@ -1356,6 +1357,7 @@ fn emit_options_with_ancestors(
                 kind: SuggestionKind::Flag,
                 priority: opt.priority,
                 icon: sanitize_icon(opt.icon.as_deref()),
+                source_ranked: false,
             })
             .collect()
     };
@@ -1468,6 +1470,7 @@ fn emit_candidates_for_arg(
             kind: SuggestionKind::Argument,
             priority: None,
             icon: None,
+            source_ranked: false,
         })
         .collect();
 
@@ -1489,6 +1492,7 @@ fn emit_candidates_for_arg(
                     kind: SuggestionKind::Argument,
                     priority: s.priority,
                     icon: sanitize_icon(s.icon.as_deref()),
+                    source_ranked: false,
                 }
             }),
     );
@@ -1524,6 +1528,7 @@ fn emit_candidates_for_arg(
                         kind: SuggestionKind::Argument,
                         priority: None,
                         icon: None,
+                        source_ranked: false,
                     }),
             );
         }
@@ -1560,6 +1565,7 @@ fn emit_candidates_for_arg(
                                     // frecency still floats repeat picks on top.
                                     priority: Some(1_000u32.saturating_sub(idx as u32)),
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1591,6 +1597,7 @@ fn emit_candidates_for_arg(
                                         // from folder (📁) and bare
                                         // subcommand rows (blank).
                                         icon: Some("$".into()),
+                                        source_ranked: false,
                                     }
                                 }),
                         );
@@ -1614,6 +1621,7 @@ fn emit_candidates_for_arg(
                                     kind: SuggestionKind::Argument,
                                     priority: None,
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1636,6 +1644,7 @@ fn emit_candidates_for_arg(
                                     kind: SuggestionKind::Argument,
                                     priority: None,
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1655,6 +1664,7 @@ fn emit_candidates_for_arg(
                                     kind: SuggestionKind::Argument,
                                     priority: None,
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1671,6 +1681,7 @@ fn emit_candidates_for_arg(
                                     kind: SuggestionKind::Argument,
                                     priority: None,
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1695,6 +1706,7 @@ fn emit_candidates_for_arg(
                                     kind: SuggestionKind::Argument,
                                     priority: None,
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1716,6 +1728,7 @@ fn emit_candidates_for_arg(
                                     kind: SuggestionKind::Argument,
                                     priority: None,
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1745,6 +1758,7 @@ fn emit_candidates_for_arg(
                                         kind: SuggestionKind::Argument,
                                         priority: None,
                                         icon: None,
+                                        source_ranked: false,
                                     }),
                             );
                         }
@@ -1776,6 +1790,7 @@ fn emit_candidates_for_arg(
                                         kind: SuggestionKind::Argument,
                                         priority: None,
                                         icon: None,
+                                        source_ranked: false,
                                     }),
                             );
                         }
@@ -1818,6 +1833,7 @@ fn emit_candidates_for_arg(
                                     kind: SuggestionKind::Argument,
                                     priority: None,
                                     icon: None,
+                                    source_ranked: false,
                                 }),
                         );
                     }
@@ -1851,6 +1867,7 @@ fn emit_candidates_for_arg(
                                 kind: SuggestionKind::Argument,
                                 priority: Some(10_000u32.saturating_sub(rank as u32)),
                                 icon: None,
+                                source_ranked: true,
                             });
                         }
                     }
@@ -3323,6 +3340,7 @@ fn filepath_suggestions(
                 kind: SuggestionKind::Argument,
                 priority: Some(1_000u32.saturating_sub(idx as u32)),
                 icon,
+                source_ranked: false,
             },
         )
         .collect()
@@ -5267,6 +5285,7 @@ region = us-east-1
             kind: SuggestionKind::Argument,
             priority: prio,
             icon: None,
+            source_ranked: false,
         }
     }
 
