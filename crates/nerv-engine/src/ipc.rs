@@ -80,6 +80,13 @@ pub struct Suggestion {
     /// the terminal). The widget renders this verbatim as a prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// The generator already ordered this row by its own usage history
+    /// (zoxide's frecency score), so the daemon must not re-rank it with
+    /// nerv's frecency — that double-counts visits and lets a frecent
+    /// path-only hit bury an exact folder-name match (`z tak-bro`).
+    /// In-process only: never crosses the socket.
+    #[serde(skip)]
+    pub source_ranked: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,6 +128,7 @@ mod tests {
             kind: SuggestionKind::Subcommand,
             priority: Some(75),
             icon: Some("📦".into()),
+            source_ranked: false,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Suggestion = serde_json::from_str(&json).unwrap();

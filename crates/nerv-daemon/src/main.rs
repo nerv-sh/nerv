@@ -304,13 +304,7 @@ fn engine_complete(
     }
     // Extract the binary name once — frecency keys are per-spec.
     if let Some(spec_name) = line.split_whitespace().next() {
-        let mut scored: Vec<(f64, Suggestion)> = result
-            .items
-            .drain(..)
-            .map(|s| (frecency.score(spec_name, &s.insertion), s))
-            .collect();
-        rank_completions(&mut scored);
-        result.items = scored.into_iter().map(|(_, s)| s).collect();
+        result.items = rank_by_frecency(std::mem::take(&mut result.items), spec_name, frecency);
     }
     // Bound the transported list — see MAX_SUGGESTIONS. Ranking already
     // ran, so this drops only the least-relevant tail.
@@ -318,6 +312,29 @@ fn engine_complete(
     Response::Suggestions {
         items: result.items,
     }
+}
+
+/// Score each item with the user's frecency for `spec_name`, then order
+/// them for display via [`rank_completions`]. Source-ranked rows (zoxide)
+/// score zero so the stable sort keeps the engine's order for them.
+fn rank_by_frecency(
+    items: Vec<Suggestion>,
+    spec_name: &str,
+    frecency: &FrecencyStore,
+) -> Vec<Suggestion> {
+    let mut scored: Vec<(f64, Suggestion)> = items
+        .into_iter()
+        .map(|s| {
+            let score = if s.source_ranked {
+                0.0
+            } else {
+                frecency.score(spec_name, &s.insertion)
+            };
+            (score, s)
+        })
+        .collect();
+    rank_completions(&mut scored);
+    scored.into_iter().map(|(_, s)| s).collect()
 }
 
 /// Order scored completion items for display. `.`/`..` are universal path
@@ -444,5 +461,26 @@ mod tests {
         assert_eq!(order[0], "checkout"); // boosted floats up
         assert_eq!(order[1], "status"); // ties keep incoming order
         assert_eq!(order[2], "commit");
+    }
+
+    #[test]
+    fn zoxide_rows_keep_engine_order_despite_frecency() {
+        // Regression (2026-09-15): `z tak-bro` listed the folder literally
+        // named `tak-bro` fifth, under frecent children whose only match
+        // is the `/tak-bro/` parent segment. The engine already ranks
+        // zoxide rows (name hits first, zoxide's own frecency within);
+        // re-ranking them here with nerv frecency undid that.
+        let zoxide = |name: &str| Suggestion {
+            source_ranked: true,
+            ..sugg(name)
+        };
+        let frecency = FrecencyStore::empty();
+        for _ in 0..3 {
+            frecency.record("z", "claude-code");
+        }
+        let items = vec![zoxide("tak-bro"), zoxide("claude-code")];
+        let ranked = rank_by_frecency(items, "z", &frecency);
+        let order: Vec<&str> = ranked.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(order, ["tak-bro", "claude-code"]);
     }
 }
