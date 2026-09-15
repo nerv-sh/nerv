@@ -844,6 +844,22 @@ fn step(state: &mut ParserState, text: &str, root: &Spec) -> TokenKind {
     match shape {
         TokenShape::DoubleDash => {
             state.past_double_dash = true;
+            // `--` ends the options *and*, by convention, the optional
+            // leading positionals: `git checkout [<branch>] -- <pathspec>…`,
+            // `git log [<rev>] -- <path>…`. Skip every optional slot that
+            // has a successor so the cursor lands on the pathspec instead
+            // of re-offering branches. A required slot (`grep -- <pat>`)
+            // stays put.
+            if let (Some(args), Some(node)) = (
+                state.subcommand_args.as_mut(),
+                current_subcommand(root, &state.subcommand_path),
+            ) {
+                while args.idx + 1 < args.total
+                    && node.args.get(args.idx).is_some_and(|a| a.is_optional)
+                {
+                    args.advance();
+                }
+            }
             TokenKind::DoubleDash
         }
         TokenShape::Empty => TokenKind::Unknown,
@@ -1558,6 +1574,53 @@ mod tests {
         assert_eq!(r.annotations[1].kind, TokenKind::DoubleDash);
         // After --, `-f` is a literal arg, not an option flag.
         assert_eq!(r.annotations[2].kind, TokenKind::SubcommandArg);
+    }
+
+    /// `git checkout -- <Tab>` must land on the pathspec slot, not
+    /// re-offer branches: `--` skips optional leading positionals.
+    #[test]
+    fn double_dash_skips_optional_leading_positionals() {
+        let spec = Subcommand {
+            name: "checkout".into(),
+            args: vec![
+                Arg {
+                    name: Some("branch".into()),
+                    is_optional: true,
+                    ..Default::default()
+                },
+                Arg {
+                    name: Some("pathspec".into()),
+                    is_optional: true,
+                    is_variadic: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let toks = tokenize("checkout -- ");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.cursor_context, CursorContext::Arg);
+        assert_eq!(r.subcommand_arg_index, Some(1));
+
+        // A required first slot is not skipped (`grep -- <pattern> <file>`).
+        let spec = Subcommand {
+            name: "grep".into(),
+            args: vec![
+                Arg {
+                    name: Some("pattern".into()),
+                    ..Default::default()
+                },
+                Arg {
+                    name: Some("file".into()),
+                    is_variadic: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let toks = tokenize("grep -- ");
+        let r = parse_arguments(&spec, &toks, 999);
+        assert_eq!(r.subcommand_arg_index, Some(0));
     }
 
     #[test]

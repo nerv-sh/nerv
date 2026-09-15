@@ -212,14 +212,14 @@ impl SpecRegistry {
             let meta = path.metadata().ok();
             match load_spec_file(&path) {
                 Ok(spec) => {
-                    let key = if !spec.name.is_empty() {
-                        spec.name.clone()
-                    } else {
-                        stem
-                    };
+                    // Key by file stem, exactly as `lookup` does: the
+                    // stem is the binary name a keystroke asks for. A
+                    // spec whose `name` differs (appwrite's is "index")
+                    // would otherwise miss the cache, take the lazy path,
+                    // and trip the count-cap evict over this full scan.
                     let tick = registry.next_tick();
                     cache.insert(
-                        key,
+                        stem,
                         CacheEntry {
                             mtime: meta.as_ref().and_then(|m| m.modified().ok()),
                             spec: Some(Arc::new(spec)),
@@ -1906,14 +1906,23 @@ fn emit_candidates_for_arg(
 /// Conservative — only matches exact lowercase single-word names
 /// to avoid hijacking args like "filename for output" that mean
 /// something more specific than a generic path picker.
+///
+/// A list name (`branch, file, tag or commit` — git checkout's first
+/// slot) counts when any listed alternative is a path word, so a typed
+/// path still completes there once no branch matches.
 fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
     let n = name?.trim().to_ascii_lowercase();
-    match n.as_str() {
-        "path" | "file" | "files" | "filepath" | "filename" | "src" | "dest" | "source"
-        | "destination" | "input" | "output" => Some(false),
+    let kind_of = |word: &str| match word.trim() {
+        "path" | "paths" | "pathspec" | "file" | "files" | "filepath" | "filename" | "src"
+        | "dest" | "source" | "destination" | "input" | "output" => Some(false),
         "dir" | "directory" | "folder" | "dirname" | "dirpath" => Some(true),
         _ => None,
-    }
+    };
+    kind_of(&n).or_else(|| {
+        n.split(',')
+            .flat_map(|piece| piece.split(" or "))
+            .find_map(kind_of)
+    })
 }
 
 /// Same idea as [`infer_filepaths_kind`] but consults the wrapping
@@ -4026,6 +4035,26 @@ region = us-east-1
         assert!(errs.is_empty());
     }
 
+    /// The eager scan caches under the file stem — the key `lookup`
+    /// asks for — not `spec.name`. appwrite's bundled spec is named
+    /// "index"; keyed by name, `lookup("appwrite")` missed the cache,
+    /// went lazy, and its insert tripped the count-cap evict over the
+    /// whole scan, so `spec list` printed aws/gcloud as load errors.
+    #[test]
+    fn load_dirs_keys_the_cache_by_stem_not_spec_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("appwrite.json"), r#"{"name":"index"}"#).unwrap();
+        let (r, errs) = SpecRegistry::load_dirs(&[dir.path().to_path_buf()]);
+        assert!(errs.is_empty(), "{errs:?}");
+        let cache = r.cache.read().unwrap();
+        assert!(
+            cache.contains_key("appwrite"),
+            "{:?}",
+            cache.keys().collect::<Vec<_>>()
+        );
+        assert!(!cache.contains_key("index"));
+    }
+
     #[test]
     fn registry_load_dir_picks_up_workspace_fixtures() {
         let dir = workspace_fixture_specs_dir();
@@ -5241,6 +5270,16 @@ region = us-east-1
         assert_eq!(infer_filepaths_kind(Some("dir")), Some(true));
         assert_eq!(infer_filepaths_kind(Some("DIRECTORY")), Some(true));
         assert_eq!(infer_filepaths_kind(Some("folder")), Some(true));
+    }
+
+    #[test]
+    fn infer_filepaths_kind_list_names() {
+        assert_eq!(
+            infer_filepaths_kind(Some("branch, file, tag or commit")),
+            Some(false)
+        );
+        assert_eq!(infer_filepaths_kind(Some("pathspec")), Some(false));
+        assert_eq!(infer_filepaths_kind(Some("branch or tag")), None);
     }
 
     #[test]

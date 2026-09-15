@@ -72,7 +72,9 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
     let mut open_at: Option<usize> = None;
 
     for raw in text.lines() {
-        let line = strip_overstrike(raw);
+        // Tabs are column breaks too (bash's help is tab-aligned); the
+        // entry/continuation heuristics below only look for spaces.
+        let line = strip_overstrike(raw).replace('\t', "    ");
         let trimmed = line.trim_end();
         if trimmed.trim().is_empty() {
             open_at = None;
@@ -102,7 +104,14 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
             Section::Subcommands => {
                 parse_subcommand_line(trimmed, name).map(|item| push_subcommand(&mut spec, item))
             }
-            Section::Options => parse_option_line(trimmed).map(|item| push_option(&mut spec, item)),
+            Section::Options => {
+                let items = parse_option_entries(trimmed);
+                (!items.is_empty()).then(|| {
+                    items
+                        .into_iter()
+                        .fold(false, |new, item| push_option(&mut spec, item) || new)
+                })
+            }
         };
         match pushed {
             // A new entry opens; a duplicate closes whatever was open so
@@ -406,6 +415,45 @@ fn parse_subcommand_line(line: &str, prog: &str) -> Option<Subcommand> {
     })
 }
 
+/// One help line can carry several options. bash writes alternatives
+/// in prose (`-irsD or -c command or -O shopt_option`): split on
+/// ` or ` when every piece is flag-shaped, then expand a bundled
+/// cluster of short flags (`-irsD`) into one option per letter.
+fn parse_option_entries(line: &str) -> Vec<Opt> {
+    let body = line.trim_start();
+    let pieces: Vec<&str> = body.split(" or ").collect();
+    let alternatives = pieces.len() > 1 && pieces.iter().all(|p| p.starts_with('-'));
+    let pieces = if alternatives { pieces } else { vec![body] };
+    pieces
+        .into_iter()
+        .filter_map(parse_option_line)
+        .flat_map(|opt| match opt.names.as_slice() {
+            [name] if is_short_cluster(name) => name[1..]
+                .chars()
+                .map(|c| Opt {
+                    names: vec![format!("-{c}")],
+                    description: opt.description.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            _ => vec![opt],
+        })
+        .collect()
+}
+
+/// `-irsD` / `-abefhkmnptuvxBCHP`: one dash, letters only, both cases
+/// present. A go-style single-dash word (`-verbose`) is one case.
+fn is_short_cluster(name: &str) -> bool {
+    let body = match name.strip_prefix('-') {
+        Some(b) if !b.starts_with('-') => b,
+        _ => return false,
+    };
+    body.len() >= 3
+        && body.chars().all(|c| c.is_ascii_alphabetic())
+        && body.chars().any(|c| c.is_ascii_lowercase())
+        && body.chars().any(|c| c.is_ascii_uppercase())
+}
+
 /// `  -g, --generate <number>   Number of messages` → names + arg +
 /// description.
 fn parse_option_line(line: &str) -> Option<Opt> {
@@ -467,7 +515,7 @@ fn split_token(s: &str) -> Option<(&str, &str)> {
 /// Two shapes count. A bracketed token (`<id>`, `[args…]`) is an
 /// argument wherever it sits. A bare word is an argument only when it
 /// hugs the name (one space) *and* the description is then set off by
-/// two or more — the difference between `--completion string   Generates
+/// two or more (or absent) — the difference between `--completion string   Generates
 /// …` and `--color                       Colored output`, which would
 /// otherwise both look like "flag, word, words".
 fn take_placeholder(rest: &str) -> (Option<Arg>, &str) {
@@ -480,7 +528,7 @@ fn take_placeholder(rest: &str) -> (Option<Arg>, &str) {
     let bare_arg = gap == 1
         && !tok.starts_with('-')
         && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && tail.starts_with("  ");
+        && (tail.is_empty() || tail.starts_with("  "));
     if !bracketed && !bare_arg {
         return (None, rest);
     }
@@ -602,6 +650,7 @@ mod tests {
     const GH: &str = include_str!("../tests/fixtures/help/gh.txt");
     const ZEPH: &str = include_str!("../tests/fixtures/help/zeph.txt");
     const PI: &str = include_str!("../tests/fixtures/help/pi.txt");
+    const BASH: &str = include_str!("../tests/fixtures/help/bash.txt");
 
     fn sub_names(s: &Subcommand) -> Vec<&str> {
         s.subcommands.iter().map(|c| c.name.as_str()).collect()
@@ -901,6 +950,33 @@ mod tests {
         );
         // `pi <command> --help` is a usage hint, not a subcommand.
         assert!(!subs.contains(&"pi"), "{subs:?}");
+    }
+
+    /// `bash --help` lists its short options as prose alternatives with
+    /// bundled clusters: `-irsD or -c command or -O shopt_option`. Each
+    /// alternative is an option and each cluster letter its own flag;
+    /// the raw cluster text must not become an option name.
+    #[test]
+    fn splits_or_alternatives_and_short_clusters() {
+        let spec = parse_help("bash", BASH).expect("bash help is a spec");
+        let names = opt_names(&spec);
+        for want in [
+            "-i", "-r", "-s", "-D", "-c", "-O", "-a", "-P", "-o", "--login",
+        ] {
+            assert!(names.contains(&want), "{want} missing from {names:?}");
+        }
+        assert!(
+            !names.iter().any(|n| n.len() > 2 && !n.starts_with("--")),
+            "{names:?}"
+        );
+        assert_eq!(
+            find_opt(&spec, "-c").args[0].name.as_deref(),
+            Some("command")
+        );
+        assert_eq!(
+            find_opt(&spec, "-O").args[0].name.as_deref(),
+            Some("shopt_option")
+        );
     }
 
     #[test]

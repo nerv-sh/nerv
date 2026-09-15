@@ -1172,7 +1172,11 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
     if !primary.exists() {
         return vec![format!("(no specs at {})", primary.display())];
     }
-    let registry = SpecRegistry::at_dirs(&layers.dirs());
+    // Eager scan, like doctor: a lazy `lookup` defers any spec that
+    // parses slower than its sync window (aws, gcloud) to a background
+    // thread and returns None on the first call — which, in a one-shot
+    // CLI, printed a bogus "load error" for both on every run.
+    let (registry, _errs) = SpecRegistry::load_dirs(&layers.dirs());
     let names = registry.dir_listing();
     if names.is_empty() {
         return vec![format!("(no specs found in {})", primary.display())];
@@ -1194,7 +1198,7 @@ fn spec_list_lines(layers: &paths::SpecLayers) -> Vec<String> {
     let mut lines = vec![format!("{:<18} {:>5} {:>5}  TIER", "NAME", "SUBS", "OPTS")];
     for name in names {
         let Some(spec) = registry.lookup(&name) else {
-            eprintln!("  ⚠ {name}: load error (run nerv doctor)");
+            eprintln!("  ⚠ {name}: failed to parse (run nerv doctor)");
             continue;
         };
         let (subs, opts) = count_tree(spec.as_ref());
