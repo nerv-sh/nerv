@@ -304,11 +304,15 @@ fn engine_complete(
     }
     // Extract the binary name once — frecency keys are per-spec.
     if let Some(spec_name) = line.split_whitespace().next() {
-        result.items = rank_by_frecency(std::mem::take(&mut result.items), spec_name, frecency);
+        result.items = rank_by_frecency(
+            std::mem::take(&mut result.items),
+            spec_name,
+            frecency,
+            MAX_SUGGESTIONS,
+        );
     }
-    // Bound the transported list — see MAX_SUGGESTIONS. Ranking already
-    // ran, so this drops only the least-relevant tail.
-    result.items.truncate(MAX_SUGGESTIONS);
+    // Ranking already truncated to the transport cap (MAX_SUGGESTIONS).
+    debug_assert!(result.items.len() <= MAX_SUGGESTIONS);
     Response::Suggestions {
         items: result.items,
     }
@@ -316,11 +320,14 @@ fn engine_complete(
 
 /// Score each item with the user's frecency for `spec_name`, then order
 /// them for display via [`rank_completions`]. Source-ranked rows (zoxide)
-/// score zero so the stable sort keeps the engine's order for them.
+/// score zero so the stable sort keeps the engine's order for them. The
+/// list is truncated to `cap` after sorting (dropping the least-relevant
+/// tail) so the re-collect below never materializes rows that get dropped.
 fn rank_by_frecency(
     items: Vec<Suggestion>,
     spec_name: &str,
     frecency: &FrecencyStore,
+    cap: usize,
 ) -> Vec<Suggestion> {
     let mut scored: Vec<(f64, Suggestion)> = items
         .into_iter()
@@ -334,6 +341,7 @@ fn rank_by_frecency(
         })
         .collect();
     rank_completions(&mut scored);
+    scored.truncate(cap);
     scored.into_iter().map(|(_, s)| s).collect()
 }
 
@@ -342,7 +350,11 @@ fn rank_by_frecency(
 /// before `..`) ahead of any frecency boost, so `open .` never buries
 /// them under a frecency-boosted `.DS_Store`. Everything else sorts by
 /// score DESC; the stable sort preserves the engine's incoming order
-/// (priority / exact-case) for score ties.
+/// (priority / exact-case) for score ties. **That stability is
+/// load-bearing**: `rank_by_frecency` gives `source_ranked` rows (zoxide)
+/// score 0.0 and relies on the tie keeping the engine's order — a future
+/// secondary tie-break here (e.g. alpha) would silently re-alphabetize
+/// them and re-introduce the `z tak-bro` ranking regression.
 fn rank_completions(scored: &mut [(f64, Suggestion)]) {
     let dotnav_rank = |disp: &str| match disp {
         "./" => 0u8,
@@ -434,13 +446,15 @@ mod tests {
         // past a few hundred. Cap AFTER ranking so a frecency-boosted
         // entry that sorts alphabetically late still survives into the
         // kept head, and only the least-relevant tail is dropped.
-        let mut scored: Vec<(f64, Suggestion)> = (0..MAX_SUGGESTIONS + 50)
-            .map(|i| (0.0, sugg(&format!("pkg{i:05}"))))
+        let mut items: Vec<Suggestion> = (0..MAX_SUGGESTIONS + 50)
+            .map(|i| sugg(&format!("pkg{i:05}")))
             .collect();
-        scored.push((9.0, sugg("zzz-frecency-boosted")));
-        rank_completions(&mut scored);
-        let mut items: Vec<Suggestion> = scored.into_iter().map(|(_, s)| s).collect();
-        items.truncate(MAX_SUGGESTIONS);
+        items.push(sugg("zzz-frecency-boosted"));
+        let frecency = FrecencyStore::empty();
+        for _ in 0..2 {
+            frecency.record("brew", "zzz-frecency-boosted");
+        }
+        let items = rank_by_frecency(items, "brew", &frecency, MAX_SUGGESTIONS);
         assert_eq!(items.len(), MAX_SUGGESTIONS, "list capped for transport");
         assert_eq!(
             items[0].display, "zzz-frecency-boosted",
@@ -479,7 +493,7 @@ mod tests {
             frecency.record("z", "claude-code");
         }
         let items = vec![zoxide("tak-bro"), zoxide("claude-code")];
-        let ranked = rank_by_frecency(items, "z", &frecency);
+        let ranked = rank_by_frecency(items, "z", &frecency, MAX_SUGGESTIONS);
         let order: Vec<&str> = ranked.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(order, ["tak-bro", "claude-code"]);
     }
