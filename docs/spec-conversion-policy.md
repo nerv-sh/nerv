@@ -393,6 +393,7 @@ upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없�
 | 소스 우선순위 | `--help` → `-h` → `help` → `man`. 선택 기준은 "help 처럼 보이는가" 가 아니라 **파싱 성공** — `ls -h` 는 디렉터리 목록을 뱉는데 길고 여러 줄이라 모양만으로는 통과한다. 그러면 실제로 되는 `man ls` 폴백이 죽는다 (실측: 선택 기준 교체로 `ls` 42 옵션 회복) |
 | 임계값 | subcommand ≥ 1 **또는** option ≥ 3. 미달이면 파일을 쓰지 않는다 — usage 에러·버전 배너가 spec 이 되는 것을 막는다 |
 | 제외 | 경로 형태(`./x`, `/usr/bin/x`), 1글자, 셸 builtin/keyword (`cd`·`export`·`eval`·`if` …) |
+| 프로그램명 접두 | `Commands:` 행이 전체 호출형(`pi install <source> [-l]`)이면 첫 토큰이 파생 대상 이름과 같을 때 건너뛰고 다음 토큰을 서브커맨드로 잡는다 (2026-09-15, fixture `help/pi.txt`). 안 그러면 매 행이 `pi` 로 파싱돼 마지막 행만 남는다 — 옵션은 충족하니 임계값도 못 잡는 조용한 불량 spec |
 | 실행 안전장치 | 셸 경유 없음 (`sh -c` 금지 — alias·rc 영향 0, 인젝션 면 0), `which` 로 **절대경로** 해석 후 argv 배열로 spawn, env 초기화 (`LANG=C`·`TERM=dumb`·`NO_COLOR=1`·`COLUMNS=200`), stdin `/dev/null`, cwd = 임시 디렉터리, 1초 timeout, 출력 256KB cap, ANSI strip. **`PATH` 만 상속** — `#!/usr/bin/env node` 류 스크립트는 최소 PATH 에서 인터프리터를 못 찾는다 (실측: `zeph --help` → `env: node: No such file or directory`). 바이너리는 이미 절대경로로 확정돼 있어 상속이 안전을 깎지 않는다 |
 | 실행 시점 | `SpecRegistry::lookup` 의 **백그라운드 populator 스레드** — 키스트로크 경로 아님. 파생을 유발한 키는 빈 결과, 다음 키에 spec 이 온다 (대형 번들 spec 과 같은 계약) |
 | 재파생 | 파일 mtime < 바이너리 mtime 일 때만. 그 외엔 디스크 파일 재사용 — 명령을 키입력마다 spawn 하지 않는다 |

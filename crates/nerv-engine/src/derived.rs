@@ -100,7 +100,7 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
         let pushed = match section {
             Section::None => continue,
             Section::Subcommands => {
-                parse_subcommand_line(trimmed).map(|item| push_subcommand(&mut spec, item))
+                parse_subcommand_line(trimmed, name).map(|item| push_subcommand(&mut spec, item))
             }
             Section::Options => parse_option_line(trimmed).map(|item| push_option(&mut spec, item)),
         };
@@ -360,9 +360,26 @@ fn heading_kind(line: &str) -> Option<Section> {
 /// **followed by a column break** — two or more spaces, a bracketed
 /// placeholder, or the end of the line. A wrapped sentence ("Prints one
 /// JSON line…") has single spaces between its words and is rejected.
-fn parse_subcommand_line(line: &str) -> Option<Subcommand> {
+///
+/// Some CLIs list commands as full invocations (`pi install <source>`,
+/// `pi remove <source>`). A leading token equal to `prog` is the
+/// program's own name, not a subcommand, so it is skipped; otherwise
+/// every line would parse as a subcommand named `prog` and only the
+/// last one would survive.
+fn parse_subcommand_line(line: &str, prog: &str) -> Option<Subcommand> {
     let body = line.trim_start();
-    let (head, rest) = split_token(body)?;
+    let (mut head, mut rest) = split_token(body)?;
+    if head == prog {
+        // A line starting with the program name is an invocation. Take
+        // the subcommand after it, or drop the line when what follows is
+        // a placeholder (`pi <command> --help`) — never a subcommand
+        // named after the program itself.
+        let (next, tail) = split_token(rest)?;
+        if !is_command_name(next.strip_suffix(':').unwrap_or(next)) {
+            return None;
+        }
+        (head, rest) = (next, tail);
+    }
     let name = head.strip_suffix(':').unwrap_or(head);
     if !is_command_name(name) {
         return None;
@@ -372,11 +389,19 @@ fn parse_subcommand_line(line: &str) -> Option<Subcommand> {
     if !column_break {
         return None;
     }
-    let (arg, rest) = take_placeholder(rest);
+    // Every placeholder up to the description column is an argument
+    // (`push [remote] [branch]`); a bracketed flag (`[-l]`) is neither.
+    let mut args = Vec::new();
+    while let (Some(arg), tail) = take_placeholder(rest) {
+        if !arg.name.as_deref().unwrap_or("").starts_with('-') {
+            args.push(arg);
+        }
+        rest = tail;
+    }
     Some(Subcommand {
         name: name.to_string(),
         description: description_of(rest),
-        args: arg.into_iter().collect(),
+        args,
         ..Default::default()
     })
 }
@@ -576,6 +601,7 @@ mod tests {
     const AICOMMIT2: &str = include_str!("../tests/fixtures/help/aicommit2.txt");
     const GH: &str = include_str!("../tests/fixtures/help/gh.txt");
     const ZEPH: &str = include_str!("../tests/fixtures/help/zeph.txt");
+    const PI: &str = include_str!("../tests/fixtures/help/pi.txt");
 
     fn sub_names(s: &Subcommand) -> Vec<&str> {
         s.subcommands.iter().map(|c| c.name.as_str()).collect()
@@ -847,6 +873,36 @@ mod tests {
 
     /// The output has to survive a round trip through the on-disk spec
     /// format, since that is how it reaches the registry.
+    /// `pi --help` lists commands as full invocations (`pi install
+    /// <source> [-l]`). The program name must be skipped, or every line
+    /// parses as a subcommand named `pi` and the spec is useless.
+    #[test]
+    fn skips_program_name_prefix_on_command_lines() {
+        let spec = parse_help("pi", PI).expect("pi help is a spec");
+        let subs = sub_names(&spec);
+        assert_eq!(
+            subs,
+            vec![
+                "install",
+                "remove",
+                "uninstall",
+                "update",
+                "list",
+                "config",
+                "auth"
+            ],
+            "{subs:?}"
+        );
+        let install = &spec.subcommands[0];
+        assert_eq!(install.args[0].name.as_deref(), Some("source"));
+        assert_eq!(
+            install.description.as_deref(),
+            Some("Install extension source and add to settings")
+        );
+        // `pi <command> --help` is a usage hint, not a subcommand.
+        assert!(!subs.contains(&"pi"), "{subs:?}");
+    }
+
     #[test]
     fn derived_spec_round_trips_through_json() {
         let spec = parse_help("uv", UV).expect("spec");
