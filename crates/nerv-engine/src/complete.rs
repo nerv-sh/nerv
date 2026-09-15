@@ -1906,14 +1906,23 @@ fn emit_candidates_for_arg(
 /// Conservative — only matches exact lowercase single-word names
 /// to avoid hijacking args like "filename for output" that mean
 /// something more specific than a generic path picker.
+///
+/// A list name (`branch, file, tag or commit` — git checkout's first
+/// slot) counts when any listed alternative is a path word, so a typed
+/// path still completes there once no branch matches.
 fn infer_filepaths_kind(name: Option<&str>) -> Option<bool> {
     let n = name?.trim().to_ascii_lowercase();
-    match n.as_str() {
-        "path" | "file" | "files" | "filepath" | "filename" | "src" | "dest" | "source"
-        | "destination" | "input" | "output" => Some(false),
+    let kind_of = |word: &str| match word.trim() {
+        "path" | "paths" | "pathspec" | "file" | "files" | "filepath" | "filename" | "src"
+        | "dest" | "source" | "destination" | "input" | "output" => Some(false),
         "dir" | "directory" | "folder" | "dirname" | "dirpath" => Some(true),
         _ => None,
-    }
+    };
+    kind_of(&n).or_else(|| {
+        n.split(',')
+            .flat_map(|piece| piece.split(" or "))
+            .find_map(kind_of)
+    })
 }
 
 /// Same idea as [`infer_filepaths_kind`] but consults the wrapping
@@ -5261,6 +5270,16 @@ region = us-east-1
         assert_eq!(infer_filepaths_kind(Some("dir")), Some(true));
         assert_eq!(infer_filepaths_kind(Some("DIRECTORY")), Some(true));
         assert_eq!(infer_filepaths_kind(Some("folder")), Some(true));
+    }
+
+    #[test]
+    fn infer_filepaths_kind_list_names() {
+        assert_eq!(
+            infer_filepaths_kind(Some("branch, file, tag or commit")),
+            Some(false)
+        );
+        assert_eq!(infer_filepaths_kind(Some("pathspec")), Some(false));
+        assert_eq!(infer_filepaths_kind(Some("branch or tag")), None);
     }
 
     #[test]
