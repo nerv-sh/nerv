@@ -212,14 +212,14 @@ impl SpecRegistry {
             let meta = path.metadata().ok();
             match load_spec_file(&path) {
                 Ok(spec) => {
-                    let key = if !spec.name.is_empty() {
-                        spec.name.clone()
-                    } else {
-                        stem
-                    };
+                    // Key by file stem, exactly as `lookup` does: the
+                    // stem is the binary name a keystroke asks for. A
+                    // spec whose `name` differs (appwrite's is "index")
+                    // would otherwise miss the cache, take the lazy path,
+                    // and trip the count-cap evict over this full scan.
                     let tick = registry.next_tick();
                     cache.insert(
-                        key,
+                        stem,
                         CacheEntry {
                             mtime: meta.as_ref().and_then(|m| m.modified().ok()),
                             spec: Some(Arc::new(spec)),
@@ -4024,6 +4024,26 @@ region = us-east-1
         let (r, errs) = SpecRegistry::load_dirs(&[PathBuf::from("/tmp/nerv-nonexistent-xyz")]);
         assert!(r.is_empty());
         assert!(errs.is_empty());
+    }
+
+    /// The eager scan caches under the file stem — the key `lookup`
+    /// asks for — not `spec.name`. appwrite's bundled spec is named
+    /// "index"; keyed by name, `lookup("appwrite")` missed the cache,
+    /// went lazy, and its insert tripped the count-cap evict over the
+    /// whole scan, so `spec list` printed aws/gcloud as load errors.
+    #[test]
+    fn load_dirs_keys_the_cache_by_stem_not_spec_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("appwrite.json"), r#"{"name":"index"}"#).unwrap();
+        let (r, errs) = SpecRegistry::load_dirs(&[dir.path().to_path_buf()]);
+        assert!(errs.is_empty(), "{errs:?}");
+        let cache = r.cache.read().unwrap();
+        assert!(
+            cache.contains_key("appwrite"),
+            "{:?}",
+            cache.keys().collect::<Vec<_>>()
+        );
+        assert!(!cache.contains_key("index"));
     }
 
     #[test]
