@@ -36,43 +36,58 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.decide.outputs.tag }}
+      sha: ${{ steps.decide.outputs.sha }}
       should_release: ${{ steps.decide.outputs.should_release }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # On a main push, look at main's *current* tip rather than
+          # the triggering sha: queued runs (concurrency serializes
+          # them) must see the bump the previous run pushed, or they
+          # would bump from the same base and collide on the tag.
+          ref: ${{ github.event_name == 'push' && github.ref_type == 'branch' && 'main' || github.ref }}
+          token: ${{ github.token }}
 
       - name: decide tag + whether to release
         id: decide
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
           EVENT="${{ github.event_name }}"
           if [ "$EVENT" = "workflow_dispatch" ]; then
             # Manual: release the (already-existing) input tag.
             echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
           elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
             # Direct tag push (v*.*.*): release that tag.
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
             echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif grep -qF '[skip release]' <<<"$HEAD_MESSAGE"; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::[skip release] present — no release for this merge."
           else
-            # Push to main: the Cargo.toml workspace version drives the
-            # tag. Release only when v<version> has no release yet AND the
-            # merge commit carries no [skip release] brake. So shipping =
-            # "bump Cargo.toml version"; every other merge is a no-op.
+            # Push to main: every merge ships. If Cargo.toml already
+            # names an unreleased version (a hand bump — minor/major),
+            # release that; otherwise bump the patch here, commit it to
+            # main, and build from that commit. The bot push does not
+            # re-trigger this workflow (GITHUB_TOKEN pushes never do).
             VERSION="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-            TAG="v${VERSION}"
-            echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-            if git log -1 --format=%B | grep -qF '[skip release]'; then
-              echo "should_release=false" >> "$GITHUB_OUTPUT"
-              echo "::notice::[skip release] present — no release for ${TAG}."
-            elif gh release view "$TAG" >/dev/null 2>&1; then
-              echo "should_release=false" >> "$GITHUB_OUTPUT"
-              echo "::notice::${TAG} already released — bump Cargo.toml version to ship a new one."
-            else
-              echo "should_release=true" >> "$GITHUB_OUTPUT"
-              echo "::notice::Releasing ${TAG} from main."
+            if gh release view "v${VERSION}" >/dev/null 2>&1; then
+              VERSION="$(scripts/bump-version.sh)"
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -qam "chore(release): bump workspace version to ${VERSION}"
+              git push origin HEAD:main
+              echo "::notice::Bumped Cargo.toml to ${VERSION} on main."
             fi
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Releasing v${VERSION} from main."
           fi
 
   build:
@@ -94,6 +109,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -212,7 +229,7 @@ jobs:
             gh release upload "$TAG" artifacts/* --clobber
           else
             gh release create "$TAG" artifacts/* \
-              --target "${{ github.sha }}" \
+              --target "${{ needs.gate.outputs.sha }}" \
               --title "$TAG" \
               --notes "Unsigned developer preview build of \`nerv\` + \`nervd\` for macOS (Apple Silicon). Apple Developer ID signing/notarization arrives in a later release — until then, macOS Gatekeeper will warn on first launch. See README for install instructions."
           fi
