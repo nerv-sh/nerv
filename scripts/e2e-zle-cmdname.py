@@ -5,9 +5,10 @@ Typing a command name is a completion like any other: `doc` offers
 `docker` in the popup and Tab inserts it, while a name that is already
 complete (`git`) offers nothing — the popup preselects its first row, so
 a leftover row would make Enter run the wrong command. A shell alias
-(`k`) counts as complete even though the daemon cannot see it. The
-history ghost keeps its priority over the popup, and survives the daemon
-being down, since it never needed the engine.
+(`k`) counts as complete too, even though the daemon cannot see it. A
+typo (`dokcer`) reaches the name it meant, which prefix matching never
+could. The history ghost keeps its priority over the popup, and survives
+the daemon being down, since it never needed the engine.
 
 Run from repo root:  python3 scripts/e2e-zle-cmdname.py
 Requires: cargo-built debug binaries, zsh on PATH.
@@ -158,6 +159,25 @@ def main():
         if "[1/" in text:
             failures.append("exact command name 'git' still drew a popup")
         log(f"'git': popup redrawn={'[1/' in text}")
+
+        # A typo reaches the name it meant. Prefix matching cannot: the
+        # whole top of misses.tsv is transpositions like this one.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"dokcer")
+        text = pump(master, 1.5).decode(errors="replace")
+        if "docker" not in text or "did you mean" not in text:
+            failures.append("typo 'dokcer' was not corrected to 'docker'")
+        log(f"'dokcer': corrected={'did you mean' in text}")
+
+        # Accepting a correction is the one first-token row whose
+        # insertion is not an extension of what was typed, so the whole
+        # token has to be replaced rather than appended to.
+        os.write(master, b"\t")
+        plain = strip_ansi(pump(master, 1.5))
+        if b"docker" not in plain or b"dokcer" in plain.rsplit(b"\n", 1)[-1]:
+            failures.append("Tab did not replace the typo with the correction")
+        log(f"'dokcer'+Tab: replaced={b'docker' in plain}")
 
         # An alias is a finished command the daemon can't see. Without a
         # widget-side guard the popup would offer `kubectl` and Enter

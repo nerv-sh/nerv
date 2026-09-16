@@ -858,7 +858,101 @@ pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggesti
             items.push(command_name_suggestion(name, description));
         }
     }
+    if items.is_empty() {
+        if let Some(name) = did_you_mean(prefix, names) {
+            items.push(command_name_suggestion(name, "did you mean"));
+        }
+    }
     items
+}
+
+/// The name `input` most likely meant, when it matches nothing as a
+/// prefix. `None` whenever nothing is close enough — a wrong guess is
+/// worse than no row, because the popup preselects it.
+///
+/// Candidates are spec stems and previously accepted names only. PATH
+/// holds thousands of names, so there is always *something* one edit
+/// away there; drawing from it would turn every miss into a confident
+/// wrong answer. Ties go to the earlier source, i.e. what the user has
+/// actually run.
+///
+/// PATH still decides whether a correction is offered *at all*, through
+/// the caller's exact-name check: a real binary is a complete name, not
+/// a typo. While the daemon's first PATH scan is still running that
+/// source is empty, so for that one window a real binary one edit from
+/// a stem (`pnpm` against `npm`) can draw a correction it would not
+/// draw a moment later.
+pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str> {
+    let input: Vec<char> = input.chars().collect();
+    let budget = typo_distance_budget(input.len())?;
+    let mut best: Option<(usize, &str)> = None;
+    for name in names.frecent.iter().chain(names.stems.iter()) {
+        let Some(distance) = damerau_levenshtein_within(&input, name, budget) else {
+            continue;
+        };
+        if best.is_none_or(|(b, _)| distance < b) {
+            best = Some((distance, name.as_str()));
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
+/// How many edits may separate a typo from the name it meant. The
+/// tally's real typos are one edit at four to five characters
+/// (`zpeh`, `yanr`, `gitp`); longer words earn a second because there
+/// is more room to slip and far less chance of a coincidental match.
+/// Below three characters every name is a near neighbour, so nothing
+/// is offered.
+fn typo_distance_budget(len: usize) -> Option<usize> {
+    match len {
+        0..=2 => None,
+        3..=5 => Some(1),
+        _ => Some(2),
+    }
+}
+
+/// Damerau-Levenshtein distance (optimal string alignment) between `a`
+/// and `b`, or `None` once it is known to exceed `budget`.
+///
+/// Transpositions count as one edit, not two: swapped adjacent letters
+/// are the dominant shape in the miss tally (`yanr` for `yarn`, `pmpm`
+/// for `pnpm`), and plain Levenshtein would rate them as far off as two
+/// unrelated substitutions.
+fn damerau_levenshtein_within(a: &[char], b: &str, budget: usize) -> Option<usize> {
+    // A length gap alone already costs that many edits. Counted before
+    // allocating, because this runs against every known name and most
+    // of them are rejected right here.
+    if a.len().abs_diff(b.chars().count()) > budget {
+        return None;
+    }
+    let b: Vec<char> = b.chars().collect();
+    // Three rows rotate through these buffers; `prev2` holds row i-2,
+    // which the transposition case reads. Sized up front so the
+    // rotation below never hands out a short buffer.
+    let mut prev2: Vec<usize> = vec![0; b.len() + 1];
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur: Vec<usize> = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        let mut row_best = cur[0];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                cur[j] = cur[j].min(prev2[j - 2] + 1);
+            }
+            row_best = row_best.min(cur[j]);
+        }
+        // Every later row can only grow, so a whole row over budget
+        // settles it.
+        if row_best > budget {
+            return None;
+        }
+        std::mem::swap(&mut prev2, &mut prev);
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    let distance = prev[b.len()];
+    (distance <= budget).then_some(distance)
 }
 
 /// One popup row for a command name. `source_ranked` because the order
@@ -5357,6 +5451,120 @@ region = us-east-1
             .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
             .collect();
         assert_eq!(rows, [("git", "recent"), ("gitk", "spec")]);
+    }
+
+    /// The whole point of the feature: the top of `misses.tsv` is typos
+    /// (`zpeh` 14, `yanr` 5, `gitp` 5), which prefix matching can never
+    /// reach. One row, labelled so the user sees it is a correction.
+    #[test]
+    fn a_typo_offers_the_name_it_meant() {
+        let names = cmd_names();
+        let out = cmd_complete("zpeh", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
+                .collect::<Vec<_>>(),
+            [("zeph", "did you mean")]
+        );
+    }
+
+    /// Worked examples, not a re-derivation of the implementation:
+    /// `kitten`/`sitting` is the textbook 3, `ab`/`ba` is the one
+    /// transposition, and `ca`/`abc` is 3 under optimal string
+    /// alignment (true Damerau would say 2) — pinning which variant
+    /// this is.
+    #[test]
+    fn edit_distance_matches_worked_examples() {
+        for (a, b, expected) in [
+            ("abc", "abc", 0),
+            ("ab", "ba", 1),
+            ("kitten", "sitting", 3),
+            ("ca", "abc", 3),
+            ("", "abc", 3),
+        ] {
+            let a_chars: Vec<char> = a.chars().collect();
+            assert_eq!(
+                damerau_levenshtein_within(&a_chars, b, 9),
+                Some(expected),
+                "{a} -> {b}"
+            );
+        }
+        // Over budget reports nothing rather than the distance.
+        let kitten: Vec<char> = "kitten".chars().collect();
+        assert_eq!(damerau_levenshtein_within(&kitten, "sitting", 2), None);
+    }
+
+    /// A transposition is the most common typo shape in the tally
+    /// (`yanr`, `pmpm`), so plain Levenshtein would miss it.
+    #[test]
+    fn transposed_letters_are_one_edit_away() {
+        let names = CommandNames::from_parts(vec![], vec!["yarn".into()], vec![]);
+        assert_eq!(did_you_mean("yanr", &names), Some("yarn"));
+    }
+
+    /// A correction only makes sense when prefix matching came up
+    /// empty. Offering one alongside real matches would push a guess
+    /// into a list the user is already narrowing.
+    #[test]
+    fn a_prefix_that_matches_gets_no_correction() {
+        let names = cmd_names();
+        let out = cmd_complete("gi", &names);
+        assert!(!out.items.is_empty(), "the prefix must still match");
+        assert!(
+            out.items
+                .iter()
+                .all(|s| s.description.as_deref() != Some("did you mean")),
+            "{:?}",
+            out.items
+        );
+    }
+
+    /// Two names the same distance away: the one the user has actually
+    /// run wins, because it is the better guess about intent.
+    #[test]
+    fn a_tie_goes_to_the_name_the_user_has_run() {
+        // `horn` and `yarn` are both one edit from `yorn`; only the
+        // source order separates them.
+        let names = CommandNames::from_parts(
+            vec!["yarn".into()],
+            vec!["horn".into(), "yarn".into()],
+            vec![],
+        );
+        assert_eq!(did_you_mean("yorn", &names), Some("yarn"));
+    }
+
+    /// Six characters is where the budget widens to two edits — the
+    /// boundary itself, not the lengths either side of it.
+    #[test]
+    fn six_characters_is_where_two_edits_are_allowed() {
+        assert_eq!(typo_distance_budget(5), Some(1));
+        assert_eq!(typo_distance_budget(6), Some(2));
+        let names = CommandNames::from_parts(vec![], vec!["docker".into()], vec![]);
+        // `dokcre` is two edits from `docker`; a five-letter input that
+        // far away gets nothing.
+        assert_eq!(did_you_mean("dokcre", &names), Some("docker"));
+        let short = CommandNames::from_parts(vec![], vec!["brew".into()], vec![]);
+        assert_eq!(did_you_mean("breq2", &short), None);
+    }
+
+    /// Short inputs are prefixes far more often than typos, and at two
+    /// characters almost every name is one edit away.
+    #[test]
+    fn short_inputs_are_never_corrected() {
+        let names = cmd_names();
+        assert_eq!(did_you_mean("zp", &names), None);
+        // Distance grows with length: two edits need a long input.
+        assert_eq!(did_you_mean("dokcer2", &names), Some("docker"));
+        assert_eq!(did_you_mean("dokce", &names), None);
+    }
+
+    /// PATH is thousands of names, so something is always one edit away
+    /// — a correction drawn from it would be a confident wrong answer.
+    #[test]
+    fn corrections_never_come_from_path() {
+        let names = CommandNames::from_parts(vec![], vec![], vec!["zcat".into()]);
+        assert_eq!(did_you_mean("zcta", &names), None);
     }
 
     /// The PATH floor governs the exact-name guard too. `w` is a real
