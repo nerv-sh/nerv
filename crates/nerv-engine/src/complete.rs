@@ -703,8 +703,12 @@ fn path_prefix_allowed(prefix: &str) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct CommandNames {
     frecent: Vec<String>,
-    stems: Vec<String>,
-    path: Vec<String>,
+    /// Shared, not owned: the daemon rebuilds this value on every
+    /// first-token keystroke, and these two lists are ~700 and ~3,700
+    /// entries. Copying them per keystroke is thousands of allocations
+    /// for a list that changed only when a directory did.
+    stems: Arc<Vec<String>>,
+    path: Arc<Vec<String>>,
 }
 
 impl CommandNames {
@@ -712,6 +716,16 @@ impl CommandNames {
     /// first, `stems` and `path` sorted; this type preserves the order
     /// it is given and only dedupes across sources.
     pub fn from_parts(frecent: Vec<String>, stems: Vec<String>, path: Vec<String>) -> Self {
+        Self::from_shared(frecent, Arc::new(stems), Arc::new(path))
+    }
+
+    /// Same, with the two cached lists handed in by reference count —
+    /// what a caller that rebuilds this per keystroke should use.
+    pub fn from_shared(
+        frecent: Vec<String>,
+        stems: Arc<Vec<String>>,
+        path: Arc<Vec<String>>,
+    ) -> Self {
         Self {
             frecent,
             stems,
@@ -733,16 +747,21 @@ impl CommandNames {
     }
 }
 
-/// Split a `PATH` value into the directories that exist, in order.
+/// Split a `PATH` value into directories, in order.
+///
 /// Empty entries mean "the current directory" in POSIX; they are
 /// dropped, because offering whatever happens to be executable in the
-/// cwd as a command name is a surprise, not a help.
+/// cwd as a command name is a surprise, not a help. Entries that do not
+/// exist are *kept*: a daemon runs for days, and a directory created
+/// after it started (`~/.local/bin`, a fresh toolchain shim dir) would
+/// otherwise stay invisible for the daemon's lifetime. Reading one is
+/// already a no-op, and its appearance moves the stamp like any other
+/// change.
 pub fn path_dirs(path_var: &str) -> Vec<PathBuf> {
     path_var
         .split(':')
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .filter(|p| p.is_dir())
         .collect()
 }
 
@@ -750,7 +769,8 @@ pub fn path_dirs(path_var: &str) -> Vec<PathBuf> {
 /// verbatim, so an executable whose file name needs shell quoting —
 /// `zsh (qterm)`, seen on a real `PATH` — would leave a broken line
 /// behind. The allowed punctuation is what real command names use
-/// (`git-cliff`, `python3.12`, `c++`, `zsh-5.9`).
+/// (`git-cliff`, `python3.12`, `c++`, `zsh-5.9`). `=` is not among it:
+/// a file called `FOO=bar` reads as an assignment, not a command.
 fn is_typeable_command_name(name: &str) -> bool {
     let mut chars = name.chars();
     // A leading `-` or `:` would be read as a flag, not a command, once
@@ -759,7 +779,7 @@ fn is_typeable_command_name(name: &str) -> bool {
         return false;
     };
     (first.is_alphanumeric() || first == '_' || first == '.')
-        && chars.all(|c| c.is_alphanumeric() || "_-.+@:,=".contains(c))
+        && chars.all(|c| c.is_alphanumeric() || "_-.+@:,".contains(c))
 }
 
 /// Names of the executable files in `dirs`, sorted and deduplicated —
@@ -807,10 +827,11 @@ pub fn executables_in(dirs: &[PathBuf]) -> Vec<String> {
 ///
 /// Exists so a caller can skip building the (nontrivial) name list for
 /// the overwhelming majority of keystrokes, which land after a space.
-/// It mirrors the prelude of [`complete_in`]: quote check, then the
-/// segment under the cursor, so `git co && ze` is a first token again.
-/// Wrapper skipping (`sudo docker …`) needs two tokens, so a single
-/// token is unaffected by it.
+/// It mirrors the prelude of [`complete_in`] step for step — quote
+/// check, the segment under the cursor (`git co && ze` is a first token
+/// again), then the wrapper skip, which turns `sudo doc` into one. Any
+/// step left out here is a keystroke where the engine would answer and
+/// the caller never asks.
 pub fn is_command_name_position(line: &str, cursor: usize) -> bool {
     let cursor = clamp_cursor_to_char_boundary(line, cursor);
     let head = &line[..cursor];
@@ -820,6 +841,13 @@ pub fn is_command_name_position(line: &str, cursor: usize) -> bool {
     let seg_start = command_segment_start(head).min(cursor);
     let head = &head[seg_start..];
     let tokens = tokenize(head);
+    let wrap_start = wrapped_command_start(&tokens).min(head.len());
+    let head = &head[wrap_start..];
+    let tokens = if wrap_start > 0 {
+        tokenize(head)
+    } else {
+        tokens
+    };
     tokens.len() == 1 && current_prefix(head) == tokens[0].text
 }
 
@@ -5374,6 +5402,7 @@ region = us-east-1
         exe(first.path(), "zsh (qterm)");
         exe(first.path(), "weird$name");
         exe(first.path(), "-x"); // would parse as a flag once inserted
+        exe(first.path(), "FOO=bar"); // would parse as an assignment
         exe(second.path(), "zeph"); // shadowed by the earlier dir
         exe(second.path(), "brew");
         std::fs::write(first.path().join("notes.txt"), "data").expect("write");
@@ -5385,15 +5414,18 @@ region = us-east-1
         assert_eq!(executables_in(&dirs), ["brew", "g", "git", "zeph"]);
     }
 
-    /// A `PATH` carries entries that no longer exist, and an empty entry
-    /// means the cwd — neither is a place to find command names.
+    /// An empty entry means the cwd, which is not a place to look for
+    /// command names. A directory that does not exist *yet* is kept:
+    /// the daemon outlives the shells that create them.
     #[test]
-    fn path_dirs_drops_missing_and_empty_entries() {
+    fn path_dirs_drops_empty_entries_but_keeps_absent_dirs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let real = dir.path().to_string_lossy().to_string();
-        let gone = dir.path().join("nope").to_string_lossy().to_string();
-        let parsed = path_dirs(&format!("{real}::{gone}"));
-        assert_eq!(parsed, vec![dir.path().to_path_buf()]);
+        let later = dir.path().join("not-yet");
+        let parsed = path_dirs(&format!("{real}::{}", later.to_string_lossy()));
+        assert_eq!(parsed, vec![dir.path().to_path_buf(), later.clone()]);
+        // Reading one that is missing is a no-op, not an error.
+        assert!(executables_in(&[later]).is_empty());
     }
 
     /// The daemon skips building the name list unless this says the
@@ -5403,7 +5435,9 @@ region = us-east-1
     #[test]
     fn command_name_position_agrees_with_the_pipeline() {
         let names = cmd_names();
-        for line in ["gi", "git c && gi"] {
+        // `sudo doc` is two tokens, but the wrapper has no spec of its
+        // own — the engine drops it and completes the command it runs.
+        for line in ["gi", "git c && gi", "sudo doc", "env FOO=1 gi"] {
             assert!(
                 is_command_name_position(line, line.len()),
                 "{line:?} should be a command-name position"

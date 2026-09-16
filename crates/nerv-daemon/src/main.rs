@@ -333,13 +333,13 @@ fn dirs_from(scan: Option<&str>, path: &str) -> Vec<std::path::PathBuf> {
 
 #[derive(Default)]
 struct PathSnapshot {
-    names: Vec<String>,
+    names: Arc<Vec<String>>,
     stamp: Option<Vec<Option<std::time::SystemTime>>>,
 }
 
 #[derive(Default)]
 struct StemSnapshot {
-    names: Vec<String>,
+    names: Arc<Vec<String>>,
     /// One mtime per spec layer, in `layer_dirs` order. `None` marks a
     /// layer that does not exist yet (a missing overlay is normal); its
     /// later creation still shows up as a change.
@@ -372,7 +372,7 @@ impl NameCache {
     }
 
     fn names(&self, registry: &SpecRegistry, frecency: &FrecencyStore) -> CommandNames {
-        CommandNames::from_parts(
+        CommandNames::from_shared(
             frecency.spec_names(),
             self.stems(registry),
             self.path.names(),
@@ -383,7 +383,7 @@ impl NameCache {
     /// `read_dir` runs *outside* the lock: the moment a derived spec
     /// lands, every concurrent keystroke would otherwise queue behind
     /// one directory walk.
-    fn stems(&self, registry: &SpecRegistry) -> Vec<String> {
+    fn stems(&self, registry: &SpecRegistry) -> Arc<Vec<String>> {
         let stamp: Vec<Option<std::time::SystemTime>> = registry
             .layer_dirs()
             .iter()
@@ -395,7 +395,7 @@ impl NameCache {
                 return snap.names.clone();
             }
         }
-        let names = registry.dir_listing();
+        let names = Arc::new(registry.dir_listing());
         let mut snap = self.lock();
         snap.names = names.clone();
         snap.stamp = Some(stamp);
@@ -418,9 +418,9 @@ impl PathCache {
     /// Names from the last completed scan. Touches the disk only to
     /// stat each `PATH` directory; a moved stamp schedules a rescan
     /// instead of running one here.
-    fn names(self: &Arc<Self>) -> Vec<String> {
+    fn names(self: &Arc<Self>) -> Arc<Vec<String>> {
         if self.dirs.is_empty() {
-            return vec![];
+            return Arc::default();
         }
         let stamp = self.stamps();
         let (names, fresh) = {
@@ -454,7 +454,7 @@ impl PathCache {
     /// next request schedules another pass.
     fn rescan(&self) {
         let stamp = self.stamps();
-        let names = nerv_engine::complete::executables_in(&self.dirs);
+        let names = Arc::new(nerv_engine::complete::executables_in(&self.dirs));
         let mut snap = self.lock();
         snap.names = names;
         snap.stamp = Some(stamp);
@@ -638,7 +638,7 @@ mod tests {
         let frecency = FrecencyStore::empty();
         let cache = NameCache::default();
 
-        assert_eq!(cache.stems(&registry), vec!["foo".to_string()]);
+        assert_eq!(*cache.stems(&registry), vec!["foo".to_string()]);
 
         // Add a spec but rewind the directory mtime: the snapshot is
         // keyed on that stamp, so the new file must stay invisible.
@@ -650,7 +650,7 @@ mod tests {
         dir.set_times(std::fs::FileTimes::new().set_modified(before))
             .expect("rewind dir mtime");
         assert_eq!(
-            cache.stems(&registry),
+            *cache.stems(&registry),
             vec!["foo".to_string()],
             "an unchanged stamp must be served from the snapshot"
         );
@@ -661,7 +661,7 @@ mod tests {
         )
         .expect("advance dir mtime");
         assert_eq!(
-            cache.stems(&registry),
+            *cache.stems(&registry),
             vec!["bar".to_string(), "foo".to_string()]
         );
 
@@ -698,7 +698,7 @@ mod tests {
             "asking for names must not walk PATH inline"
         );
         cache.rescan();
-        assert_eq!(cache.names(), vec!["zeph".to_string()]);
+        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
     }
 
     /// A newly installed binary has to show up without a daemon
@@ -709,7 +709,7 @@ mod tests {
         exe(tmp.path(), "zeph");
         let cache = path_cache(tmp.path());
         cache.rescan();
-        assert_eq!(cache.names(), vec!["zeph".to_string()]);
+        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
 
         exe(tmp.path(), "aicommit2");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -717,7 +717,7 @@ mod tests {
             // The first call schedules; later ones observe the result.
             let names = cache.names();
             if names.len() == 2 {
-                assert_eq!(names, vec!["aicommit2".to_string(), "zeph".to_string()]);
+                assert_eq!(*names, vec!["aicommit2".to_string(), "zeph".to_string()]);
                 break;
             }
             assert!(
