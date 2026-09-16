@@ -90,6 +90,9 @@ def main():
     env["ZDOTDIR"] = zdot
     env["NERV_SPECS_DIR"] = SPECS
     env["NERV_FRECENCY_FILE"] = "-"
+    # Keep the rows to the fixture specs: a real PATH would make the
+    # popup's contents differ by machine.
+    env["NERV_PATH_SCAN"] = "0"
     env["NERV_MISSES_FILE"] = os.path.join(home, "misses.tsv")
     env["TERM"] = "xterm-256color"
 

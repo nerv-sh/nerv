@@ -66,6 +66,9 @@ impl DaemonHandle {
             .env("NERV_SPECS_DIR", &specs)
             .env("NERV_FRECENCY_FILE", &frecency)
             .env("NERV_MISSES_FILE", &misses)
+            // Never scan the developer\'s real PATH: command-name rows would
+            // vary by machine.
+            .env("NERV_PATH_SCAN", "0")
             .env("NERV_LOG", "warn")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())

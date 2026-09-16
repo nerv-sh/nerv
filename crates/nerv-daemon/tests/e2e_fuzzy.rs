@@ -44,6 +44,9 @@ async fn fuzzy_mode_recovers_checkout_from_chk() {
         .env("NERV_CONFIG_FILE", &config_path)
         .env("NERV_FRECENCY_FILE", "-")
         .env("NERV_MISSES_FILE", "-")
+        // Never scan the developer\'s real PATH: command-name rows would
+        // vary by machine.
+        .env("NERV_PATH_SCAN", "0")
         .env("NERV_LOG", "debug")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
@@ -124,6 +127,9 @@ async fn default_prefix_mode_rejects_fuzzy_query() {
         .env("NERV_CONFIG_FILE", &bogus_config)
         .env("NERV_FRECENCY_FILE", "-")
         .env("NERV_MISSES_FILE", "-")
+        // Never scan the developer\'s real PATH: command-name rows would
+        // vary by machine.
+        .env("NERV_PATH_SCAN", "0")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

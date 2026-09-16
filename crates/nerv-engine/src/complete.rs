@@ -685,6 +685,13 @@ pub fn no_spec_binary(reason: &str) -> Option<&str> {
 /// the spec-stem source has no such floor because it is ~700 names.
 const CMD_NAME_MIN_PATH_PREFIX: usize = 2;
 
+/// Whether `prefix` may draw on the PATH source at all. One owner, so
+/// the row list and the exact-name guard can never disagree about which
+/// names exist.
+fn path_prefix_allowed(prefix: &str) -> bool {
+    prefix.chars().count() >= CMD_NAME_MIN_PATH_PREFIX
+}
+
 /// The command names offerable while the *first* token is still being
 /// typed, in the order they should appear: names the user has accepted
 /// before, then installed spec stems, then the rest of PATH.
@@ -712,13 +719,86 @@ impl CommandNames {
         }
     }
 
-    /// True when `name` is a command we know about — the signal that
-    /// the user has finished typing a name rather than started one.
-    pub fn contains(&self, name: &str) -> bool {
+    /// True when `name` is a command we know — the signal that the user
+    /// has finished typing a name rather than started one.
+    ///
+    /// PATH is consulted only once the prefix is long enough to draw
+    /// rows from it. Otherwise a one-letter binary (`/usr/bin/w` is
+    /// real) would silence the popup for `w`, taking the `watch` and
+    /// `which` spec rows with it.
+    pub fn is_complete_name(&self, name: &str) -> bool {
         self.frecent.iter().any(|c| c == name)
             || self.stems.iter().any(|c| c == name)
-            || self.path.iter().any(|c| c == name)
+            || (path_prefix_allowed(name) && self.path.iter().any(|c| c == name))
     }
+}
+
+/// Split a `PATH` value into the directories that exist, in order.
+/// Empty entries mean "the current directory" in POSIX; they are
+/// dropped, because offering whatever happens to be executable in the
+/// cwd as a command name is a surprise, not a help.
+pub fn path_dirs(path_var: &str) -> Vec<PathBuf> {
+    path_var
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// True when `name` can be typed at a prompt as-is. A row is inserted
+/// verbatim, so an executable whose file name needs shell quoting —
+/// `zsh (qterm)`, seen on a real `PATH` — would leave a broken line
+/// behind. The allowed punctuation is what real command names use
+/// (`git-cliff`, `python3.12`, `c++`, `zsh-5.9`).
+fn is_typeable_command_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    // A leading `-` or `:` would be read as a flag, not a command, once
+    // the row is inserted — the punctuation below is only safe inside.
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphanumeric() || first == '_' || first == '.')
+        && chars.all(|c| c.is_alphanumeric() || "_-.+@:,=".contains(c))
+}
+
+/// Names of the executable files in `dirs`, sorted and deduplicated —
+/// the command names a shell would find on `PATH`.
+///
+/// Symlinks are followed (most of a Homebrew `bin` is symlinks), and an
+/// unreadable directory yields nothing: a stale `PATH` entry is normal,
+/// not an error. This walks thousands of files, so callers keep it off
+/// the keystroke path.
+pub fn executables_in(dirs: &[PathBuf]) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if seen.contains(&name) || !is_typeable_command_name(&name) {
+                continue;
+            }
+            // `fs::metadata` (not `DirEntry::metadata`) so a symlink is
+            // judged by its target.
+            let Ok(meta) = fs::metadata(entry.path()) else {
+                continue;
+            };
+            if meta.is_dir() || meta.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+            seen.insert(name.clone());
+            names.push(name);
+        }
+    }
+    names.sort();
+    names
 }
 
 /// True when the cursor sits on the *first* token of the command under
@@ -751,10 +831,10 @@ pub fn is_command_name_position(line: &str, cursor: usize) -> bool {
 /// screen after a complete `git` would make Enter insert the wrong
 /// command.
 pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggestion> {
-    if prefix.is_empty() || names.contains(prefix) {
+    if prefix.is_empty() || names.is_complete_name(prefix) {
         return vec![];
     }
-    let with_path = prefix.chars().count() >= CMD_NAME_MIN_PATH_PREFIX;
+    let with_path = path_prefix_allowed(prefix);
     let sources = [
         (names.frecent.as_slice(), "recent"),
         (names.stems.as_slice(), "spec"),
@@ -888,7 +968,7 @@ pub fn complete_in(
                 reason: None,
             };
         }
-        let done = names.is_some_and(|n| n.contains(&prefix));
+        let done = names.is_some_and(|n| n.is_complete_name(&prefix));
         return CompleteResult {
             items: vec![],
             reason: Some(if done {
@@ -5141,7 +5221,8 @@ region = us-east-1
         CommandNames::from_parts(
             vec!["zeph".into(), "git".into()],
             vec!["docker".into(), "git".into(), "gitk".into(), "zeph".into()],
-            vec!["zcat".into(), "zsh".into()],
+            // `w` is a real one-letter binary on macOS.
+            vec!["w".into(), "zcat".into(), "zsh".into()],
         )
     }
 
@@ -5176,6 +5257,49 @@ region = us-east-1
         let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
         let out = complete("git ", 4, &r);
         assert!(!out.items.is_empty(), "{:?}", out.reason);
+    }
+
+    /// PATH rows are the fallback source, so the scan must yield real
+    /// commands only: a directory, a data file and an unreadable entry
+    /// are not commands, and a name found twice is still one row.
+    #[test]
+    fn executables_in_keeps_only_runnable_names() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+        let exe = |dir: &std::path::Path, name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, "#!/bin/sh\n").expect("write");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        };
+        exe(first.path(), "zeph");
+        exe(first.path(), "git");
+        // A real PATH carries these; inserting one verbatim would leave
+        // a broken command line.
+        exe(first.path(), "zsh (qterm)");
+        exe(first.path(), "weird$name");
+        exe(first.path(), "-x"); // would parse as a flag once inserted
+        exe(second.path(), "zeph"); // shadowed by the earlier dir
+        exe(second.path(), "brew");
+        std::fs::write(first.path().join("notes.txt"), "data").expect("write");
+        std::fs::create_dir(first.path().join("subdir")).expect("mkdir");
+        // A symlink is judged by its target, like the shell does.
+        std::os::unix::fs::symlink(first.path().join("git"), second.path().join("g")).expect("ln");
+
+        let dirs = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        assert_eq!(executables_in(&dirs), ["brew", "g", "git", "zeph"]);
+    }
+
+    /// A `PATH` carries entries that no longer exist, and an empty entry
+    /// means the cwd — neither is a place to find command names.
+    #[test]
+    fn path_dirs_drops_missing_and_empty_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().to_string_lossy().to_string();
+        let gone = dir.path().join("nope").to_string_lossy().to_string();
+        let parsed = path_dirs(&format!("{real}::{gone}"));
+        assert_eq!(parsed, vec![dir.path().to_path_buf()]);
     }
 
     /// The daemon skips building the name list unless this says the
@@ -5233,6 +5357,26 @@ region = us-east-1
             .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
             .collect();
         assert_eq!(rows, [("git", "recent"), ("gitk", "spec")]);
+    }
+
+    /// The PATH floor governs the exact-name guard too. `w` is a real
+    /// binary, but at one character PATH is not a source — silencing
+    /// the popup there would take the `watch`/`which` rows with it.
+    #[test]
+    fn a_one_letter_path_binary_does_not_silence_the_popup() {
+        let names = CommandNames::from_parts(
+            vec![],
+            vec!["watch".into(), "which".into()],
+            vec!["w".into()],
+        );
+        let out = cmd_complete("w", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| s.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["watch", "which"]
+        );
     }
 
     /// An exactly-typed known name returns nothing. The popup's default

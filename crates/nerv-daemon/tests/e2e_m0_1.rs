@@ -50,6 +50,9 @@ async fn complete_returns_real_engine_suggestions() {
         // is deterministic regardless of local accept counts.
         .env("NERV_FRECENCY_FILE", "-")
         .env("NERV_MISSES_FILE", "-")
+        // Never scan the developer\'s real PATH: command-name rows would
+        // vary by machine.
+        .env("NERV_PATH_SCAN", "0")
         .env("NERV_LOG", "debug")
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
