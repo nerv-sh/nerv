@@ -271,6 +271,72 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
     );
 }
 
+/// Typing the first token offers command *names* — the spec stems the
+/// daemon has on disk — and never lands in the miss tally. Every partial
+/// (`gi`, `gi t`) would otherwise be recorded as a command with no spec,
+/// burying the real coverage gaps `nerv doctor` reports.
+#[tokio::test]
+async fn first_token_offers_command_names_without_a_miss_tally() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let misses = daemon.misses.clone();
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        let partial = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "gi".into(),
+                cursor: 2,
+                cwd: None,
+            },
+        )
+        .await;
+        let Response::Suggestions { items } = partial else {
+            panic!("expected command-name rows, got {partial:?}");
+        };
+        assert!(
+            items.iter().any(|s| s.insertion == "git"),
+            "installed stem must be offered: {items:?}"
+        );
+
+        // A fully typed name offers nothing: the popup preselects the
+        // first row, so a leftover row would hijack Enter.
+        let exact = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "git".into(),
+                cursor: 3,
+                cwd: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(exact, Response::Empty { .. }),
+            "exact name must be empty, got {exact:?}"
+        );
+
+        // A typo nobody has a spec for is still not a miss.
+        round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "zpeh".into(),
+                cursor: 4,
+                cwd: None,
+            },
+        )
+        .await;
+    })
+    .await;
+    let _tmp = daemon.terminate().await;
+    run.expect("test timeout");
+
+    let text = std::fs::read_to_string(&misses).unwrap_or_default();
+    assert_eq!(
+        text.trim(),
+        "",
+        "first-token keystrokes must not be tallied"
+    );
+}
+
 #[tokio::test]
 async fn pipelined_requests_share_one_connection() {
     let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;

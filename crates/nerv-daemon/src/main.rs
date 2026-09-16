@@ -12,6 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
+use nerv_engine::complete::{CommandNames, is_command_name_position};
 use nerv_engine::misses::MissCounter;
 use nerv_engine::{
     Config, FrecencyStore, MatchMode, Request, Response, SpecRegistry, Suggestion, complete_in,
@@ -132,6 +133,10 @@ async fn main() -> anyhow::Result<()> {
     // cleanup steals this one's listener.
     write_pid_file(&pid_path).await?;
 
+    // Command names offered while the first token is still being typed.
+    // Populated lazily on the first completion so boot stays O(1).
+    let names = Arc::new(NameCache::default());
+
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -143,12 +148,14 @@ async fn main() -> anyhow::Result<()> {
                         let registry = registry.clone();
                         let frecency = frecency.clone();
                         let misses = misses.clone();
+                        let names = names.clone();
                         let schema_block = schema_block.clone();
                         tokio::spawn(handle_connection(
                             stream,
                             registry,
                             frecency,
                             misses,
+                            names,
                             config.matching.mode,
                             schema_block,
                         ));
@@ -178,6 +185,7 @@ async fn handle_connection(
     registry: Arc<SpecRegistry>,
     frecency: Arc<FrecencyStore>,
     misses: Arc<MissCounter>,
+    names: Arc<NameCache>,
     mode: MatchMode,
     schema_block: Arc<Option<String>>,
 ) {
@@ -208,10 +216,18 @@ async fn handle_connection(
                     let registry = registry.clone();
                     let frecency = frecency.clone();
                     let misses = misses.clone();
+                    let names = names.clone();
                     tokio::task::spawn_blocking(move || {
+                        // Building the name list means stat-ing every
+                        // spec layer, cloning ~700 stems and folding the
+                        // frecency table. Only the first token can use
+                        // it, and that is a small minority of keystrokes.
+                        let cmd_names = is_command_name_position(&line, cursor)
+                            .then(|| names.names(&registry, &frecency));
                         let resp = engine_complete(
                             &registry,
                             &frecency,
+                            cmd_names.as_ref(),
                             &line,
                             cursor,
                             cwd.as_deref(),
@@ -271,6 +287,68 @@ async fn handle_connection(
     }
 }
 
+/// The command-name list handed to the engine while the first token is
+/// being typed, kept off the keystroke path.
+///
+/// Spec stems are a `read_dir` per layer, so they are re-listed only
+/// when a layer directory's mtime moves — a derived spec landing, the
+/// user dropping in an overlay. The frecent list is read straight from
+/// the in-memory frecency table every time, so a command accepted a
+/// second ago ranks immediately.
+#[derive(Default)]
+struct NameCache {
+    stems: std::sync::Mutex<StemSnapshot>,
+}
+
+#[derive(Default)]
+struct StemSnapshot {
+    names: Vec<String>,
+    /// One mtime per spec layer, in `layer_dirs` order. `None` marks a
+    /// layer that does not exist yet (a missing overlay is normal); its
+    /// later creation still shows up as a change.
+    stamp: Option<Vec<Option<std::time::SystemTime>>>,
+}
+
+impl NameCache {
+    fn names(&self, registry: &SpecRegistry, frecency: &FrecencyStore) -> CommandNames {
+        CommandNames::from_parts(frecency.spec_names(), self.stems(registry), vec![])
+    }
+
+    /// Spec stems, re-listed only when a layer's mtime moved. The
+    /// `read_dir` runs *outside* the lock: the moment a derived spec
+    /// lands, every concurrent keystroke would otherwise queue behind
+    /// one directory walk.
+    fn stems(&self, registry: &SpecRegistry) -> Vec<String> {
+        let stamp: Vec<Option<std::time::SystemTime>> = registry
+            .layer_dirs()
+            .iter()
+            .map(|dir| std::fs::metadata(dir).and_then(|m| m.modified()).ok())
+            .collect();
+        {
+            let snap = self.lock();
+            if snap.stamp.as_ref() == Some(&stamp) {
+                return snap.names.clone();
+            }
+        }
+        let names = registry.dir_listing();
+        let mut snap = self.lock();
+        snap.names = names.clone();
+        snap.stamp = Some(stamp);
+        names
+    }
+
+    /// A panic while the snapshot was held would otherwise poison the
+    /// mutex for the rest of the process, sending *every* later
+    /// keystroke back to `read_dir`. The snapshot is a plain cache, so
+    /// taking the inner value back is always safe.
+    fn lock(&self) -> std::sync::MutexGuard<'_, StemSnapshot> {
+        self.stems.lock().unwrap_or_else(|poisoned| {
+            self.stems.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+}
+
 /// Max suggestions transported to the widget per keystroke. The ZLE
 /// popup only shows a ~10-row sliding window, but the widget receives
 /// *every* row over the socket, splits it into a zsh array, and scans
@@ -290,13 +368,14 @@ const MAX_SUGGESTIONS: usize = 500;
 fn engine_complete(
     registry: &SpecRegistry,
     frecency: &FrecencyStore,
+    names: Option<&CommandNames>,
     line: &str,
     cursor: usize,
     cwd: Option<&str>,
     mode: MatchMode,
 ) -> Response {
     let cwd_path = cwd.map(std::path::Path::new);
-    let mut result = complete_in(line, cursor, registry, cwd_path, mode);
+    let mut result = complete_in(line, cursor, registry, cwd_path, mode, names);
     if result.items.is_empty() {
         return Response::Empty {
             reason: result.reason,
@@ -409,6 +488,51 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Directory mtime is the whole guard keeping `read_dir` off the
+    /// keystroke path: an unchanged layer must be served from the
+    /// snapshot, and a spec landing in it (a `--help` derivation, a
+    /// user overlay) must show up on the next keystroke.
+    #[test]
+    fn name_cache_relists_stems_only_when_a_layer_changes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("foo.json"), "{}").expect("write spec");
+        let registry = SpecRegistry::at_dir(tmp.path());
+        let frecency = FrecencyStore::empty();
+        let cache = NameCache::default();
+
+        assert_eq!(cache.stems(&registry), vec!["foo".to_string()]);
+
+        // Add a spec but rewind the directory mtime: the snapshot is
+        // keyed on that stamp, so the new file must stay invisible.
+        let before = std::fs::metadata(tmp.path())
+            .and_then(|m| m.modified())
+            .expect("dir mtime");
+        std::fs::write(tmp.path().join("bar.json"), "{}").expect("write spec");
+        let dir = std::fs::File::open(tmp.path()).expect("open dir");
+        dir.set_times(std::fs::FileTimes::new().set_modified(before))
+            .expect("rewind dir mtime");
+        assert_eq!(
+            cache.stems(&registry),
+            vec!["foo".to_string()],
+            "an unchanged stamp must be served from the snapshot"
+        );
+
+        // A real mtime move re-lists.
+        dir.set_times(
+            std::fs::FileTimes::new().set_modified(before + std::time::Duration::from_secs(1)),
+        )
+        .expect("advance dir mtime");
+        assert_eq!(
+            cache.stems(&registry),
+            vec!["bar".to_string(), "foo".to_string()]
+        );
+
+        // The full list layers frecency on top, most-used first.
+        frecency.record("zeph", "x");
+        let names = cache.names(&registry, &frecency);
+        assert!(names.contains("zeph") && names.contains("bar"));
+    }
 
     fn sugg(display: &str) -> Suggestion {
         Suggestion {

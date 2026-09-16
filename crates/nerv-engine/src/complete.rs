@@ -523,6 +523,13 @@ impl SpecRegistry {
         self.len() == 0
     }
 
+    /// The spec layers this registry reads, highest priority first.
+    /// Callers that cache a derived view of the layer contents (the
+    /// daemon's command-name list) stat these to know when to rebuild.
+    pub fn layer_dirs(&self) -> &[PathBuf] {
+        &self.dirs
+    }
+
     /// Names currently in the in-memory positive cache. Does not
     /// reflect disk contents — see [`Self::dir_listing`] for that.
     pub fn cached_names(&self) -> Vec<String> {
@@ -673,6 +680,122 @@ pub fn no_spec_binary(reason: &str) -> Option<&str> {
     reason.strip_prefix(NO_SPEC_REASON_PREFIX)
 }
 
+/// Shortest prefix that may pull in PATH executables. One character
+/// would list hundreds of binaries with nothing to distinguish them;
+/// the spec-stem source has no such floor because it is ~700 names.
+const CMD_NAME_MIN_PATH_PREFIX: usize = 2;
+
+/// The command names offerable while the *first* token is still being
+/// typed, in the order they should appear: names the user has accepted
+/// before, then installed spec stems, then the rest of PATH.
+///
+/// Held by the daemon and handed to [`complete_in`] per request. It is
+/// a plain name list on purpose: resolving a spec here would make every
+/// partial (`ze`, `zep`) a cold miss — a parse, and with derivation on a
+/// `--help` spawn for any prefix that happens to be a real binary.
+#[derive(Debug, Clone, Default)]
+pub struct CommandNames {
+    frecent: Vec<String>,
+    stems: Vec<String>,
+    path: Vec<String>,
+}
+
+impl CommandNames {
+    /// Build from the three sources. `frecent` is expected most-used
+    /// first, `stems` and `path` sorted; this type preserves the order
+    /// it is given and only dedupes across sources.
+    pub fn from_parts(frecent: Vec<String>, stems: Vec<String>, path: Vec<String>) -> Self {
+        Self {
+            frecent,
+            stems,
+            path,
+        }
+    }
+
+    /// True when `name` is a command we know about — the signal that
+    /// the user has finished typing a name rather than started one.
+    pub fn contains(&self, name: &str) -> bool {
+        self.frecent.iter().any(|c| c == name)
+            || self.stems.iter().any(|c| c == name)
+            || self.path.iter().any(|c| c == name)
+    }
+}
+
+/// True when the cursor sits on the *first* token of the command under
+/// it — i.e. the user is still typing a command name and
+/// [`complete_command_name`] is what will answer.
+///
+/// Exists so a caller can skip building the (nontrivial) name list for
+/// the overwhelming majority of keystrokes, which land after a space.
+/// It mirrors the prelude of [`complete_in`]: quote check, then the
+/// segment under the cursor, so `git co && ze` is a first token again.
+/// Wrapper skipping (`sudo docker …`) needs two tokens, so a single
+/// token is unaffected by it.
+pub fn is_command_name_position(line: &str, cursor: usize) -> bool {
+    let cursor = clamp_cursor_to_char_boundary(line, cursor);
+    let head = &line[..cursor];
+    if cursor_in_open_quote(head) {
+        return false;
+    }
+    let seg_start = command_segment_start(head).min(cursor);
+    let head = &head[seg_start..];
+    let tokens = tokenize(head);
+    tokens.len() == 1 && current_prefix(head) == tokens[0].text
+}
+
+/// Rows for the first token of the line. Pure: no filesystem, no spec
+/// parsing — everything comes from `names`.
+///
+/// Returns nothing for an exact known name. The popup preselects the
+/// first row for a partial token (CLAUDE.md §4), so keeping `gitk` on
+/// screen after a complete `git` would make Enter insert the wrong
+/// command.
+pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggestion> {
+    if prefix.is_empty() || names.contains(prefix) {
+        return vec![];
+    }
+    let with_path = prefix.chars().count() >= CMD_NAME_MIN_PATH_PREFIX;
+    let sources = [
+        (names.frecent.as_slice(), "recent"),
+        (names.stems.as_slice(), "spec"),
+        (
+            if with_path {
+                names.path.as_slice()
+            } else {
+                &[]
+            },
+            "bin",
+        ),
+    ];
+
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    for (list, description) in sources {
+        for name in list {
+            if !name.starts_with(prefix) || !seen.insert(name.as_str()) {
+                continue;
+            }
+            items.push(command_name_suggestion(name, description));
+        }
+    }
+    items
+}
+
+/// One popup row for a command name. `source_ranked` because the order
+/// above is already the ranking: the daemon's `rank_by_frecency` keys on
+/// the line's first word, which here is the half-typed prefix itself.
+fn command_name_suggestion(name: &str, description: &str) -> Suggestion {
+    Suggestion {
+        insertion: name.to_string(),
+        display: name.to_string(),
+        description: Some(description.to_string()),
+        kind: SuggestionKind::Subcommand,
+        priority: None,
+        icon: None,
+        source_ranked: true,
+    }
+}
+
 /// Pipeline result: completion candidates at the cursor.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompleteResult {
@@ -685,7 +808,7 @@ pub struct CompleteResult {
 /// Run the full pipeline against `line` + `cursor` byte offset.
 /// Default match mode = prefix (the v1.0 contract).
 pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteResult {
-    complete_in(line, cursor, registry, None, MatchMode::Prefix)
+    complete_in(line, cursor, registry, None, MatchMode::Prefix, None)
 }
 
 /// Same as [`complete`], but uses `cwd` as the working-directory
@@ -698,6 +821,7 @@ pub fn complete_in(
     registry: &SpecRegistry,
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
+    names: Option<&CommandNames>,
 ) -> CompleteResult {
     let cursor = clamp_cursor_to_char_boundary(line, cursor);
 
@@ -748,15 +872,30 @@ pub fn complete_in(
     let prefix = current_prefix(&line[..cursor]);
     let binary = tokens[0].text.as_str();
 
-    // Still typing the command name itself (`gi`, `zep`): there is
-    // nothing a spec could offer yet, so don't look one up. Every prefix
-    // would otherwise be a cold miss — a PATH scan and, with derivation
-    // on, up to three `--help` spawns for `ls` inside `lsof` — and would
-    // land in the miss tally as junk.
+    // Still typing the command name itself (`gi`, `zep`): offer command
+    // *names*, never a spec. Looking one up would make every prefix a
+    // cold miss — a PATH scan and, with derivation on, up to three
+    // `--help` spawns for `ls` inside `lsof` — and would land in the
+    // miss tally as junk. Neither reason below starts with
+    // NO_SPEC_REASON_PREFIX, so the tally stays clean either way.
     if tokens.len() == 1 && prefix == binary {
+        let items = names
+            .map(|n| complete_command_name(&prefix, n))
+            .unwrap_or_default();
+        if !items.is_empty() {
+            return CompleteResult {
+                items,
+                reason: None,
+            };
+        }
+        let done = names.is_some_and(|n| n.contains(&prefix));
         return CompleteResult {
             items: vec![],
-            reason: Some("typing command name".into()),
+            reason: Some(if done {
+                "command name complete".into()
+            } else {
+                "typing command name".to_string()
+            }),
         };
     }
 
@@ -4998,22 +5137,161 @@ region = us-east-1
     /// back with `no_spec_binary`; if either side drifts, the tally
     /// silently stops counting. Round-trip through the real pipeline so
     /// the test breaks on a format change, not just on the helper.
-    /// While the command name itself is being typed there is nothing to
-    /// complete, so the registry is not consulted at all. Every partial
-    /// (`ze`, `zep`) would otherwise be a cold miss — a PATH scan, and
-    /// with derivation on a `--help` spawn for any prefix that happens
-    /// to be a real binary — and would land in the miss tally as junk.
+    fn cmd_names() -> CommandNames {
+        CommandNames::from_parts(
+            vec!["zeph".into(), "git".into()],
+            vec!["docker".into(), "git".into(), "gitk".into(), "zeph".into()],
+            vec!["zcat".into(), "zsh".into()],
+        )
+    }
+
+    fn cmd_complete(line: &str, names: &CommandNames) -> CompleteResult {
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, Some(names));
+        assert!(
+            r.is_empty(),
+            "the first-token path must not populate the spec cache"
+        );
+        out
+    }
+
+    /// While the command name itself is being typed the registry is not
+    /// consulted at all — the rows come from the name list. A lookup
+    /// would be a cold miss on every partial (`ze`, `zep`): a PATH scan
+    /// and, with derivation on, a `--help` spawn for any prefix that
+    /// happens to be a real binary.
     #[test]
     fn typing_the_command_name_does_not_look_up_a_spec() {
+        let names = cmd_names();
+        let out = cmd_complete("zep", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| s.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["zeph"]
+        );
+
+        // A completed name followed by a space is the subcommand case.
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete("git ", 4, &r);
+        assert!(!out.items.is_empty(), "{:?}", out.reason);
+    }
+
+    /// The daemon skips building the name list unless this says the
+    /// cursor is on a command name, so a disagreement here silently
+    /// kills first-token completion (or pays for the list on every
+    /// keystroke).
+    #[test]
+    fn command_name_position_agrees_with_the_pipeline() {
+        let names = cmd_names();
+        for line in ["gi", "git c && gi"] {
+            assert!(
+                is_command_name_position(line, line.len()),
+                "{line:?} should be a command-name position"
+            );
+            assert!(
+                !cmd_complete(line, &names).items.is_empty(),
+                "{line:?} should yield command-name rows"
+            );
+        }
+
+        for line in ["git ", "git ch", "echo \"gi"] {
+            assert!(
+                !is_command_name_position(line, line.len()),
+                "{line:?} must not be a command-name position"
+            );
+        }
+    }
+
+    /// Without a name list (the plain `complete` entry point) the first
+    /// token still yields nothing — and the reason must not look like a
+    /// spec miss, or the daemon tally would record typo noise.
+    #[test]
+    fn command_name_without_a_name_list_is_still_empty() {
         let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
         let out = complete("gi", 2, &r);
         assert!(out.items.is_empty());
         assert_eq!(out.reason.as_deref(), Some("typing command name"));
+        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), None);
         assert!(r.is_empty(), "no lookup may have populated the cache");
+    }
 
-        // A completed name followed by a space is the subcommand case.
-        let out = complete("git ", 4, &r);
-        assert!(!out.items.is_empty(), "{:?}", out.reason);
+    /// Frecent names first (the user picked them before), then spec
+    /// stems in alpha order. A name carried by both sources appears
+    /// once.
+    #[test]
+    fn command_name_orders_frecent_before_stems_and_dedupes() {
+        let names = cmd_names();
+        let out = cmd_complete("gi", &names);
+        // `git` sits in both lists: it must appear once, and carry the
+        // frecent label. Both stems are alphabetical, so the insertions
+        // alone read the same under any source order.
+        let rows: Vec<(&str, &str)> = out
+            .items
+            .iter()
+            .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(rows, [("git", "recent"), ("gitk", "spec")]);
+    }
+
+    /// An exactly-typed known name returns nothing. The popup's default
+    /// selection is the first row for a partial token (CLAUDE.md §4), so
+    /// leaving `gitk` on screen would make `git<Enter>` insert `gitk`.
+    #[test]
+    fn exact_command_name_offers_nothing() {
+        let names = cmd_names();
+        let out = cmd_complete("git", &names);
+        assert!(out.items.is_empty(), "{:?}", out.items);
+        assert_eq!(out.reason.as_deref(), Some("command name complete"));
+        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), None);
+    }
+
+    /// One character is enough for the spec-stem source — the stem list
+    /// is ~700 entries. PATH holds thousands, so it needs two: a bare
+    /// `z` would bury the known commands under every binary installed
+    /// on the machine.
+    #[test]
+    fn single_char_command_name_prefix_skips_path() {
+        let names = cmd_names();
+        let out = cmd_complete("z", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| s.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["zeph"]
+        );
+
+        // Two characters let PATH in, after the stems.
+        let out = cmd_complete("zc", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
+                .collect::<Vec<_>>(),
+            [("zcat", "bin")]
+        );
+    }
+
+    /// The engine already ordered these rows (frecency, then source).
+    /// `rank_by_frecency` keys on the first word — which is the prefix
+    /// being typed — so re-ranking would be meaningless noise.
+    #[test]
+    fn command_name_rows_are_source_ranked() {
+        let names = cmd_names();
+        let out = cmd_complete("gi", &names);
+        assert!(!out.items.is_empty());
+        assert!(out.items.iter().all(|s| s.source_ranked));
+    }
+
+    /// A stem-backed row says so, so the user can tell which commands
+    /// nerv will keep helping with after the space.
+    #[test]
+    fn command_name_rows_describe_their_source() {
+        let names = cmd_names();
+        let out = cmd_complete("do", &names);
+        assert_eq!(out.items[0].description.as_deref(), Some("spec"));
     }
 
     #[test]
