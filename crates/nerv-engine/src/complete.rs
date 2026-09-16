@@ -523,6 +523,13 @@ impl SpecRegistry {
         self.len() == 0
     }
 
+    /// The spec layers this registry reads, highest priority first.
+    /// Callers that cache a derived view of the layer contents (the
+    /// daemon's command-name list) stat these to know when to rebuild.
+    pub fn layer_dirs(&self) -> &[PathBuf] {
+        &self.dirs
+    }
+
     /// Names currently in the in-memory positive cache. Does not
     /// reflect disk contents — see [`Self::dir_listing`] for that.
     pub fn cached_names(&self) -> Vec<String> {
@@ -673,6 +680,324 @@ pub fn no_spec_binary(reason: &str) -> Option<&str> {
     reason.strip_prefix(NO_SPEC_REASON_PREFIX)
 }
 
+/// Shortest prefix that may pull in PATH executables. One character
+/// would list hundreds of binaries with nothing to distinguish them;
+/// the spec-stem source has no such floor because it is ~700 names.
+const CMD_NAME_MIN_PATH_PREFIX: usize = 2;
+
+/// Whether `prefix` may draw on the PATH source at all. One owner, so
+/// the row list and the exact-name guard can never disagree about which
+/// names exist.
+fn path_prefix_allowed(prefix: &str) -> bool {
+    prefix.chars().count() >= CMD_NAME_MIN_PATH_PREFIX
+}
+
+/// The command names offerable while the *first* token is still being
+/// typed, in the order they should appear: names the user has accepted
+/// before, then installed spec stems, then the rest of PATH.
+///
+/// Held by the daemon and handed to [`complete_in`] per request. It is
+/// a plain name list on purpose: resolving a spec here would make every
+/// partial (`ze`, `zep`) a cold miss — a parse, and with derivation on a
+/// `--help` spawn for any prefix that happens to be a real binary.
+#[derive(Debug, Clone, Default)]
+pub struct CommandNames {
+    frecent: Vec<String>,
+    /// Shared, not owned: the daemon rebuilds this value on every
+    /// first-token keystroke, and these two lists are ~700 and ~3,700
+    /// entries. Copying them per keystroke is thousands of allocations
+    /// for a list that changed only when a directory did.
+    stems: Arc<Vec<String>>,
+    path: Arc<Vec<String>>,
+}
+
+impl CommandNames {
+    /// Build from the three sources. `frecent` is expected most-used
+    /// first, `stems` and `path` sorted; this type preserves the order
+    /// it is given and only dedupes across sources.
+    pub fn from_parts(frecent: Vec<String>, stems: Vec<String>, path: Vec<String>) -> Self {
+        Self::from_shared(frecent, Arc::new(stems), Arc::new(path))
+    }
+
+    /// Same, with the two cached lists handed in by reference count —
+    /// what a caller that rebuilds this per keystroke should use.
+    pub fn from_shared(
+        frecent: Vec<String>,
+        stems: Arc<Vec<String>>,
+        path: Arc<Vec<String>>,
+    ) -> Self {
+        Self {
+            frecent,
+            stems,
+            path,
+        }
+    }
+
+    /// True when `name` is a command we know — the signal that the user
+    /// has finished typing a name rather than started one.
+    ///
+    /// PATH is consulted only once the prefix is long enough to draw
+    /// rows from it. Otherwise a one-letter binary (`/usr/bin/w` is
+    /// real) would silence the popup for `w`, taking the `watch` and
+    /// `which` spec rows with it.
+    pub fn is_complete_name(&self, name: &str) -> bool {
+        self.frecent.iter().any(|c| c == name)
+            || self.stems.iter().any(|c| c == name)
+            || (path_prefix_allowed(name) && self.path.iter().any(|c| c == name))
+    }
+}
+
+/// Split a `PATH` value into directories, in order.
+///
+/// Empty entries mean "the current directory" in POSIX; they are
+/// dropped, because offering whatever happens to be executable in the
+/// cwd as a command name is a surprise, not a help. Entries that do not
+/// exist are *kept*: a daemon runs for days, and a directory created
+/// after it started (`~/.local/bin`, a fresh toolchain shim dir) would
+/// otherwise stay invisible for the daemon's lifetime. Reading one is
+/// already a no-op, and its appearance moves the stamp like any other
+/// change.
+pub fn path_dirs(path_var: &str) -> Vec<PathBuf> {
+    path_var
+        .split(':')
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// True when `name` can be typed at a prompt as-is. A row is inserted
+/// verbatim, so an executable whose file name needs shell quoting —
+/// `zsh (qterm)`, seen on a real `PATH` — would leave a broken line
+/// behind. The allowed punctuation is what real command names use
+/// (`git-cliff`, `python3.12`, `c++`, `zsh-5.9`). `=` is not among it:
+/// a file called `FOO=bar` reads as an assignment, not a command.
+fn is_typeable_command_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    // A leading `-` or `:` would be read as a flag, not a command, once
+    // the row is inserted — the punctuation below is only safe inside.
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphanumeric() || first == '_' || first == '.')
+        && chars.all(|c| c.is_alphanumeric() || "_-.+@:,".contains(c))
+}
+
+/// Names of the executable files in `dirs`, sorted and deduplicated —
+/// the command names a shell would find on `PATH`.
+///
+/// Symlinks are followed (most of a Homebrew `bin` is symlinks), and an
+/// unreadable directory yields nothing: a stale `PATH` entry is normal,
+/// not an error. This walks thousands of files, so callers keep it off
+/// the keystroke path.
+pub fn executables_in(dirs: &[PathBuf]) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut seen = std::collections::HashSet::new();
+    let mut names = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if seen.contains(&name) || !is_typeable_command_name(&name) {
+                continue;
+            }
+            // `fs::metadata` (not `DirEntry::metadata`) so a symlink is
+            // judged by its target.
+            let Ok(meta) = fs::metadata(entry.path()) else {
+                continue;
+            };
+            if meta.is_dir() || meta.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+            seen.insert(name.clone());
+            names.push(name);
+        }
+    }
+    names.sort();
+    names
+}
+
+/// True when the cursor sits on the *first* token of the command under
+/// it — i.e. the user is still typing a command name and
+/// [`complete_command_name`] is what will answer.
+///
+/// Exists so a caller can skip building the (nontrivial) name list for
+/// the overwhelming majority of keystrokes, which land after a space.
+/// It mirrors the prelude of [`complete_in`] step for step — quote
+/// check, the segment under the cursor (`git co && ze` is a first token
+/// again), then the wrapper skip, which turns `sudo doc` into one. Any
+/// step left out here is a keystroke where the engine would answer and
+/// the caller never asks.
+pub fn is_command_name_position(line: &str, cursor: usize) -> bool {
+    let cursor = clamp_cursor_to_char_boundary(line, cursor);
+    let head = &line[..cursor];
+    if cursor_in_open_quote(head) {
+        return false;
+    }
+    let seg_start = command_segment_start(head).min(cursor);
+    let head = &head[seg_start..];
+    let tokens = tokenize(head);
+    let wrap_start = wrapped_command_start(&tokens).min(head.len());
+    let head = &head[wrap_start..];
+    let tokens = if wrap_start > 0 {
+        tokenize(head)
+    } else {
+        tokens
+    };
+    tokens.len() == 1 && current_prefix(head) == tokens[0].text
+}
+
+/// Rows for the first token of the line. Pure: no filesystem, no spec
+/// parsing — everything comes from `names`.
+///
+/// Returns nothing for an exact known name. The popup preselects the
+/// first row for a partial token (CLAUDE.md §4), so keeping `gitk` on
+/// screen after a complete `git` would make Enter insert the wrong
+/// command.
+pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggestion> {
+    if prefix.is_empty() || names.is_complete_name(prefix) {
+        return vec![];
+    }
+    let with_path = path_prefix_allowed(prefix);
+    let sources = [
+        (names.frecent.as_slice(), "recent"),
+        (names.stems.as_slice(), "spec"),
+        (
+            if with_path {
+                names.path.as_slice()
+            } else {
+                &[]
+            },
+            "bin",
+        ),
+    ];
+
+    let mut seen = std::collections::HashSet::new();
+    let mut items = Vec::new();
+    for (list, description) in sources {
+        for name in list {
+            if !name.starts_with(prefix) || !seen.insert(name.as_str()) {
+                continue;
+            }
+            items.push(command_name_suggestion(name, description));
+        }
+    }
+    if items.is_empty() {
+        if let Some(name) = did_you_mean(prefix, names) {
+            items.push(command_name_suggestion(name, "did you mean"));
+        }
+    }
+    items
+}
+
+/// The name `input` most likely meant, when it matches nothing as a
+/// prefix. `None` whenever nothing is close enough — a wrong guess is
+/// worse than no row, because the popup preselects it.
+///
+/// Candidates are spec stems and previously accepted names only. PATH
+/// holds thousands of names, so there is always *something* one edit
+/// away there; drawing from it would turn every miss into a confident
+/// wrong answer. Ties go to the earlier source, i.e. what the user has
+/// actually run.
+///
+/// PATH still decides whether a correction is offered *at all*, through
+/// the caller's exact-name check: a real binary is a complete name, not
+/// a typo. While the daemon's first PATH scan is still running that
+/// source is empty, so for that one window a real binary one edit from
+/// a stem (`pnpm` against `npm`) can draw a correction it would not
+/// draw a moment later.
+pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str> {
+    let input: Vec<char> = input.chars().collect();
+    let budget = typo_distance_budget(input.len())?;
+    let mut best: Option<(usize, &str)> = None;
+    for name in names.frecent.iter().chain(names.stems.iter()) {
+        let Some(distance) = damerau_levenshtein_within(&input, name, budget) else {
+            continue;
+        };
+        if best.is_none_or(|(b, _)| distance < b) {
+            best = Some((distance, name.as_str()));
+        }
+    }
+    best.map(|(_, name)| name)
+}
+
+/// How many edits may separate a typo from the name it meant. The
+/// tally's real typos are one edit at four to five characters
+/// (`zpeh`, `yanr`, `gitp`); longer words earn a second because there
+/// is more room to slip and far less chance of a coincidental match.
+/// Below three characters every name is a near neighbour, so nothing
+/// is offered.
+fn typo_distance_budget(len: usize) -> Option<usize> {
+    match len {
+        0..=2 => None,
+        3..=5 => Some(1),
+        _ => Some(2),
+    }
+}
+
+/// Damerau-Levenshtein distance (optimal string alignment) between `a`
+/// and `b`, or `None` once it is known to exceed `budget`.
+///
+/// Transpositions count as one edit, not two: swapped adjacent letters
+/// are the dominant shape in the miss tally (`yanr` for `yarn`, `pmpm`
+/// for `pnpm`), and plain Levenshtein would rate them as far off as two
+/// unrelated substitutions.
+fn damerau_levenshtein_within(a: &[char], b: &str, budget: usize) -> Option<usize> {
+    // A length gap alone already costs that many edits. Counted before
+    // allocating, because this runs against every known name and most
+    // of them are rejected right here.
+    if a.len().abs_diff(b.chars().count()) > budget {
+        return None;
+    }
+    let b: Vec<char> = b.chars().collect();
+    // Three rows rotate through these buffers; `prev2` holds row i-2,
+    // which the transposition case reads. Sized up front so the
+    // rotation below never hands out a short buffer.
+    let mut prev2: Vec<usize> = vec![0; b.len() + 1];
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur: Vec<usize> = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        let mut row_best = cur[0];
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                cur[j] = cur[j].min(prev2[j - 2] + 1);
+            }
+            row_best = row_best.min(cur[j]);
+        }
+        // Every later row can only grow, so a whole row over budget
+        // settles it.
+        if row_best > budget {
+            return None;
+        }
+        std::mem::swap(&mut prev2, &mut prev);
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    let distance = prev[b.len()];
+    (distance <= budget).then_some(distance)
+}
+
+/// One popup row for a command name. `source_ranked` because the order
+/// above is already the ranking: the daemon's `rank_by_frecency` keys on
+/// the line's first word, which here is the half-typed prefix itself.
+fn command_name_suggestion(name: &str, description: &str) -> Suggestion {
+    Suggestion {
+        insertion: name.to_string(),
+        display: name.to_string(),
+        description: Some(description.to_string()),
+        kind: SuggestionKind::Subcommand,
+        priority: None,
+        icon: None,
+        source_ranked: true,
+    }
+}
+
 /// Pipeline result: completion candidates at the cursor.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CompleteResult {
@@ -685,7 +1010,7 @@ pub struct CompleteResult {
 /// Run the full pipeline against `line` + `cursor` byte offset.
 /// Default match mode = prefix (the v1.0 contract).
 pub fn complete(line: &str, cursor: usize, registry: &SpecRegistry) -> CompleteResult {
-    complete_in(line, cursor, registry, None, MatchMode::Prefix)
+    complete_in(line, cursor, registry, None, MatchMode::Prefix, None)
 }
 
 /// Same as [`complete`], but uses `cwd` as the working-directory
@@ -698,6 +1023,7 @@ pub fn complete_in(
     registry: &SpecRegistry,
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
+    names: Option<&CommandNames>,
 ) -> CompleteResult {
     let cursor = clamp_cursor_to_char_boundary(line, cursor);
 
@@ -748,15 +1074,30 @@ pub fn complete_in(
     let prefix = current_prefix(&line[..cursor]);
     let binary = tokens[0].text.as_str();
 
-    // Still typing the command name itself (`gi`, `zep`): there is
-    // nothing a spec could offer yet, so don't look one up. Every prefix
-    // would otherwise be a cold miss — a PATH scan and, with derivation
-    // on, up to three `--help` spawns for `ls` inside `lsof` — and would
-    // land in the miss tally as junk.
+    // Still typing the command name itself (`gi`, `zep`): offer command
+    // *names*, never a spec. Looking one up would make every prefix a
+    // cold miss — a PATH scan and, with derivation on, up to three
+    // `--help` spawns for `ls` inside `lsof` — and would land in the
+    // miss tally as junk. Neither reason below starts with
+    // NO_SPEC_REASON_PREFIX, so the tally stays clean either way.
     if tokens.len() == 1 && prefix == binary {
+        let items = names
+            .map(|n| complete_command_name(&prefix, n))
+            .unwrap_or_default();
+        if !items.is_empty() {
+            return CompleteResult {
+                items,
+                reason: None,
+            };
+        }
+        let done = names.is_some_and(|n| n.is_complete_name(&prefix));
         return CompleteResult {
             items: vec![],
-            reason: Some("typing command name".into()),
+            reason: Some(if done {
+                "command name complete".into()
+            } else {
+                "typing command name".to_string()
+            }),
         };
     }
 
@@ -4998,22 +5339,345 @@ region = us-east-1
     /// back with `no_spec_binary`; if either side drifts, the tally
     /// silently stops counting. Round-trip through the real pipeline so
     /// the test breaks on a format change, not just on the helper.
-    /// While the command name itself is being typed there is nothing to
-    /// complete, so the registry is not consulted at all. Every partial
-    /// (`ze`, `zep`) would otherwise be a cold miss — a PATH scan, and
-    /// with derivation on a `--help` spawn for any prefix that happens
-    /// to be a real binary — and would land in the miss tally as junk.
+    fn cmd_names() -> CommandNames {
+        CommandNames::from_parts(
+            vec!["zeph".into(), "git".into()],
+            vec!["docker".into(), "git".into(), "gitk".into(), "zeph".into()],
+            // `w` is a real one-letter binary on macOS.
+            vec!["w".into(), "zcat".into(), "zsh".into()],
+        )
+    }
+
+    fn cmd_complete(line: &str, names: &CommandNames) -> CompleteResult {
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, Some(names));
+        assert!(
+            r.is_empty(),
+            "the first-token path must not populate the spec cache"
+        );
+        out
+    }
+
+    /// While the command name itself is being typed the registry is not
+    /// consulted at all — the rows come from the name list. A lookup
+    /// would be a cold miss on every partial (`ze`, `zep`): a PATH scan
+    /// and, with derivation on, a `--help` spawn for any prefix that
+    /// happens to be a real binary.
     #[test]
     fn typing_the_command_name_does_not_look_up_a_spec() {
+        let names = cmd_names();
+        let out = cmd_complete("zep", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| s.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["zeph"]
+        );
+
+        // A completed name followed by a space is the subcommand case.
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let out = complete("git ", 4, &r);
+        assert!(!out.items.is_empty(), "{:?}", out.reason);
+    }
+
+    /// PATH rows are the fallback source, so the scan must yield real
+    /// commands only: a directory, a data file and an unreadable entry
+    /// are not commands, and a name found twice is still one row.
+    #[test]
+    fn executables_in_keeps_only_runnable_names() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let first = tempfile::tempdir().expect("tempdir");
+        let second = tempfile::tempdir().expect("tempdir");
+        let exe = |dir: &std::path::Path, name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, "#!/bin/sh\n").expect("write");
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        };
+        exe(first.path(), "zeph");
+        exe(first.path(), "git");
+        // A real PATH carries these; inserting one verbatim would leave
+        // a broken command line.
+        exe(first.path(), "zsh (qterm)");
+        exe(first.path(), "weird$name");
+        exe(first.path(), "-x"); // would parse as a flag once inserted
+        exe(first.path(), "FOO=bar"); // would parse as an assignment
+        exe(second.path(), "zeph"); // shadowed by the earlier dir
+        exe(second.path(), "brew");
+        std::fs::write(first.path().join("notes.txt"), "data").expect("write");
+        std::fs::create_dir(first.path().join("subdir")).expect("mkdir");
+        // A symlink is judged by its target, like the shell does.
+        std::os::unix::fs::symlink(first.path().join("git"), second.path().join("g")).expect("ln");
+
+        let dirs = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+        assert_eq!(executables_in(&dirs), ["brew", "g", "git", "zeph"]);
+    }
+
+    /// An empty entry means the cwd, which is not a place to look for
+    /// command names. A directory that does not exist *yet* is kept:
+    /// the daemon outlives the shells that create them.
+    #[test]
+    fn path_dirs_drops_empty_entries_but_keeps_absent_dirs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().to_string_lossy().to_string();
+        let later = dir.path().join("not-yet");
+        let parsed = path_dirs(&format!("{real}::{}", later.to_string_lossy()));
+        assert_eq!(parsed, vec![dir.path().to_path_buf(), later.clone()]);
+        // Reading one that is missing is a no-op, not an error.
+        assert!(executables_in(&[later]).is_empty());
+    }
+
+    /// The daemon skips building the name list unless this says the
+    /// cursor is on a command name, so a disagreement here silently
+    /// kills first-token completion (or pays for the list on every
+    /// keystroke).
+    #[test]
+    fn command_name_position_agrees_with_the_pipeline() {
+        let names = cmd_names();
+        // `sudo doc` is two tokens, but the wrapper has no spec of its
+        // own — the engine drops it and completes the command it runs.
+        for line in ["gi", "git c && gi", "sudo doc", "env FOO=1 gi"] {
+            assert!(
+                is_command_name_position(line, line.len()),
+                "{line:?} should be a command-name position"
+            );
+            assert!(
+                !cmd_complete(line, &names).items.is_empty(),
+                "{line:?} should yield command-name rows"
+            );
+        }
+
+        for line in ["git ", "git ch", "echo \"gi"] {
+            assert!(
+                !is_command_name_position(line, line.len()),
+                "{line:?} must not be a command-name position"
+            );
+        }
+    }
+
+    /// Without a name list (the plain `complete` entry point) the first
+    /// token still yields nothing — and the reason must not look like a
+    /// spec miss, or the daemon tally would record typo noise.
+    #[test]
+    fn command_name_without_a_name_list_is_still_empty() {
         let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
         let out = complete("gi", 2, &r);
         assert!(out.items.is_empty());
         assert_eq!(out.reason.as_deref(), Some("typing command name"));
+        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), None);
         assert!(r.is_empty(), "no lookup may have populated the cache");
+    }
 
-        // A completed name followed by a space is the subcommand case.
-        let out = complete("git ", 4, &r);
-        assert!(!out.items.is_empty(), "{:?}", out.reason);
+    /// Frecent names first (the user picked them before), then spec
+    /// stems in alpha order. A name carried by both sources appears
+    /// once.
+    #[test]
+    fn command_name_orders_frecent_before_stems_and_dedupes() {
+        let names = cmd_names();
+        let out = cmd_complete("gi", &names);
+        // `git` sits in both lists: it must appear once, and carry the
+        // frecent label. Both stems are alphabetical, so the insertions
+        // alone read the same under any source order.
+        let rows: Vec<(&str, &str)> = out
+            .items
+            .iter()
+            .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(rows, [("git", "recent"), ("gitk", "spec")]);
+    }
+
+    /// The whole point of the feature: the top of `misses.tsv` is typos
+    /// (`zpeh` 14, `yanr` 5, `gitp` 5), which prefix matching can never
+    /// reach. One row, labelled so the user sees it is a correction.
+    #[test]
+    fn a_typo_offers_the_name_it_meant() {
+        let names = cmd_names();
+        let out = cmd_complete("zpeh", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
+                .collect::<Vec<_>>(),
+            [("zeph", "did you mean")]
+        );
+    }
+
+    /// Worked examples, not a re-derivation of the implementation:
+    /// `kitten`/`sitting` is the textbook 3, `ab`/`ba` is the one
+    /// transposition, and `ca`/`abc` is 3 under optimal string
+    /// alignment (true Damerau would say 2) — pinning which variant
+    /// this is.
+    #[test]
+    fn edit_distance_matches_worked_examples() {
+        for (a, b, expected) in [
+            ("abc", "abc", 0),
+            ("ab", "ba", 1),
+            ("kitten", "sitting", 3),
+            ("ca", "abc", 3),
+            ("", "abc", 3),
+        ] {
+            let a_chars: Vec<char> = a.chars().collect();
+            assert_eq!(
+                damerau_levenshtein_within(&a_chars, b, 9),
+                Some(expected),
+                "{a} -> {b}"
+            );
+        }
+        // Over budget reports nothing rather than the distance.
+        let kitten: Vec<char> = "kitten".chars().collect();
+        assert_eq!(damerau_levenshtein_within(&kitten, "sitting", 2), None);
+    }
+
+    /// A transposition is the most common typo shape in the tally
+    /// (`yanr`, `pmpm`), so plain Levenshtein would miss it.
+    #[test]
+    fn transposed_letters_are_one_edit_away() {
+        let names = CommandNames::from_parts(vec![], vec!["yarn".into()], vec![]);
+        assert_eq!(did_you_mean("yanr", &names), Some("yarn"));
+    }
+
+    /// A correction only makes sense when prefix matching came up
+    /// empty. Offering one alongside real matches would push a guess
+    /// into a list the user is already narrowing.
+    #[test]
+    fn a_prefix_that_matches_gets_no_correction() {
+        let names = cmd_names();
+        let out = cmd_complete("gi", &names);
+        assert!(!out.items.is_empty(), "the prefix must still match");
+        assert!(
+            out.items
+                .iter()
+                .all(|s| s.description.as_deref() != Some("did you mean")),
+            "{:?}",
+            out.items
+        );
+    }
+
+    /// Two names the same distance away: the one the user has actually
+    /// run wins, because it is the better guess about intent.
+    #[test]
+    fn a_tie_goes_to_the_name_the_user_has_run() {
+        // `horn` and `yarn` are both one edit from `yorn`; only the
+        // source order separates them.
+        let names = CommandNames::from_parts(
+            vec!["yarn".into()],
+            vec!["horn".into(), "yarn".into()],
+            vec![],
+        );
+        assert_eq!(did_you_mean("yorn", &names), Some("yarn"));
+    }
+
+    /// Six characters is where the budget widens to two edits — the
+    /// boundary itself, not the lengths either side of it.
+    #[test]
+    fn six_characters_is_where_two_edits_are_allowed() {
+        assert_eq!(typo_distance_budget(5), Some(1));
+        assert_eq!(typo_distance_budget(6), Some(2));
+        let names = CommandNames::from_parts(vec![], vec!["docker".into()], vec![]);
+        // `dokcre` is two edits from `docker`; a five-letter input that
+        // far away gets nothing.
+        assert_eq!(did_you_mean("dokcre", &names), Some("docker"));
+        let short = CommandNames::from_parts(vec![], vec!["brew".into()], vec![]);
+        assert_eq!(did_you_mean("breq2", &short), None);
+    }
+
+    /// Short inputs are prefixes far more often than typos, and at two
+    /// characters almost every name is one edit away.
+    #[test]
+    fn short_inputs_are_never_corrected() {
+        let names = cmd_names();
+        assert_eq!(did_you_mean("zp", &names), None);
+        // Distance grows with length: two edits need a long input.
+        assert_eq!(did_you_mean("dokcer2", &names), Some("docker"));
+        assert_eq!(did_you_mean("dokce", &names), None);
+    }
+
+    /// PATH is thousands of names, so something is always one edit away
+    /// — a correction drawn from it would be a confident wrong answer.
+    #[test]
+    fn corrections_never_come_from_path() {
+        let names = CommandNames::from_parts(vec![], vec![], vec!["zcat".into()]);
+        assert_eq!(did_you_mean("zcta", &names), None);
+    }
+
+    /// The PATH floor governs the exact-name guard too. `w` is a real
+    /// binary, but at one character PATH is not a source — silencing
+    /// the popup there would take the `watch`/`which` rows with it.
+    #[test]
+    fn a_one_letter_path_binary_does_not_silence_the_popup() {
+        let names = CommandNames::from_parts(
+            vec![],
+            vec!["watch".into(), "which".into()],
+            vec!["w".into()],
+        );
+        let out = cmd_complete("w", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| s.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["watch", "which"]
+        );
+    }
+
+    /// An exactly-typed known name returns nothing. The popup's default
+    /// selection is the first row for a partial token (CLAUDE.md §4), so
+    /// leaving `gitk` on screen would make `git<Enter>` insert `gitk`.
+    #[test]
+    fn exact_command_name_offers_nothing() {
+        let names = cmd_names();
+        let out = cmd_complete("git", &names);
+        assert!(out.items.is_empty(), "{:?}", out.items);
+        assert_eq!(out.reason.as_deref(), Some("command name complete"));
+        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), None);
+    }
+
+    /// One character is enough for the spec-stem source — the stem list
+    /// is ~700 entries. PATH holds thousands, so it needs two: a bare
+    /// `z` would bury the known commands under every binary installed
+    /// on the machine.
+    #[test]
+    fn single_char_command_name_prefix_skips_path() {
+        let names = cmd_names();
+        let out = cmd_complete("z", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| s.insertion.as_str())
+                .collect::<Vec<_>>(),
+            ["zeph"]
+        );
+
+        // Two characters let PATH in, after the stems.
+        let out = cmd_complete("zc", &names);
+        assert_eq!(
+            out.items
+                .iter()
+                .map(|s| (s.insertion.as_str(), s.description.as_deref().unwrap_or("")))
+                .collect::<Vec<_>>(),
+            [("zcat", "bin")]
+        );
+    }
+
+    /// The engine already ordered these rows (frecency, then source).
+    /// `rank_by_frecency` keys on the first word — which is the prefix
+    /// being typed — so re-ranking would be meaningless noise.
+    #[test]
+    fn command_name_rows_are_source_ranked() {
+        let names = cmd_names();
+        let out = cmd_complete("gi", &names);
+        assert!(!out.items.is_empty());
+        assert!(out.items.iter().all(|s| s.source_ranked));
+    }
+
+    /// A stem-backed row says so, so the user can tell which commands
+    /// nerv will keep helping with after the space.
+    #[test]
+    fn command_name_rows_describe_their_source() {
+        let names = cmd_names();
+        let out = cmd_complete("do", &names);
+        assert_eq!(out.items[0].description.as_deref(), Some("spec"));
     }
 
     #[test]

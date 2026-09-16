@@ -621,16 +621,28 @@ __nerv_complete() {
   local REPLY; __nerv_history_ghost
   local hist_ghost="$REPLY"
 
-  # Bare command name (no space yet): nerv has no command-name
-  # completion, but history can still recall a previous invocation
-  # (`pwd` → ` pbcopy`). Show the ghost, no popup.
-  if [[ "$LBUFFER" != *" "* ]]; then
+  # A bare command name (no space yet) goes through the same request:
+  # the engine answers it from its command-name list — `doc` → `docker`
+  # — and returns nothing once the name is complete, so Enter on a
+  # finished `git` still runs git. History keeps its priority over the
+  # popup's ghost either way (`pwd` → ` pbcopy`).
+  #
+  # A bare token naming a shell alias or function is already a finished
+  # command. The daemon can't see either, so its exact-name guard won't
+  # fire and it would keep offering longer names — Enter on a complete
+  # `k` (alias k=kubectl) would swap the line for `kubectl`. Leading
+  # whitespace is stripped first: ` k` (the HIST_IGNORE_SPACE habit) is
+  # the same command to the engine, whose tokenizer skips it too.
+  local bare="${LBUFFER#"${LBUFFER%%[^[:space:]]*}"}"
+  if [[ "$bare" != *[[:space:]]* ]] \
+     && (( ${+aliases[$bare]} + ${+functions[$bare]} )); then
     __nerv_hide_popup
-    [[ -n "$hist_ghost" ]] && POSTDISPLAY="$hist_ghost"
+    POSTDISPLAY="$hist_ghost"
     return
   fi
 
   # Resolve a leading alias (g=git, cat=bat) so the spec lookup hits.
+  # A line with no space is left alone by the expansion below.
   # RBUFFER is empty here (gate above), so the cursor sits at the end
   # of whatever line we send — use the expanded length, not $CURSOR.
   __nerv_expand_alias_line "$LBUFFER"
@@ -640,6 +652,10 @@ __nerv_complete() {
   resp=$("$__NERV_BIN" _complete "$send_line" ${#send_line} 2>/dev/null)
   local rc=$?
   if (( rc != 0 )); then
+    # The history ghost never needed the engine, so a dead or
+    # mismatched daemon must not cost the user that too. Assigning
+    # unconditionally also clears the previous keystroke's ghost.
+    POSTDISPLAY="$hist_ghost"
     if [[ -n "${NERV_DEBUG:-}" ]]; then
       print -r -- "  complete: BIN call FAILED rc=$rc" >> /tmp/nerv-debug.log
     fi

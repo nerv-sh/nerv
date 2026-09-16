@@ -103,6 +103,28 @@ impl FrecencyStore {
         ((entry.count - 1) as f64) / (1.0 + age_days)
     }
 
+    /// Command names the user has accepted a suggestion for, most-used
+    /// first. Keys are `(spec, insertion)` pairs, so a name's weight is
+    /// the sum over its rows of `count / (1 + age_days)` — the same
+    /// recency decay [`Self::score`] uses, without the single-pick
+    /// deadband: having run a command once still says more about it
+    /// than alphabetical order does. Ties break alphabetically so the
+    /// list is stable across calls.
+    pub fn spec_names(&self) -> Vec<String> {
+        let Ok(table) = self.table.lock() else {
+            return vec![];
+        };
+        let now = now_unix();
+        let mut weight: HashMap<&str, f64> = HashMap::new();
+        for ((spec, _), entry) in table.iter() {
+            let age_days = (now.saturating_sub(entry.last_unix)) as f64 / 86_400.0;
+            *weight.entry(spec.as_str()).or_insert(0.0) += (entry.count as f64) / (1.0 + age_days);
+        }
+        let mut names: Vec<(&str, f64)> = weight.into_iter().collect();
+        names.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        names.into_iter().map(|(n, _)| n.to_string()).collect()
+    }
+
     /// Write the in-memory table back to disk if it's been mutated
     /// since the last flush. Best-effort: errors silently dropped
     /// (frecency is advisory; a write failure must never break
@@ -190,6 +212,59 @@ pub(crate) fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spec_names_is_empty_without_history() {
+        assert!(FrecencyStore::empty().spec_names().is_empty());
+    }
+
+    /// Command-name ranking sums a name's rows: `git` (two accepts on
+    /// one insertion + one on another) outweighs `brew` (one), and a
+    /// single accept still counts — unlike `score`, which deadbands it.
+    #[test]
+    fn spec_names_ranks_by_total_accepts() {
+        let s = FrecencyStore::empty();
+        s.record("git", "checkout");
+        s.record("git", "checkout");
+        s.record("git", "status");
+        s.record("brew", "install");
+        assert_eq!(s.spec_names(), vec!["git", "brew"]);
+    }
+
+    /// Equal weight must not leave the order to HashMap iteration —
+    /// the popup would reshuffle between keystrokes.
+    #[test]
+    fn spec_names_breaks_ties_alphabetically() {
+        let s = FrecencyStore::empty();
+        for spec in ["npm", "cargo", "docker"] {
+            s.record(spec, "x");
+        }
+        // Pin the timestamps: a second boundary landing mid-loop would
+        // decay the earlier rows and make this a recency test instead.
+        if let Ok(mut table) = s.table.lock() {
+            let now = now_unix();
+            for entry in table.values_mut() {
+                entry.last_unix = now;
+            }
+        }
+        assert_eq!(s.spec_names(), vec!["cargo", "docker", "npm"]);
+    }
+
+    /// A name last used long ago decays below a fresher one with the
+    /// same count — same recency model as `score`.
+    #[test]
+    fn spec_names_decays_stale_entries() {
+        let s = FrecencyStore::empty();
+        s.record("stale", "x");
+        s.record("fresh", "x");
+        if let Ok(mut table) = s.table.lock() {
+            let key = ("stale".to_string(), "x".to_string());
+            let e = table.get_mut(&key).expect("recorded above");
+            // 9 days back → weight 1/10 against the fresh entry's 1/1.
+            e.last_unix = now_unix() - 9 * 86_400;
+        }
+        assert_eq!(s.spec_names(), vec!["fresh", "stale"]);
+    }
 
     #[test]
     fn empty_store_returns_zero_score() {

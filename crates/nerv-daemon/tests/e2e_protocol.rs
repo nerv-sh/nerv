@@ -66,6 +66,9 @@ impl DaemonHandle {
             .env("NERV_SPECS_DIR", &specs)
             .env("NERV_FRECENCY_FILE", &frecency)
             .env("NERV_MISSES_FILE", &misses)
+            // Never scan the developer\'s real PATH: command-name rows would
+            // vary by machine.
+            .env("NERV_PATH_SCAN", "0")
             .env("NERV_LOG", "warn")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
@@ -268,6 +271,72 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
         fields.next(),
         Some("3"),
         "all three keystrokes must survive the throttle window"
+    );
+}
+
+/// Typing the first token offers command *names* — the spec stems the
+/// daemon has on disk — and never lands in the miss tally. Every partial
+/// (`gi`, `gi t`) would otherwise be recorded as a command with no spec,
+/// burying the real coverage gaps `nerv doctor` reports.
+#[tokio::test]
+async fn first_token_offers_command_names_without_a_miss_tally() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let misses = daemon.misses.clone();
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        let partial = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "gi".into(),
+                cursor: 2,
+                cwd: None,
+            },
+        )
+        .await;
+        let Response::Suggestions { items } = partial else {
+            panic!("expected command-name rows, got {partial:?}");
+        };
+        assert!(
+            items.iter().any(|s| s.insertion == "git"),
+            "installed stem must be offered: {items:?}"
+        );
+
+        // A fully typed name offers nothing: the popup preselects the
+        // first row, so a leftover row would hijack Enter.
+        let exact = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "git".into(),
+                cursor: 3,
+                cwd: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(exact, Response::Empty { .. }),
+            "exact name must be empty, got {exact:?}"
+        );
+
+        // A typo nobody has a spec for is still not a miss.
+        round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "zpeh".into(),
+                cursor: 4,
+                cwd: None,
+            },
+        )
+        .await;
+    })
+    .await;
+    let _tmp = daemon.terminate().await;
+    run.expect("test timeout");
+
+    let text = std::fs::read_to_string(&misses).unwrap_or_default();
+    assert_eq!(
+        text.trim(),
+        "",
+        "first-token keystrokes must not be tallied"
     );
 }
 

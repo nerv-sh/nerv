@@ -12,6 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
+use nerv_engine::complete::{CommandNames, is_command_name_position};
 use nerv_engine::misses::MissCounter;
 use nerv_engine::{
     Config, FrecencyStore, MatchMode, Request, Response, SpecRegistry, Suggestion, complete_in,
@@ -132,6 +133,13 @@ async fn main() -> anyhow::Result<()> {
     // cleanup steals this one's listener.
     write_pid_file(&pid_path).await?;
 
+    // Command names offered while the first token is still being typed.
+    // Spec stems are listed lazily on the first completion; the PATH
+    // walk is kicked off here so it is warm by the time anyone types,
+    // without boot waiting on it.
+    let names = Arc::new(NameCache::from_env());
+    names.prewarm();
+
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -143,12 +151,14 @@ async fn main() -> anyhow::Result<()> {
                         let registry = registry.clone();
                         let frecency = frecency.clone();
                         let misses = misses.clone();
+                        let names = names.clone();
                         let schema_block = schema_block.clone();
                         tokio::spawn(handle_connection(
                             stream,
                             registry,
                             frecency,
                             misses,
+                            names,
                             config.matching.mode,
                             schema_block,
                         ));
@@ -178,6 +188,7 @@ async fn handle_connection(
     registry: Arc<SpecRegistry>,
     frecency: Arc<FrecencyStore>,
     misses: Arc<MissCounter>,
+    names: Arc<NameCache>,
     mode: MatchMode,
     schema_block: Arc<Option<String>>,
 ) {
@@ -208,10 +219,18 @@ async fn handle_connection(
                     let registry = registry.clone();
                     let frecency = frecency.clone();
                     let misses = misses.clone();
+                    let names = names.clone();
                     tokio::task::spawn_blocking(move || {
+                        // Building the name list means stat-ing every
+                        // spec layer, cloning ~700 stems and folding the
+                        // frecency table. Only the first token can use
+                        // it, and that is a small minority of keystrokes.
+                        let cmd_names = is_command_name_position(&line, cursor)
+                            .then(|| names.names(&registry, &frecency));
                         let resp = engine_complete(
                             &registry,
                             &frecency,
+                            cmd_names.as_ref(),
                             &line,
                             cursor,
                             cwd.as_deref(),
@@ -271,6 +290,202 @@ async fn handle_connection(
     }
 }
 
+/// The command-name list handed to the engine while the first token is
+/// being typed, kept off the keystroke path.
+///
+/// Spec stems are a `read_dir` per layer, so they are re-listed only
+/// when a layer directory's mtime moves — a derived spec landing, the
+/// user dropping in an overlay. The frecent list is read straight from
+/// the in-memory frecency table every time, so a command accepted a
+/// second ago ranks immediately.
+#[derive(Default)]
+struct NameCache {
+    stems: std::sync::Mutex<StemSnapshot>,
+    path: Arc<PathCache>,
+}
+
+/// Executable names on `PATH`, the last source offered for a command
+/// name. A full scan walks thousands of files, so it never runs on the
+/// keystroke path: a request stats the `PATH` directories (tens of
+/// them), serves whatever the last completed scan produced — an empty
+/// list before the first one lands — and schedules a rescan in the
+/// background when a stamp moved.
+///
+/// `NERV_PATH_SCAN=0` leaves the source empty — the switch the Rust
+/// daemon test harnesses set so command-name rows don't vary with the
+/// developer's real `PATH`.
+#[derive(Default)]
+struct PathCache {
+    dirs: Vec<std::path::PathBuf>,
+    snap: std::sync::Mutex<PathSnapshot>,
+    scanning: std::sync::atomic::AtomicBool,
+}
+
+/// `PATH` directories to scan, or none when the scan is switched off.
+/// Split out from the environment read so the switch itself is testable
+/// — four daemon harnesses rely on it holding.
+fn dirs_from(scan: Option<&str>, path: &str) -> Vec<std::path::PathBuf> {
+    if scan == Some("0") {
+        return vec![];
+    }
+    nerv_engine::complete::path_dirs(path)
+}
+
+#[derive(Default)]
+struct PathSnapshot {
+    names: Arc<Vec<String>>,
+    stamp: Option<Vec<Option<std::time::SystemTime>>>,
+}
+
+#[derive(Default)]
+struct StemSnapshot {
+    names: Arc<Vec<String>>,
+    /// One mtime per spec layer, in `layer_dirs` order. `None` marks a
+    /// layer that does not exist yet (a missing overlay is normal); its
+    /// later creation still shows up as a change.
+    stamp: Option<Vec<Option<std::time::SystemTime>>>,
+}
+
+impl NameCache {
+    /// Read `PATH` once, from the daemon's own environment.
+    /// `Request::Complete` does not carry the client's `PATH`, so a
+    /// shell that exports a new one is invisible here until the daemon
+    /// restarts — the same bound `nerv.toml` already has.
+    fn from_env() -> Self {
+        let dirs = dirs_from(
+            std::env::var("NERV_PATH_SCAN").ok().as_deref(),
+            &std::env::var("PATH").unwrap_or_default(),
+        );
+        Self {
+            path: Arc::new(PathCache {
+                dirs,
+                ..PathCache::default()
+            }),
+            ..Self::default()
+        }
+    }
+
+    /// Kick the first `PATH` scan so the source is warm by the time the
+    /// user types, without making boot wait for it.
+    fn prewarm(&self) {
+        self.path.schedule_rescan();
+    }
+
+    fn names(&self, registry: &SpecRegistry, frecency: &FrecencyStore) -> CommandNames {
+        CommandNames::from_shared(
+            frecency.spec_names(),
+            self.stems(registry),
+            self.path.names(),
+        )
+    }
+
+    /// Spec stems, re-listed only when a layer's mtime moved. The
+    /// `read_dir` runs *outside* the lock: the moment a derived spec
+    /// lands, every concurrent keystroke would otherwise queue behind
+    /// one directory walk.
+    fn stems(&self, registry: &SpecRegistry) -> Arc<Vec<String>> {
+        let stamp: Vec<Option<std::time::SystemTime>> = registry
+            .layer_dirs()
+            .iter()
+            .map(|dir| std::fs::metadata(dir).and_then(|m| m.modified()).ok())
+            .collect();
+        {
+            let snap = self.lock();
+            if snap.stamp.as_ref() == Some(&stamp) {
+                return snap.names.clone();
+            }
+        }
+        let names = Arc::new(registry.dir_listing());
+        let mut snap = self.lock();
+        snap.names = names.clone();
+        snap.stamp = Some(stamp);
+        names
+    }
+
+    /// A panic while the snapshot was held would otherwise poison the
+    /// mutex for the rest of the process, sending *every* later
+    /// keystroke back to `read_dir`. The snapshot is a plain cache, so
+    /// taking the inner value back is always safe.
+    fn lock(&self) -> std::sync::MutexGuard<'_, StemSnapshot> {
+        self.stems.lock().unwrap_or_else(|poisoned| {
+            self.stems.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+}
+
+impl PathCache {
+    /// Names from the last completed scan. Touches the disk only to
+    /// stat each `PATH` directory; a moved stamp schedules a rescan
+    /// instead of running one here.
+    fn names(self: &Arc<Self>) -> Arc<Vec<String>> {
+        if self.dirs.is_empty() {
+            return Arc::default();
+        }
+        let stamp = self.stamps();
+        let (names, fresh) = {
+            let snap = self.lock();
+            (snap.names.clone(), snap.stamp.as_ref() == Some(&stamp))
+        };
+        if !fresh {
+            self.schedule_rescan();
+        }
+        names
+    }
+
+    fn schedule_rescan(self: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if self.dirs.is_empty() || self.scanning.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let cache = self.clone();
+        std::thread::spawn(move || {
+            // Clearing the flag on drop, not after the call: a panic in
+            // the walk would otherwise leave it set for the daemon's
+            // lifetime and freeze the name list silently. Same guard the
+            // generator cache uses for its in-flight set.
+            let _guard = ScanGuard(&cache);
+            cache.rescan();
+        });
+    }
+
+    /// The walk itself. The stamp is taken *before* it, so a directory
+    /// that changes mid-scan leaves the snapshot looking stale and the
+    /// next request schedules another pass.
+    fn rescan(&self) {
+        let stamp = self.stamps();
+        let names = Arc::new(nerv_engine::complete::executables_in(&self.dirs));
+        let mut snap = self.lock();
+        snap.names = names;
+        snap.stamp = Some(stamp);
+    }
+
+    fn stamps(&self) -> Vec<Option<std::time::SystemTime>> {
+        self.dirs
+            .iter()
+            .map(|dir| std::fs::metadata(dir).and_then(|m| m.modified()).ok())
+            .collect()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PathSnapshot> {
+        self.snap.lock().unwrap_or_else(|poisoned| {
+            self.snap.clear_poison();
+            poisoned.into_inner()
+        })
+    }
+}
+
+/// Releases `PathCache::scanning` however the scan thread ends.
+struct ScanGuard<'a>(&'a PathCache);
+
+impl Drop for ScanGuard<'_> {
+    fn drop(&mut self) {
+        self.0
+            .scanning
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Max suggestions transported to the widget per keystroke. The ZLE
 /// popup only shows a ~10-row sliding window, but the widget receives
 /// *every* row over the socket, splits it into a zsh array, and scans
@@ -290,13 +505,14 @@ const MAX_SUGGESTIONS: usize = 500;
 fn engine_complete(
     registry: &SpecRegistry,
     frecency: &FrecencyStore,
+    names: Option<&CommandNames>,
     line: &str,
     cursor: usize,
     cwd: Option<&str>,
     mode: MatchMode,
 ) -> Response {
     let cwd_path = cwd.map(std::path::Path::new);
-    let mut result = complete_in(line, cursor, registry, cwd_path, mode);
+    let mut result = complete_in(line, cursor, registry, cwd_path, mode, names);
     if result.items.is_empty() {
         return Response::Empty {
             reason: result.reason,
@@ -409,6 +625,150 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Directory mtime is the whole guard keeping `read_dir` off the
+    /// keystroke path: an unchanged layer must be served from the
+    /// snapshot, and a spec landing in it (a `--help` derivation, a
+    /// user overlay) must show up on the next keystroke.
+    #[test]
+    fn name_cache_relists_stems_only_when_a_layer_changes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("foo.json"), "{}").expect("write spec");
+        let registry = SpecRegistry::at_dir(tmp.path());
+        let frecency = FrecencyStore::empty();
+        let cache = NameCache::default();
+
+        assert_eq!(*cache.stems(&registry), vec!["foo".to_string()]);
+
+        // Add a spec but rewind the directory mtime: the snapshot is
+        // keyed on that stamp, so the new file must stay invisible.
+        let before = std::fs::metadata(tmp.path())
+            .and_then(|m| m.modified())
+            .expect("dir mtime");
+        std::fs::write(tmp.path().join("bar.json"), "{}").expect("write spec");
+        let dir = std::fs::File::open(tmp.path()).expect("open dir");
+        dir.set_times(std::fs::FileTimes::new().set_modified(before))
+            .expect("rewind dir mtime");
+        assert_eq!(
+            *cache.stems(&registry),
+            vec!["foo".to_string()],
+            "an unchanged stamp must be served from the snapshot"
+        );
+
+        // A real mtime move re-lists.
+        dir.set_times(
+            std::fs::FileTimes::new().set_modified(before + std::time::Duration::from_secs(1)),
+        )
+        .expect("advance dir mtime");
+        assert_eq!(
+            *cache.stems(&registry),
+            vec!["bar".to_string(), "foo".to_string()]
+        );
+
+        // The full list layers frecency on top, most-used first.
+        frecency.record("zeph", "x");
+        let names = cache.names(&registry, &frecency);
+        assert!(names.is_complete_name("zeph") && names.is_complete_name("bar"));
+    }
+
+    fn exe(dir: &std::path::Path, name: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\n").expect("write");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+
+    fn path_cache(dir: &std::path::Path) -> Arc<PathCache> {
+        Arc::new(PathCache {
+            dirs: vec![dir.to_path_buf()],
+            ..PathCache::default()
+        })
+    }
+
+    /// A full `PATH` walk is thousands of files, so a request must
+    /// never run one: before the first scan lands the source is simply
+    /// empty, and completion answers from the other two.
+    #[test]
+    fn path_names_are_empty_until_a_scan_completes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        exe(tmp.path(), "zeph");
+        let cache = path_cache(tmp.path());
+        assert!(
+            cache.names().is_empty(),
+            "asking for names must not walk PATH inline"
+        );
+        cache.rescan();
+        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
+    }
+
+    /// A newly installed binary has to show up without a daemon
+    /// restart; the directory mtime is what notices.
+    #[test]
+    fn path_names_refresh_in_the_background_when_a_dir_changes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        exe(tmp.path(), "zeph");
+        let cache = path_cache(tmp.path());
+        cache.rescan();
+        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
+
+        exe(tmp.path(), "aicommit2");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // The first call schedules; later ones observe the result.
+            let names = cache.names();
+            if names.len() == 2 {
+                assert_eq!(*names, vec!["aicommit2".to_string(), "zeph".to_string()]);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background rescan never landed: {names:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The isolation switch the Rust daemon harnesses set, so a scan of
+    /// the developer's real PATH can't leak into their assertions.
+    #[test]
+    fn path_scan_switch_decides_which_dirs_are_walked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().to_string_lossy().to_string();
+        assert!(dirs_from(Some("0"), &dir).is_empty());
+        assert_eq!(dirs_from(None, &dir), vec![tmp.path().to_path_buf()]);
+        // Only the exact "0" disables it — an unset-looking value must
+        // not silently turn completion's last source off.
+        assert_eq!(dirs_from(Some("1"), &dir), vec![tmp.path().to_path_buf()]);
+    }
+
+    /// An empty dir list is what the switch produces, and it must leave
+    /// the source quiet rather than scanning anything.
+    #[test]
+    fn a_pathless_cache_stays_empty() {
+        let cache: Arc<PathCache> = Arc::new(PathCache::default());
+        cache.schedule_rescan();
+        assert!(cache.names().is_empty());
+    }
+
+    /// PATH is the third source of the list the engine matches against;
+    /// dropping it on the floor here would be invisible to every other
+    /// test in this file.
+    #[test]
+    fn name_list_carries_the_path_source() {
+        let specs = tempfile::tempdir().expect("tempdir");
+        std::fs::write(specs.path().join("git.json"), "{}").expect("write spec");
+        let bin = tempfile::tempdir().expect("tempdir");
+        exe(bin.path(), "zeph");
+
+        let cache = NameCache {
+            path: path_cache(bin.path()),
+            ..NameCache::default()
+        };
+        cache.path.rescan();
+        let names = cache.names(&SpecRegistry::at_dir(specs.path()), &FrecencyStore::empty());
+        assert!(names.is_complete_name("zeph"), "PATH name missing");
+        assert!(names.is_complete_name("git"), "spec stem missing");
+    }
 
     fn sugg(display: &str) -> Suggestion {
         Suggestion {
