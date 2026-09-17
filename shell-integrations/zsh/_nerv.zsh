@@ -694,6 +694,10 @@ __nerv_complete() {
   local resp
   resp=$("$__NERV_BIN" _complete "$send_line" ${#send_line} 2>/dev/null)
   local rc=$?
+  # rc 4 is a success: rows follow, but the typed token already names one
+  # of the candidates (see the default selection below).
+  local token_complete=0
+  (( rc == 4 )) && { token_complete=1; rc=0; }
   if (( rc != 0 )); then
     # The history ghost never needed the engine, so a dead or
     # mismatched daemon must not cost the user that too. Assigning
@@ -757,9 +761,26 @@ __nerv_complete() {
   # runs the command. Once the user types into a token (`z ad`), the
   # sentinel disappears entirely and the first real match is highlighted,
   # so Tab/Enter picks it. Mirrors the ghost's mid-token gate.
-  if [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' || "$LBUFFER" == */ ]]; then
+  #
+  # Two exceptions, both about what Enter should mean:
+  # - A lone command-word correction (`dokcer ⎵`) is selected even after
+  #   the space: running the typo can only end in "command not found".
+  # - A token typed in full (`pnpm dev`, rc 4) keeps the sentinel even
+  #   mid-token: the rows left only extend it (`dev:web`), and Enter on a
+  #   finished name means "run it", not "insert something longer".
+  local lone_fix=0
+  if (( ${#rlines} == 1 )); then
+    __nerv_row_span "${rlines[1]}"
+    [[ -n "$REPLY" ]] && lone_fix=1
+  fi
+  if (( token_complete )) \
+     || { (( ! lone_fix )) \
+          && [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' || "$LBUFFER" == */ ]]; }; then
     __NERV_HAS_SENTINEL=1
     __NERV_SELECTED=0
+  elif (( lone_fix )) && [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' || "$LBUFFER" == */ ]]; then
+    __NERV_HAS_SENTINEL=1
+    __NERV_SELECTED=1
   else
     __NERV_HAS_SENTINEL=0
     __NERV_SELECTED=1

@@ -1569,9 +1569,20 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
     };
 
     match nerv_engine::ipc_client::query_sync(&req)? {
-        Response::Suggestions { items } => {
+        Response::Suggestions {
+            items,
+            token_complete,
+        } => {
             for s in &items {
                 print_suggestion(s);
+            }
+            // Exit 4 = rows printed, but the typed token already names a
+            // candidate. The widget keeps the rows and preselects "run
+            // the line" instead of the first (longer) name.
+            if token_complete {
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                std::process::exit(4);
             }
         }
         // E5: a schema-mismatch reason exits 3 (distinct from the daemon-

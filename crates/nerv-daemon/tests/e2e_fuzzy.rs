@@ -83,7 +83,7 @@ async fn fuzzy_mode_recovers_checkout_from_chk() {
         reader.read_line(&mut resp_line).await.unwrap();
         let resp: Response = serde_json::from_str(resp_line.trim()).unwrap();
         match resp {
-            Response::Suggestions { items } => {
+            Response::Suggestions { items, .. } => {
                 let names: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
                 assert!(
                     names.contains(&"checkout"),

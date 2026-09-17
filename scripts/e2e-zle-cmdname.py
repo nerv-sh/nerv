@@ -51,6 +51,10 @@ def log(msg):
     print(f"[e2e-cmdname] {msg}", flush=True)
 
 
+# Everything the shell wrote, for checks that span the whole session.
+TRANSCRIPT = []
+
+
 def pump(fd, seconds):
     out = b""
     deadline = time.time() + seconds
@@ -64,6 +68,7 @@ def pump(fd, seconds):
             if not chunk:
                 break
             out += chunk
+    TRANSCRIPT.append(out)
     return out
 
 
@@ -91,6 +96,10 @@ def main():
         # Expands to a typo: the engine corrects the *expanded* line, so
         # its span does not index what the user typed.
         f.write("alias dk=dokcer\n")
+        # Ctrl-X Ctrl-B writes the edit buffer to a file: the only way to
+        # read what Enter left behind without parsing redraw escapes.
+        f.write(f"__dump() {{ print -rn -- \"$BUFFER\" > {home}/buffer; }}\n")
+        f.write("zle -N __dump; bindkey '^X^B' __dump\n")
         # An empty PATH keeps zsh's own completion from producing the
         # same word on a Tab that nerv failed to handle. `nerv` itself
         # is reached through the absolute NERV_BIN the init block sets.
@@ -113,6 +122,13 @@ def main():
     # come from accepting a correction.
     with open(os.path.join(specs, "zzzspec.json"), "w") as f:
         json.dump({"name": "zzzspec", "description": "Correction target"}, f)
+    # A command whose argument has a name (`dev`) and a longer name that
+    # extends it (`dev:web`): the finished-token case for Enter.
+    with open(os.path.join(specs, "pn.json"), "w") as f:
+        json.dump(
+            {"name": "pn", "args": [{"name": "script", "suggestions": ["dev", "dev:web"]}]},
+            f,
+        )
     with open(os.path.join(specs, "bash.json"), "w") as f:
         json.dump({"name": "bash", "description": "Bourne-again shell"}, f)
     # The bundle ships a `sudo` spec; without one here, typing `sudo `
@@ -292,6 +308,73 @@ def main():
                 failures.append(f"shell word in {line!r} drew a correction")
             log(f"{line!r}: engine={'did you mean' in direct} popup={'did you mean' in text}")
 
+        # What Enter means. PATH is an empty directory, so a line that
+        # actually runs prints "command not found" — that is the signal.
+        def buffer_now():
+            path = os.path.join(home, "buffer")
+            if os.path.exists(path):
+                os.remove(path)
+            os.write(master, b"\x18\x02")
+            pump(master, 0.6)
+            with open(path) as f:
+                return f.read()
+
+        shown_before_enter = {}
+
+        def enter_after(typed):
+            os.write(master, b"\x15")
+            pump(master, 0.6)
+            # The last keystroke alone: earlier ones pass through states
+            # (`dokcer ⎵` before `./`) that paint their own rows.
+            os.write(master, typed[:-1])
+            pump(master, 1.5)
+            os.write(master, typed[-1:])
+            shown_before_enter[typed] = pump(master, 1.5).decode(errors="replace")
+            os.write(master, b"\r")
+            return strip_ansi(pump(master, 1.5))
+
+        # A lone correction is preselected at a word boundary (a space, or
+        # a `/` the user is browsing): Enter fixes the line instead of
+        # running the typo.
+        for typed, want in ((b"dokcer ", "docker "), (b"dokcer ./", "docker ./")):
+            out = enter_after(typed)
+            ran = b"command not found" in out
+            buf = buffer_now()
+            # Selecting the fix must not take the "run it" row away.
+            sentinel = "Immediately execute" in shown_before_enter[typed]
+            if ran or buf != want or not sentinel:
+                failures.append(f"{typed!r}+Enter left {buf!r} (ran={ran}, sentinel={sentinel})")
+            log(f"{typed.decode()!r}+Enter: ran={ran} buffer={buf!r} sentinel={sentinel}")
+
+        # Ordinary rows after the space keep the sentinel: Enter runs.
+        out = enter_after(b"git ")
+        if b"command not found" not in out:
+            failures.append("'git '+Enter did not run the line")
+        log(f"'git '+Enter: ran={b'command not found' in out}")
+
+        # A token typed in full runs even though a longer name remains —
+        # and the longer name is still on offer, which proves rc 4 was read
+        # as a success rather than as a dead daemon.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"pn dev")
+        shown = pump(master, 1.5).decode(errors="replace")
+        if "dev:web" not in shown or "daemon not running" in shown:
+            failures.append(f"'pn dev' lost its popup: {shown[-60:]!r}")
+        log(f"'pn dev': popup={'dev:web' in shown}")
+        out = enter_after(b"pn dev")
+        if b"command not found" not in out:
+            failures.append(f"'pn dev'+Enter did not run the line: {out[-60:]!r}")
+        log(f"'pn dev'+Enter: ran={b'command not found' in out}")
+
+        # A partial token still takes the first row.
+        out = enter_after(b"pn de")
+        ran = b"command not found" in out
+        buf = buffer_now()
+        if ran or buf != "pn dev ":
+            failures.append(f"'pn de'+Enter left {buf!r} (ran={ran})")
+        log(f"'pn de'+Enter: ran={ran} buffer={buf!r}")
+
         # A correction against an alias-expanded line indexes a line the
         # buffer does not have, so the row must be dropped.
         os.write(master, b"\x15")
@@ -332,7 +415,10 @@ def main():
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
         time.sleep(0.5)
         os.write(master, b"pw")
-        text = pump(master, 2.0).decode(errors="replace")
+        # Compare without escapes: zle redraws only the cells that changed
+        # since the previous ghost (`pn dev` from the Enter cases), so the
+        # colour codes land between letters of the mark.
+        text = strip_ansi(pump(master, 2.0)).decode(errors="replace")
         if GHOST_MARK not in text:
             failures.append("history ghost was lost when the daemon was down")
         log(f"daemon down: history ghost={GHOST_MARK in text}")
@@ -351,6 +437,21 @@ def main():
         if master is not None:
             os.close(master)
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
+
+    # No widget may leak shell diagnostics onto the terminal — a second
+    # `local` on an existing variable prints `NAME=value` (v0.1.12 did this
+    # on every accepted completion).
+    # Escapes first: `ESC 8` (restore cursor) sits right before the dump,
+    # and its `8` would hide a word boundary.
+    # zsh prints the dump as `NAME=value` and ends the line; typed
+    # assignments (`export FOO=1 `) never end a line on their own.
+    leaked = re.findall(
+        rb"(?<![A-Za-z0-9_])[A-Za-z_][A-Za-z0-9_]*=\S*\r\n",
+        strip_ansi(b"".join(TRANSCRIPT)),
+    )
+    if leaked:
+        failures.append(f"widget printed variable dumps: {leaked[:3]!r}")
+    log(f"variable dumps: {len(leaked)}")
 
     # 4: none of those keystrokes may be tallied as a missing spec.
     tally = env["NERV_MISSES_FILE"]

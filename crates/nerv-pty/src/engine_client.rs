@@ -55,7 +55,7 @@ pub async fn complete(line: &str, cursor: usize, cwd: Option<String>) -> Vec<Sug
         // A row that rewrites another part of the line (a corrected
         // command word) has no meaning here: the PTY overlay only ever
         // completes the token under the cursor.
-        Ok(Ok(Response::Suggestions { items })) => only_current_token(items),
+        Ok(Ok(Response::Suggestions { items, .. })) => only_current_token(items),
         _ => Vec::new(),
     }
 }

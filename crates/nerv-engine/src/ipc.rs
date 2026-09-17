@@ -42,7 +42,14 @@ pub enum Request {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Response {
     /// Normal completion result.
-    Suggestions { items: Vec<Suggestion> },
+    Suggestions {
+        items: Vec<Suggestion>,
+        /// The token under the cursor already names a candidate; the
+        /// rows only extend it. `#[serde(default)]` keeps a reply from an
+        /// older daemon (no field) decodable as "not complete".
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        token_complete: bool,
+    },
     /// Daemon is alive (Ping reply). `pid` is the daemon's process id, so a
     /// client (`nerv stop` / `uninstall`) can signal it even when the PID
     /// file is missing. `#[serde(default)]` keeps replies from an older
@@ -117,6 +124,33 @@ pub enum SuggestionKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A daemon from before `token_complete` sends no such key; the new
+    /// client must still read its rows.
+    #[test]
+    fn suggestions_without_token_complete_still_decode() {
+        let old = r#"{"kind":"suggestions","items":[]}"#;
+        let resp: Response = serde_json::from_str(old).unwrap();
+        assert!(matches!(
+            resp,
+            Response::Suggestions {
+                token_complete: false,
+                ..
+            }
+        ));
+        let done = Response::Suggestions {
+            items: vec![],
+            token_complete: true,
+        };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Response>(&json).unwrap(),
+            Response::Suggestions {
+                token_complete: true,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn suggestion_roundtrip_minimal() {

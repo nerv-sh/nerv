@@ -93,7 +93,7 @@ async fn complete_returns_real_engine_suggestions() {
 
         let resp: Response = serde_json::from_str(resp_line.trim()).unwrap();
         match resp {
-            Response::Suggestions { items } => {
+            Response::Suggestions { items, .. } => {
                 let names: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
                 // git.json fixture has 4 subcommands: status, log, checkout,
                 // commit. Engine emits alphabetically sorted.

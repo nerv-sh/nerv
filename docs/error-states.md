@@ -194,6 +194,8 @@ THEN:
 ### 3.5 E5 — spec 버전 불일치 ✅ 구현 완료 (2026-06-07)
 
 > 구현: `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2`, `check_schema`). build-specs 가 `manifest.json` 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` → CLI bridge exit 3 → ZLE 회색 1줄 + `nerv doctor` red row. **missing manifest 는 관대** (pre-manifest 설치 호환). 테스트: manifest 5 unit + `schema_mismatch_disables_completion` e2e.
+>
+> `nerv _complete` 의 exit code: 0 = 행 있음/없음 · 3 = E5 schema mismatch · **4 = 행 있음 + 친 토큰이 이미 후보 이름** (에러 아님 — 위젯이 sentinel 을 기본 선택, first-5-min §0.9) · 그 외 = 데몬 없음(E1).
 
 **감지**:
 
@@ -423,3 +425,4 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 *v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: spec 디렉터리 경로 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` (PRD §8 정합), E2 감지 수단에 `nerv-engine::spec_loader` (loadSpec.ts 포팅) 명시, §5.1 에 v0.6 구현 매핑 추가 (nerv-diag 흡수 활용 + cmd_doctor 필터링). 5종 카탈로그 / 메시지 톤 / exit code 규약 모두 무변경. 변경 트리거: figterm path 의 신규 에러 클래스 발견, rquickjs Tier C 실행 실패 시나리오 정의 시 (E6 후보).*
 *v1.4 — 롱테일 spec 커버리지 정합 (2026-09-05). v1.3 → v1.4 변경: §3.6.3 `spec misses` 신설 (데몬의 로컬 miss 집계 `misses.tsv` — throttle 5s, temp+rename, 확정된 miss 만, 텔레메트리 아님), §3.6.4 `derived specs` 신설 (`--help` 파생 spec 행 + 파손 시 "delete that file" 안내, doctor/spec list 는 읽기 전용), 기존 §3.6.3 디바운스 / §3.6.4 비목표 를 §3.6.5 / §3.6.6 으로 재번호. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경. 변경 트리거: 파생 spec 파싱 실패 클래스가 사용자 가시 에러로 승격될 때 (E6 후보), miss 집계에 명령별 조치 hint 추가 시.*
 *v1.5 — 공백 뒤 명령 이름 교정 (2026-09-17). v1.4 → v1.5 변경: §3.6.3 에 교정된 오타 비집계 조항 추가 (실측: v0.1.11 `misses.tsv` 24행 전부 오타). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
+*v1.6 — `_complete` exit 4 (행 + 토큰 완성, 에러 아님) 명시 (2026-09-17). 5종 카탈로그 무변경.*

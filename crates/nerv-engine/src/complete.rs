@@ -1005,6 +1005,11 @@ pub struct CompleteResult {
     pub items: Vec<Suggestion>,
     /// Optional reason when items is empty (debug aid).
     pub reason: Option<String>,
+    /// The token under the cursor already names one of the candidates
+    /// (`pnpm dev` with a `dev` script). The rows left are only longer
+    /// names that extend it, so the widget should not preselect one:
+    /// Enter means "run what I typed".
+    pub token_complete: bool,
 }
 
 /// Run the full pipeline against `line` + `cursor` byte offset.
@@ -1038,6 +1043,7 @@ pub fn complete_in(
     // surfaces filenames). Suppress, matching Fig/q.
     if cursor_in_open_quote(&line[..cursor]) {
         return CompleteResult {
+            token_complete: false,
             items: vec![],
             reason: Some("inside quoted string".into()),
         };
@@ -1057,6 +1063,7 @@ pub fn complete_in(
 
     if tokens.is_empty() {
         return CompleteResult {
+            token_complete: false,
             items: vec![],
             reason: Some("empty input".into()),
         };
@@ -1091,12 +1098,14 @@ pub fn complete_in(
             .unwrap_or_default();
         if !items.is_empty() {
             return CompleteResult {
+                token_complete: false,
                 items,
                 reason: None,
             };
         }
         let done = names.is_some_and(|n| n.is_complete_name(&prefix));
         return CompleteResult {
+            token_complete: false,
             items: vec![],
             reason: Some(if done {
                 "command name complete".into()
@@ -1124,11 +1133,13 @@ pub fn complete_in(
             })
         }) {
             return CompleteResult {
+                token_complete: false,
                 items: vec![row],
                 reason: None,
             };
         }
         return CompleteResult {
+            token_complete: false,
             items: vec![],
             reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
         };
@@ -1183,6 +1194,7 @@ pub fn complete_in(
             if let Some(arg) = opt.args.get(*arg_idx) {
                 let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens);
                 return CompleteResult {
+                    token_complete: false,
                     items,
                     reason: None,
                 };
@@ -1220,6 +1232,7 @@ pub fn complete_in(
                         it.insertion = format!("{prefix} {}", it.insertion);
                     }
                     return CompleteResult {
+                        token_complete: false,
                         items,
                         reason: None,
                     };
@@ -1228,7 +1241,7 @@ pub fn complete_in(
         }
     }
 
-    let mut items = if prefix_is_option {
+    let items = if prefix_is_option {
         emit_options_with_ancestors(
             current,
             &ancestor_refs,
@@ -1285,11 +1298,12 @@ pub fn complete_in(
     // "Immediately execute" sentinel (widget-side) plus any longer
     // matches (`status-v2`) remain. Empty prefix means the user is
     // browsing a fresh token (`git `), so keep everything.
-    items = settle_typed_token(items, &prefix, mode);
+    let (items, token_complete) = settle_typed_token(items, &prefix, mode);
 
     CompleteResult {
         items,
         reason: None,
+        token_complete,
     }
 }
 
@@ -1329,9 +1343,16 @@ fn extends_token(name: &str, token: &str) -> bool {
 /// "extends the token" says nothing, and reordering would undo the
 /// generator's own frecency. An empty token means a fresh word
 /// (`git ⎵`), where every row is still a candidate.
-fn settle_typed_token(mut items: Vec<Suggestion>, token: &str, mode: MatchMode) -> Vec<Suggestion> {
+///
+/// Also returns whether the token was typed in full (rule 1 fired), so
+/// the caller can tell the widget not to preselect a longer name.
+fn settle_typed_token(
+    mut items: Vec<Suggestion>,
+    token: &str,
+    mode: MatchMode,
+) -> (Vec<Suggestion>, bool) {
     if token.is_empty() || items.iter().any(|s| s.source_ranked) {
-        return items;
+        return (items, false);
     }
     let typed_in_full = items
         .iter()
@@ -1347,7 +1368,7 @@ fn settle_typed_token(mut items: Vec<Suggestion>, token: &str, mode: MatchMode) 
         extending.extend(contains);
         items = extending;
     }
-    items
+    (items, typed_in_full)
 }
 
 /// True when the cursor (end of `text`) sits inside an unterminated
@@ -5917,6 +5938,24 @@ region = us-east-1
         assert!(fuzzy_rows(&dir, "pn dev").is_empty());
     }
 
+    /// The widget preselects the first row for a partial token, so it
+    /// has to learn when the token is not partial at all: `pn dev` names
+    /// a script even though `dev:web` is still offered.
+    #[test]
+    fn a_fully_typed_token_is_reported_complete() {
+        let dir = fuzzy_spec_dir("pn", &["dev", "dev:web"]);
+        let r = SpecRegistry::at_dir(dir.path());
+        for mode in [MatchMode::Prefix, MatchMode::Fuzzy] {
+            let done = complete_in("pn dev", 6, &r, None, mode, None);
+            assert_eq!(done.items.len(), 1, "{mode:?}");
+            assert!(done.token_complete, "{mode:?}");
+            let partial = complete_in("pn de", 5, &r, None, mode, None);
+            assert!(!partial.token_complete, "{mode:?}");
+            let fresh = complete_in("pn ", 3, &r, None, mode, None);
+            assert!(!fresh.token_complete, "{mode:?}");
+        }
+    }
+
     /// Names that continue what was typed are real next steps, so an
     /// exact hit must not take them down with the noise.
     #[test]
@@ -6003,8 +6042,9 @@ region = us-east-1
             ..Default::default()
         };
         let items = vec![row("dev"), row("/home/me/dev"), row("/srv/predev")];
-        let settled = settle_typed_token(items.clone(), "dev", MatchMode::Fuzzy);
+        let (settled, complete) = settle_typed_token(items.clone(), "dev", MatchMode::Fuzzy);
         assert_eq!(settled, items);
+        assert!(!complete);
     }
 
     /// Nothing close enough → the plain "no spec" empty, still tallied.
