@@ -20,6 +20,33 @@
 
 use nerv_engine::{SpecRegistry, complete};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// How long a scenario waits for a cold spec to land before calling it a
+/// failure. `SpecRegistry::lookup` parses off the keystroke path and only
+/// blocks for `SPEC_LOAD_SYNC_WAIT` (50 ms), so a spec that parses slower
+/// than that answers the *first* call with no rows and the next one with
+/// the full set — the shipped contract ("첫 키 empty, 다음 키 full",
+/// CLAUDE.md §3 async 스펙 로드). A single call per scenario therefore
+/// measures machine load, not completion behaviour: under a parallel
+/// `cargo test --workspace` the docker and pip scenarios fail together
+/// with `no spec for <binary>` (observed 2026-09-18, 2 of 8 runs).
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Complete `line`, giving a cold spec time to finish parsing.
+///
+/// Retries only while the result is empty: a non-empty result is the
+/// spec's real answer and a wrong one must stay a failure.
+fn complete_settled(line: &str, registry: &SpecRegistry) -> nerv_engine::CompleteResult {
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    loop {
+        let result = complete(line, line.len(), registry);
+        if !result.items.is_empty() || Instant::now() >= deadline {
+            return result;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
 
 fn converted_dir() -> PathBuf {
     [env!("CARGO_MANIFEST_DIR"), "tests", "fixtures", "converted"]
@@ -129,8 +156,7 @@ fn top_spec_subcommand_scenarios() {
     let mut failures = Vec::new();
 
     for (line, expected) in SCENARIOS {
-        let cursor = line.len();
-        let result = complete(line, cursor, &registry);
+        let result = complete_settled(line, &registry);
         let hit = result.items.iter().any(|s| s.insertion == *expected);
         if !hit {
             let top: Vec<&str> = result
