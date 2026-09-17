@@ -531,6 +531,7 @@ fn engine_complete(
     debug_assert!(result.items.len() <= MAX_SUGGESTIONS);
     Response::Suggestions {
         items: result.items,
+        token_complete: result.token_complete,
     }
 }
 

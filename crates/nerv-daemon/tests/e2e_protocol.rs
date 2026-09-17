@@ -294,7 +294,7 @@ async fn corrected_command_word_is_offered_and_not_tallied() {
                 },
             )
             .await;
-            let Response::Suggestions { items } = resp else {
+            let Response::Suggestions { items, .. } = resp else {
                 panic!("expected a correction at {cursor}, got {resp:?}");
             };
             assert_eq!(items.len(), 1, "{items:?}");
@@ -350,7 +350,7 @@ async fn first_token_offers_command_names_without_a_miss_tally() {
             },
         )
         .await;
-        let Response::Suggestions { items } = partial else {
+        let Response::Suggestions { items, .. } = partial else {
             panic!("expected command-name rows, got {partial:?}");
         };
         assert!(
@@ -430,7 +430,7 @@ async fn pipelined_requests_share_one_connection() {
         }
         assert!(matches!(responses[0], Response::Pong { .. }));
         match &responses[1] {
-            Response::Suggestions { items } => assert!(!items.is_empty()),
+            Response::Suggestions { items, .. } => assert!(!items.is_empty()),
             other => panic!("expected Suggestions, got {other:?}"),
         }
         assert!(matches!(responses[2], Response::Pong { .. }));
@@ -459,7 +459,7 @@ async fn record_accept_boosts_subsequent_complete() {
         )
         .await;
         match &baseline {
-            Response::Suggestions { items } => {
+            Response::Suggestions { items, .. } => {
                 assert_eq!(
                     items.first().map(|s| s.insertion.as_str()),
                     Some("checkout"),
@@ -498,7 +498,7 @@ async fn record_accept_boosts_subsequent_complete() {
         )
         .await;
         match boosted {
-            Response::Suggestions { items } => {
+            Response::Suggestions { items, .. } => {
                 assert_eq!(
                     items.first().map(|s| s.insertion.as_str()),
                     Some("status"),

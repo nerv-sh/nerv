@@ -125,7 +125,7 @@ async fn roundtrip(sock_path: &std::path::Path) {
     reader.read_line(&mut resp_line).await.unwrap();
     let resp: Response = serde_json::from_str(resp_line.trim()).unwrap();
     match resp {
-        Response::Suggestions { items } => assert!(!items.is_empty()),
+        Response::Suggestions { items, .. } => assert!(!items.is_empty()),
         other => panic!("unexpected: {other:?}"),
     }
 }
