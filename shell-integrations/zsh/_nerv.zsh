@@ -570,7 +570,9 @@ __nerv_insert_selected() {
   # invoked (e.g. `git`, `cd`). Resolve a leading alias the same way
   # the completion request did, so `g checkout` records under `git`
   # (the daemon boosts by the spec name of the line it completed).
-  local REPLY; __nerv_expand_alias_line "$BUFFER"
+  # REPLY is already local (declared for the span check above); a second
+  # `local` would make zsh print its current value onto the terminal.
+  __nerv_expand_alias_line "$BUFFER"
   local spec_name="${REPLY%% *}"
   if [[ -n "$spec_name" && -n "$insertion" ]]; then
     ( "$__NERV_BIN" _record "$spec_name" "$insertion" >/dev/null 2>&1 & ) >/dev/null 2>&1
