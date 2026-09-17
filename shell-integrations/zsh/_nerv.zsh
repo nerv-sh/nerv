@@ -84,15 +84,16 @@ __nerv_reset_state() {
 __nerv_measure_items() {
   local i n=${#__NERV_ITEMS} md=0 me=0 hw=0
   for (( i=1; i<=n; i++ )); do
-    local rest="${__NERV_ITEMS[$i]#*	}"   # display \t desc \t icon
+    local rest="${__NERV_ITEMS[$i]#*	}"   # display \t desc \t icon \t replace
     local d="${rest%%	*}"                  # display
-    local after="${rest#*	}"               # desc \t icon
+    local after="${rest#*	}"               # desc \t icon \t replace
     local desc_full="${after%%	*}"         # desc
     local dw=${(m)#d} ew=${(m)#desc_full}
     (( dw > md )) && md=$dw
     (( ew > me )) && me=$ew
     if (( ! hw )); then
       local ic="${after#*	}"; [[ "$ic" == "$after" ]] && ic=""
+      ic="${ic%%	*}"
       [[ "$ic" == *[^[:ascii:]]* ]] && hw=1
     fi
   done
@@ -213,7 +214,7 @@ __nerv_show_popup() {
   else
     local sel_line="${items[$__NERV_SELECTED]}"
     sel_desc="${sel_line#*	}"; sel_desc="${sel_desc#*	}"
-    sel_desc="${sel_desc%%	*}"  # drop trailing icon field
+    sel_desc="${sel_desc%%	*}"  # drop the icon + replace fields
   fi
 
   # Box dimensions come from __nerv_measure_items (called once when the
@@ -354,9 +355,10 @@ __nerv_show_popup() {
     # Pull icon (4th field). Empty → blank space (slot reserved
     # for alignment). `$` placeholder previously cluttered cd / ls
     # lists where every row would say `$ foo/` with no signal.
-    local trail="${rest#*	}"           # description + tab + icon
-    local row_icon="${trail#*	}"        # everything after description tab
+    local trail="${rest#*	}"           # description \t icon \t replace
+    local row_icon="${trail#*	}"        # icon \t replace
     [[ "$row_icon" == "$trail" ]] && row_icon=""  # no tab → no icon
+    row_icon="${row_icon%%	*}"
     local glyph=" "
     [[ -n "$row_icon" ]] && glyph="$row_icon"
 
@@ -484,6 +486,23 @@ __nerv_insert_selected() {
   local insertion="${sel_line%%	*}"
   [[ -z "$insertion" ]] && return 1
 
+  # A corrected command word (`zpeh li` → `zeph`) rewrites its own span,
+  # not the token under the cursor, and keeps the arguments. It is not a
+  # completion the user built on, so there is no frecency to record.
+  local REPLY; __nerv_row_span "$sel_line"
+  if [[ -n "$REPLY" ]]; then
+    local span_start=${REPLY%,*} span_end=${REPLY#*,}
+    BUFFER="${BUFFER[1,span_start]}${(q)insertion}${BUFFER[span_end+1,-1]}"
+    CURSOR=${#BUFFER}
+    (( ${+POSTDISPLAY} )) && POSTDISPLAY=''
+    printf '%s' "$__NERV_CLEAR_ESC"
+    __NERV_PREV_LBUFFER="$LBUFFER"
+    __nerv_reset_state
+    zle reset-prompt 2>/dev/null
+    zle redisplay 2>/dev/null
+    return 0
+  fi
+
   # Compute new BUFFER + CURSOR from scratch. Avoid LBUFFER/RBUFFER
   # split because some plugins (zsh-autosuggestions) wrap those
   # accessors and the assignments don't always propagate.
@@ -573,6 +592,27 @@ __nerv_insert_selected() {
   return 0
 }
 
+# True when `1` is a word only the shell can resolve — an alias,
+# function, builtin or reserved word. The daemon sees none of these.
+__nerv_shell_word() {
+  (( ${+aliases[$1]} + ${+functions[$1]} + ${+builtins[$1]} \
+     + ${reswords[(Ie)$1]} ))
+}
+
+# True when the shell itself would run `1`: a shell word or a hashed
+# command. A correction row aimed at such a word is always wrong.
+__nerv_shell_knows() {
+  __nerv_shell_word "$1" || (( ${+commands[$1]} ))
+}
+
+# Fifth wire field of a `_complete` row: `start,end`, the character span
+# of the line the row rewrites (a corrected command word), or empty for
+# the usual "replace the token under the cursor". Sets REPLY.
+__nerv_row_span() {
+  local -a fields=("${(@ps:\t:)1}")
+  REPLY="${fields[5]}"
+}
+
 # Expand a leading alias so the engine sees the real command: with
 # `alias g=git` the spec lookup for `g push` finds nothing, so rewrite
 # the line to `git push` before the IPC call. Sets REPLY to the
@@ -627,15 +667,16 @@ __nerv_complete() {
   # finished `git` still runs git. History keeps its priority over the
   # popup's ghost either way (`pwd` → ` pbcopy`).
   #
-  # A bare token naming a shell alias or function is already a finished
-  # command. The daemon can't see either, so its exact-name guard won't
-  # fire and it would keep offering longer names — Enter on a complete
-  # `k` (alias k=kubectl) would swap the line for `kubectl`. Leading
+  # A bare token naming a shell alias, function, builtin or reserved word
+  # is already a finished command. The daemon can't see any of them, so
+  # its exact-name guard won't fire and it would keep offering longer
+  # names or a correction — Enter on a complete `k` (alias k=kubectl)
+  # would swap the line for `kubectl`, and `export` for `expo`. Leading
   # whitespace is stripped first: ` k` (the HIST_IGNORE_SPACE habit) is
   # the same command to the engine, whose tokenizer skips it too.
   local bare="${LBUFFER#"${LBUFFER%%[^[:space:]]*}"}"
   if [[ "$bare" != *[[:space:]]* ]] \
-     && (( ${+aliases[$bare]} + ${+functions[$bare]} )); then
+     && __nerv_shell_word "$bare"; then
     __nerv_hide_popup
     POSTDISPLAY="$hist_ghost"
     return
@@ -680,6 +721,24 @@ __nerv_complete() {
 
   local -a rlines=("${(@f)resp}")
   rlines=("${(@)rlines:#}")
+
+  # A command-word correction comes back alone — the engine returns it as
+  # the whole answer (`complete.rs`, the `registry.lookup` miss branch),
+  # which is why one row is the only shape checked here. Drop it when the
+  # word is one the shell runs itself — alias, function, builtin
+  # (`export` is two edits from the `expo` spec), reserved word or hashed
+  # command — or when the alias expansion above changed the line, since
+  # the span indexes the line that was sent.
+  if (( ${#rlines} == 1 )); then
+    __nerv_row_span "${rlines[1]}"
+    if [[ -n "$REPLY" ]]; then
+      local fix_start=${REPLY%,*} fix_end=${REPLY#*,}
+      if [[ "$send_line" != "$LBUFFER" ]] \
+         || __nerv_shell_knows "${LBUFFER[fix_start+1,fix_end]}"; then
+        rlines=()
+      fi
+    fi
+  fi
 
   if (( ${#rlines} == 0 )); then
     # No spec completions, but a history suggestion may still apply.
@@ -746,6 +805,10 @@ __nerv_set_ghost() {
   local top="${__NERV_ITEMS[1]}"
   local top_ins="${top%%	*}"
   [[ -z "$top_ins" ]] && return
+  # A correction replaces the command word; its text never continues the
+  # token being typed, even when it happens to share a first letter.
+  local REPLY; __nerv_row_span "$top"
+  [[ -n "$REPLY" ]] && return
   # Current word = last whitespace-separated token of LBUFFER.
   local prefix="${LBUFFER##* }"
   [[ -z "$prefix" ]] && return

@@ -7,14 +7,20 @@ complete (`git`) offers nothing — the popup preselects its first row, so
 a leftover row would make Enter run the wrong command. A shell alias
 (`k`) counts as complete too, even though the daemon cannot see it. A
 typo (`dokcer`) reaches the name it meant, which prefix matching never
-could. The history ghost keeps its priority over the popup, and survives
-the daemon being down, since it never needed the engine.
+could. The correction survives the space: `dokcer ps` still offers
+`docker`, and accepting it rewrites only the command word (`sudo` and the
+arguments stay). A word the shell itself runs — a function, a builtin —
+never gets one, and no correction row paints a ghost. The history ghost
+keeps its priority over the popup, and survives the daemon being down,
+since it never needed the engine.
 
 Run from repo root:  python3 scripts/e2e-zle-cmdname.py
 Requires: cargo-built debug binaries, zsh on PATH.
 """
 
 import fcntl
+import json
+import shutil
 import os
 import pty
 import re
@@ -80,6 +86,11 @@ def main():
         f.write("HISTSIZE=1000\nSAVEHIST=1000\n")
         f.write("PS1='%# '\n")
         f.write("alias k=kubectl\n")
+        # One edit from `docker`: a function the daemon cannot see.
+        f.write("dockr() { :; }\n")
+        # Expands to a typo: the engine corrects the *expanded* line, so
+        # its span does not index what the user typed.
+        f.write("alias dk=dokcer\n")
         # An empty PATH keeps zsh's own completion from producing the
         # same word on a Tab that nerv failed to handle. `nerv` itself
         # is reached through the absolute NERV_BIN the init block sets.
@@ -89,8 +100,30 @@ def main():
     env = dict(os.environ)
     env["HOME"] = home
     env["ZDOTDIR"] = zdot
-    env["NERV_SPECS_DIR"] = SPECS
-    env["NERV_FRECENCY_FILE"] = "-"
+    # The fixture specs plus an `expo` stem: the builtin `export` is two
+    # edits from it, which is the real-world false positive the widget
+    # guard exists for.
+    specs = os.path.join(home, "specs")
+    shutil.copytree(SPECS, specs)
+    with open(os.path.join(specs, "expo.json"), "w") as f:
+        json.dump({"name": "expo", "description": "Expo CLI"}, f)
+    # `hash` is a shell builtin (and not a reserved word) one edit from
+    # the `bash` stem — the pair that proves the builtin guard runs.
+    # A name no other case types, so a frecency row naming it can only
+    # come from accepting a correction.
+    with open(os.path.join(specs, "zzzspec.json"), "w") as f:
+        json.dump({"name": "zzzspec", "description": "Correction target"}, f)
+    with open(os.path.join(specs, "bash.json"), "w") as f:
+        json.dump({"name": "bash", "description": "Bourne-again shell"}, f)
+    # The bundle ships a `sudo` spec; without one here, typing `sudo `
+    # would be a (fixture-only) miss.
+    with open(os.path.join(specs, "sudo.json"), "w") as f:
+        json.dump({"name": "sudo", "description": "Run as another user"}, f)
+    env["NERV_SPECS_DIR"] = specs
+    # A real file, not the "-" sentinel: a correction accept must record
+    # nothing, and that is only provable where recording works.
+    frecency = os.path.join(home, "frecency.tsv")
+    env["NERV_FRECENCY_FILE"] = frecency
     # Keep the rows to the fixture specs: a real PATH would make the
     # popup's contents differ by machine.
     env["NERV_PATH_SCAN"] = "0"
@@ -179,6 +212,98 @@ def main():
             failures.append("Tab did not replace the typo with the correction")
         log(f"'dokcer'+Tab: replaced={b'docker' in plain}")
 
+        # The correction survives the space. From the browsing position
+        # (sentinel selected) the first Tab moves onto the row and the
+        # second accepts it.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"dokcer ")
+        text = pump(master, 1.5).decode(errors="replace")
+        if "did you mean" not in text:
+            failures.append("'dokcer ' (after the space) drew no correction")
+        log(f"'dokcer ': corrected={'did you mean' in text}")
+
+        # Accepting keeps the arguments and rewrites only the command
+        # word, including behind a wrapper.
+        for typed, want in ((b"dokcer ps", b"docker ps"), (b"sudo dokcer x", b"sudo docker x")):
+            os.write(master, b"\x15")
+            pump(master, 0.6)
+            os.write(master, typed)
+            text = pump(master, 1.5).decode(errors="replace")
+            os.write(master, b"\t")
+            last = strip_ansi(pump(master, 1.5)).rsplit(b"\r", 1)[-1]
+            ok = "did you mean" in text and want in last and b"dokcer" not in last
+            if not ok:
+                failures.append(f"accepting the correction in {typed!r} gave {last!r}")
+            log(f"{typed.decode()!r}+Tab: {last.decode(errors='replace').strip()!r}")
+
+        # Accepting a correction records no frecency: the user did not
+        # pick a completion, they fixed a typo.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"zzzspce x")
+        pump(master, 1.5)
+        os.write(master, b"\t")
+        last = strip_ansi(pump(master, 1.5)).rsplit(b"\r", 1)[-1]
+        if b"zzzspec x" not in last:
+            failures.append(f"correction accept did not rewrite: {last!r}")
+        log(f"'zzzspce x'+Tab: {last.decode(errors='replace').strip()!r}")
+
+        # A correction row never paints a ghost: `docker` shares the `d`
+        # being typed, so without the guard Right-arrow would append
+        # `ocker` to the argument.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"dokcer d")
+        pump(master, 1.5)
+        os.write(master, b"\x1b[C")  # Right-arrow: accept a ghost if any
+        last = strip_ansi(pump(master, 1.0)).rsplit(b"\r", 1)[-1]
+        # Accepting a ghost repaints the buffer tail, so `ocker` (the
+        # part of `docker` past the typed `d`) shows up here; with the
+        # guard in place Right-arrow at end of line has nothing to accept
+        # and the terminal stays quiet. Verified by mutation: removing
+        # the guard in __nerv_set_ghost makes this line read `...ocker`.
+        if b"ocker" in last:
+            failures.append(f"a correction row painted a ghost: {last!r}")
+        log(f"'dokcer d'+Right: {last.decode(errors='replace').strip()!r}")
+
+        # Words the shell runs itself get no row once they are finished.
+        # The engine does offer one for each (checked directly), so the
+        # silence is the widget's. Only the output after the final
+        # keystroke counts: a partial like `expor` is itself one edit from
+        # `expo`, and that row is fair while the word is unfinished.
+        for typed in (b"dockr x", b"export FOO=1 ", b"export", b"hash x"):
+            line = typed.decode()
+            direct = subprocess.run(
+                [NERV, "_complete", line, str(len(line))],
+                env=env,
+                capture_output=True,
+                text=True,
+            ).stdout
+            if "did you mean" not in direct:
+                failures.append(f"engine drew no correction for {line!r} — check is vacuous")
+            os.write(master, b"\x15")
+            pump(master, 0.6)
+            os.write(master, typed[:-1])
+            pump(master, 1.5)
+            os.write(master, typed[-1:])
+            text = pump(master, 1.5).decode(errors="replace")
+            if "did you mean" in text:
+                failures.append(f"shell word in {line!r} drew a correction")
+            log(f"{line!r}: engine={'did you mean' in direct} popup={'did you mean' in text}")
+
+        # A correction against an alias-expanded line indexes a line the
+        # buffer does not have, so the row must be dropped.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"dk p")
+        pump(master, 1.5)
+        os.write(master, b"s")
+        text = pump(master, 1.5).decode(errors="replace")
+        if "did you mean" in text:
+            failures.append("a correction survived alias expansion ('dk ps')")
+        log(f"alias-expanded 'dk ps': correction={'did you mean' in text}")
+
         # An alias is a finished command the daemon can't see. Without a
         # widget-side guard the popup would offer `kubectl` and Enter
         # would swap the line for it.
@@ -237,13 +362,25 @@ def main():
         failures.append(f"first-token keystrokes were tallied: {recorded!r}")
     log(f"misses.tsv: {recorded or '(empty)'}")
 
+    # Accepting a completion records; accepting a correction must not.
+    rows = ""
+    if os.path.exists(frecency):
+        with open(frecency) as f:
+            rows = f.read().strip()
+    if "docker" not in rows:
+        failures.append(f"no frecency recorded at all — the check is vacuous: {rows!r}")
+    if "zzzspec" in rows:
+        failures.append(f"a correction accept was recorded as frecency: {rows!r}")
+    log(f"frecency.tsv: {rows.splitlines() or '(empty)'}")
+
     if failures:
         for f in failures:
             log(f"FAIL — {f}")
         return 1
     log(
-        "PASS — command-name popup + Tab insert, exact-name and alias "
-        "silence, ghost (with and without a daemon), clean tally"
+        "PASS — command-name popup + Tab insert, correction after the "
+        "space (wrapper-safe, no ghost, shell words skipped), exact-name "
+        "and alias silence, ghost (with and without a daemon), clean tally"
     )
     return 0
 

@@ -30,6 +30,11 @@ pub async fn record_accept(spec: String, insertion: String) {
 /// timeout we yield no suggestions and the caller renders nothing.
 const QUERY_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// Drop rows that replace something other than the current token.
+fn only_current_token(items: Vec<Suggestion>) -> Vec<Suggestion> {
+    items.into_iter().filter(|s| s.replace.is_none()).collect()
+}
+
 /// Query the daemon for completions at `cursor` within `line`.
 ///
 /// `line` is the prompt buffer up to the cursor (zsh `$LBUFFER`
@@ -47,7 +52,32 @@ pub async fn complete(line: &str, cursor: usize, cwd: Option<String>) -> Vec<Sug
         cwd,
     };
     match tokio::time::timeout(QUERY_TIMEOUT, ipc_client::query(&req)).await {
-        Ok(Ok(Response::Suggestions { items })) => items,
+        // A row that rewrites another part of the line (a corrected
+        // command word) has no meaning here: the PTY overlay only ever
+        // completes the token under the cursor.
+        Ok(Ok(Response::Suggestions { items })) => only_current_token(items),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nerv_engine::ReplaceSpan;
+
+    /// The overlay splices every row into the current token, so a
+    /// command-word correction would land as `zpeh zeph`.
+    #[test]
+    fn rows_that_replace_another_span_are_dropped() {
+        let plain = Suggestion {
+            insertion: "checkout".into(),
+            ..Default::default()
+        };
+        let fix = Suggestion {
+            insertion: "zeph".into(),
+            replace: Some(ReplaceSpan { start: 0, end: 4 }),
+            ..Default::default()
+        };
+        assert_eq!(only_current_token(vec![fix, plain.clone()]), vec![plain]);
     }
 }
