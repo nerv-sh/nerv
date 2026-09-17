@@ -592,12 +592,17 @@ __nerv_insert_selected() {
   return 0
 }
 
-# True when the shell itself would run `1` — an alias, function, builtin,
-# reserved word or hashed command. The daemon sees none of these, so a
-# correction row aimed at such a word is always wrong.
-__nerv_shell_knows() {
+# True when `1` is a word only the shell can resolve — an alias,
+# function, builtin or reserved word. The daemon sees none of these.
+__nerv_shell_word() {
   (( ${+aliases[$1]} + ${+functions[$1]} + ${+builtins[$1]} \
-     + ${+commands[$1]} + ${reswords[(Ie)$1]} ))
+     + ${reswords[(Ie)$1]} ))
+}
+
+# True when the shell itself would run `1`: a shell word or a hashed
+# command. A correction row aimed at such a word is always wrong.
+__nerv_shell_knows() {
+  __nerv_shell_word "$1" || (( ${+commands[$1]} ))
 }
 
 # Fifth wire field of a `_complete` row: `start,end`, the character span
@@ -671,8 +676,7 @@ __nerv_complete() {
   # the same command to the engine, whose tokenizer skips it too.
   local bare="${LBUFFER#"${LBUFFER%%[^[:space:]]*}"}"
   if [[ "$bare" != *[[:space:]]* ]] \
-     && (( ${+aliases[$bare]} + ${+functions[$bare]} + ${+builtins[$bare]} \
-           + ${reswords[(Ie)$bare]} )); then
+     && __nerv_shell_word "$bare"; then
     __nerv_hide_popup
     POSTDISPLAY="$hist_ghost"
     return

@@ -976,24 +976,25 @@ fn command_name_suggestion(name: &str, description: &str) -> Suggestion {
 fn command_word_correction(
     word: &str,
     names: &CommandNames,
-    span: ReplaceSpan,
+    span: impl FnOnce() -> ReplaceSpan,
 ) -> Option<Suggestion> {
     if word.contains('/') || names.is_complete_name(word) {
         return None;
     }
     let name = did_you_mean(word, names)?;
     Some(Suggestion {
-        replace: Some(span),
+        replace: Some(span()),
         ..command_name_suggestion(name, "did you mean")
     })
 }
 
 /// `bytes` of `line` as a character range.
 fn char_span(line: &str, bytes: std::ops::Range<usize>) -> ReplaceSpan {
-    let chars = |end: usize| line[..end].chars().count() as u32;
+    let start = line[..bytes.start].chars().count();
+    let end = start + line[bytes].chars().count();
     ReplaceSpan {
-        start: chars(bytes.start),
-        end: chars(bytes.end),
+        start: start as u32,
+        end: end as u32,
     }
 }
 
@@ -1115,13 +1116,13 @@ pub fn complete_in(
         // Not while a load for it is still running: a real binary whose
         // `--help` is being derived is on no list yet, and guessing now
         // would hide the spec that lands a keystroke later.
-        let word = seg_start + wrap_start + tokens[0].span.start;
-        let span = char_span(full_line, word..word + binary.len());
         let settled = !registry.is_loading(binary);
-        if let Some(row) = names
-            .filter(|_| settled)
-            .and_then(|build| command_word_correction(binary, &build(), span))
-        {
+        let word = seg_start + wrap_start + tokens[0].span.start;
+        if let Some(row) = names.filter(|_| settled).and_then(|build| {
+            command_word_correction(binary, &build(), || {
+                char_span(full_line, word..word + binary.len())
+            })
+        }) {
             return CompleteResult {
                 items: vec![row],
                 reason: None,
