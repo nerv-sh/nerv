@@ -1616,14 +1616,24 @@ fn wire_field(s: &str) -> String {
 }
 
 fn print_suggestion(s: &Suggestion) {
-    // Wire format: insertion \t display \t description \t icon
-    // Icon is empty string when None. Widget renders icon as a
-    // prefix glyph to the display column.
+    println!("{}", wire_line(s));
+}
+
+/// One `_complete` row: insertion \t display \t description \t icon \t
+/// replace. Icon is empty when None (the widget renders it as a prefix
+/// glyph). Replace is `start,end` — the character span of the line the
+/// row rewrites (a corrected command word) — and empty for the usual
+/// "replace the token under the cursor".
+fn wire_line(s: &Suggestion) -> String {
     let insertion = wire_field(&s.insertion);
     let display = wire_field(&s.display);
     let desc = wire_desc(s.description.as_deref().unwrap_or(""));
     let icon = wire_field(s.icon.as_deref().unwrap_or(""));
-    println!("{insertion}\t{display}\t{desc}\t{icon}");
+    let replace = s
+        .replace
+        .map(|r| format!("{},{}", r.start, r.end))
+        .unwrap_or_default();
+    format!("{insertion}\t{display}\t{desc}\t{icon}\t{replace}")
 }
 
 fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
@@ -1639,6 +1649,29 @@ fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The widget splits rows on tabs, so the field order is a contract:
+    /// a plain row keeps its first four fields byte-for-byte and gains an
+    /// empty fifth; a correction row names its span.
+    #[test]
+    fn wire_line_carries_the_replace_span_as_a_fifth_field() {
+        let plain = Suggestion {
+            insertion: "checkout".into(),
+            display: "checkout".into(),
+            description: Some("Switch branches".into()),
+            ..Default::default()
+        };
+        assert_eq!(wire_line(&plain), "checkout\tcheckout\tSwitch branches\t\t");
+
+        let fix = Suggestion {
+            insertion: "zeph".into(),
+            display: "zeph".into(),
+            description: Some("did you mean".into()),
+            replace: Some(nerv_engine::ReplaceSpan { start: 5, end: 9 }),
+            ..Default::default()
+        };
+        assert_eq!(wire_line(&fix), "zeph\tzeph\tdid you mean\t\t5,9");
+    }
 
     #[test]
     fn apply_init_block_installs_then_noops_then_updates() {

@@ -84,7 +84,7 @@ schema version, and tells you exactly what's wrong.
  │   every keystroke:              ├───────►│   specs ship in the package     │
  │   nerv _complete "git ch" 6     │        │   (700+ specs, ~10 MB gzipped)  │
  │                                 │◄───────┤ generators — git branch,        │
- │ renders ghost + popup           │ 4-field│   npm scripts, … (cached, 800ms │
+ │ renders ghost + popup           │ 5-field│   npm scripts, … (cached, 800ms │
  │ (raw ANSI, no alternate screen) │  lines │   hard cap, off keystroke path) │
  └─────────────────────────────────┘        │ frecency ranking                │
                                             └─────────────────────────────────┘
