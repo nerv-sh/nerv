@@ -98,6 +98,10 @@ pub struct SpecRegistry {
     /// entirely — nothing is ever spawned. Always the last entry of
     /// `dirs` when set, so a derived file is read back like any other.
     derive_into: Option<PathBuf>,
+    /// The last root spliced with one of its external subtrees, kept so
+    /// the splice is not redone on every keystroke of the same command.
+    /// One slot: a prompt is one command line at a time.
+    spliced: Arc<RwLock<Option<SplicedRoot>>>,
 }
 
 impl std::fmt::Debug for SpecRegistry {
@@ -120,8 +124,23 @@ impl Default for SpecRegistry {
             pending_invalidations: None,
             _watcher: None,
             derive_into: None,
+            spliced: Arc::new(RwLock::new(None)),
         }
     }
+}
+
+/// Memo for [`SpecRegistry::with_external`]: the two inputs that produced
+/// a spliced root, identified by pointer.
+///
+/// Pointer identity is the whole freshness rule. Both halves come out of
+/// the same cache that already handles mtime, staleness and eviction, so
+/// a reloaded file arrives as a *different* `Arc` and the memo misses on
+/// its own — no second copy of that logic to keep in step.
+#[derive(Debug)]
+struct SplicedRoot {
+    root: Arc<Spec>,
+    subtree: Arc<Spec>,
+    spliced: Arc<Spec>,
 }
 
 #[derive(Debug)]
@@ -189,6 +208,7 @@ impl SpecRegistry {
             pending_invalidations: Some(pending),
             _watcher: watcher,
             derive_into,
+            spliced: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -335,6 +355,87 @@ impl SpecRegistry {
         )
     }
 
+    /// Load one external subtree of `stem` — the payload behind a stub
+    /// that `build-specs` moved to `<stem>/<sub>.json[.gz]`.
+    ///
+    /// Goes through [`lookup`](Self::lookup) with a path-shaped key, so
+    /// the subtree gets the same cache, mtime check, LRU tick, byte
+    /// budget and in-flight dedup as any other spec, and the composite
+    /// key resolves to the nested file without a second resolver.
+    ///
+    /// The name is checked because the stub it comes from is data: a
+    /// spec dropped into the overlay dir could name a subcommand
+    /// `../../../etc/passwd`, and a stem-shaped key is the only thing
+    /// `resolve_spec_file` is allowed to join onto a layer dir.
+    pub fn lookup_external(&self, stem: &str, sub: &str) -> Option<Arc<Spec>> {
+        if !is_plain_stem(stem) || !is_plain_stem(sub) {
+            return None;
+        }
+        self.lookup(&format!("{stem}/{sub}"))
+    }
+
+    /// Return `root` with the external subtree this command line
+    /// descends into spliced back in, or `root` itself when the line
+    /// needs none.
+    ///
+    /// The result is structurally what the unsplit spec was, so nothing
+    /// below this point — the parser, the walk, the emitters — can tell
+    /// that the file was ever split.
+    ///
+    /// `words` are the tokens after the command word. The first one that
+    /// names an external stub wins, rather than only `words[0]`: an
+    /// option can sit in front of the subcommand (`aws --region x iam`),
+    /// and a stub name matching some option's *value* costs one file
+    /// read of a spec that then goes unused.
+    pub fn with_external<'a>(
+        &self,
+        binary: &str,
+        root: Arc<Spec>,
+        words: impl Iterator<Item = &'a str>,
+    ) -> Arc<Spec> {
+        if !root.subcommands.iter().any(|s| s.external) {
+            return root;
+        }
+        let Some(idx) = words
+            .filter_map(|w| {
+                root.subcommands
+                    .iter()
+                    .position(|s| s.external && (s.name == w || s.aliases.iter().any(|a| a == w)))
+            })
+            .next()
+        else {
+            return root;
+        };
+        let Some(subtree) = self.lookup_external(binary, &root.subcommands[idx].name) else {
+            // Still parsing, or the file is gone. The stub completes as
+            // an empty subcommand for this keystroke and the next one
+            // gets the payload — the same deal every cold spec gets.
+            return root;
+        };
+        if let Ok(memo) = self.spliced.read() {
+            if let Some(m) = memo.as_ref() {
+                if Arc::ptr_eq(&m.root, &root) && Arc::ptr_eq(&m.subtree, &subtree) {
+                    return Arc::clone(&m.spliced);
+                }
+            }
+        }
+        // Cloning the root copies the stubs and the subcommands small
+        // enough to have stayed inline (`aws`: 0.39 MB), and cloning the
+        // subtree copies the payload (up to 6.85 MB). Both are far too
+        // slow to redo per keystroke, which is what the memo is for.
+        let mut whole = (*root).clone();
+        whole.subcommands[idx] = (*subtree).clone();
+        let spliced = Arc::new(whole);
+        if let Ok(mut memo) = self.spliced.write() {
+            *memo = Some(SplicedRoot {
+                root,
+                subtree,
+                spliced: Arc::clone(&spliced),
+            });
+        }
+        spliced
+    }
+
     /// Whether a background load (parse, or `--help` derivation) for
     /// `name` is still running. A `lookup` that returned `None` while
     /// this is true is not a settled miss — the answer lands on a later
@@ -422,6 +523,10 @@ impl SpecRegistry {
         derive_into: Option<&Path>,
         name: &str,
     ) -> (Option<std::time::SystemTime>, Option<Arc<Spec>>, usize) {
+        // `<stem>/<sub>` is an external subtree, not a command: there is
+        // nothing to run `--help` on, and spawning `aws/iam` would be
+        // absurd even if there were.
+        let derive_into = derive_into.filter(|_| is_plain_stem(name));
         if let Some(hit) = Self::resolve_spec_file(dirs, name) {
             // A file that exists but fails to parse is a negative entry
             // for its stem, not an invitation to overwrite it with a
@@ -512,7 +617,11 @@ impl SpecRegistry {
     pub fn len(&self) -> usize {
         self.cache
             .read()
-            .map(|c| c.values().filter(|v| v.spec.is_some()).count())
+            .map(|c| {
+                c.iter()
+                    .filter(|(k, v)| v.spec.is_some() && is_plain_stem(k))
+                    .count()
+            })
             .unwrap_or(0)
     }
 
@@ -530,14 +639,19 @@ impl SpecRegistry {
         &self.dirs
     }
 
-    /// Names currently in the in-memory positive cache. Does not
+    /// Command names currently in the in-memory positive cache. Does not
     /// reflect disk contents — see [`Self::dir_listing`] for that.
+    ///
+    /// External subtrees (`<stem>/<sub>` keys) are not command names and
+    /// are left out: they would show up as commands in `spec list` and,
+    /// through `CommandNames`, as completions of the first token —
+    /// `nerv _complete "ia"` would offer `iam`, which is no program.
     pub fn cached_names(&self) -> Vec<String> {
         self.cache
             .read()
             .map(|c| {
                 c.iter()
-                    .filter(|(_, v)| v.spec.is_some())
+                    .filter(|(k, v)| v.spec.is_some() && is_plain_stem(k))
                     .map(|(k, _)| k.clone())
                     .collect()
             })
@@ -590,6 +704,20 @@ impl SpecRegistry {
         }
         origin
     }
+}
+
+/// Is `name` a bare stem — something that can be joined onto a layer dir
+/// as one path component?
+///
+/// Guards the composite `<stem>/<sub>` key: everything else in the
+/// registry treats a key as a file name, so a key carrying a separator
+/// or a dot-segment would escape the spec dirs.
+fn is_plain_stem(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\'])
+        && !name.contains('\0')
 }
 
 /// Every spec file (`<stem>.json` / `<stem>.json.gz`) under `dirs`, in dir
@@ -1144,6 +1272,10 @@ pub fn complete_in(
             reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
         };
     };
+    // An oversized spec keeps its big subcommands in their own files;
+    // splice back the one this line descends into so everything below
+    // sees the tree the unsplit spec had (spec-conversion-policy §6.3).
+    let spec = registry.with_external(binary, spec, tokens.iter().skip(1).map(|t| t.text.as_str()));
     let spec_ref: &Spec = spec.as_ref();
 
     let result = parse_arguments(spec_ref, &tokens, cursor);
@@ -5404,6 +5536,202 @@ region = us-east-1
         assert!(extract_json_candidates("not json at all").is_none());
         // valid JSON, but no array we can find
         assert!(extract_json_candidates(r#"{"foo":"bar"}"#).is_none());
+    }
+
+    /// Insertions of a completion result, in order.
+    fn insertions(r: &CompleteResult) -> Vec<String> {
+        r.items.iter().map(|s| s.insertion.clone()).collect()
+    }
+
+    /// Complete `line` against a disk-backed registry, giving the
+    /// background parse of the root and of any subtree time to land. A
+    /// cold file answers the first call with nothing by design, so a
+    /// single call would test the populator's timing.
+    fn wait_for(registry: &SpecRegistry, line: &str) -> Vec<String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let got = insertions(&complete(line, line.len(), registry));
+            if !got.is_empty() || std::time::Instant::now() >= deadline {
+                return got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// A spec split into subtree files must complete exactly like the
+    /// same spec in one piece — that is the whole contract of the split,
+    /// and the only way to see it is to run both through `complete`.
+    #[test]
+    fn a_split_spec_completes_like_the_whole_one() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-split-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("cloud")).unwrap();
+
+        // Root with a stub, plus the payload in its own file.
+        fs::write(
+            tmp.join("cloud.json"),
+            r#"{"name":"cloud","subcommands":[
+                 {"name":"iam","description":"identities","external":true},
+                 {"name":"tiny","description":"inline"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("cloud/iam.json"),
+            r#"{"name":"iam","description":"identities","subcommands":[
+                 {"name":"create-user"},{"name":"delete-user"}]}"#,
+        )
+        .unwrap();
+        let split = SpecRegistry::at_dir(&tmp);
+
+        // The same spec, unsplit.
+        let whole = SpecRegistry::empty();
+        whole.insert(
+            crate::spec_loader::parse_spec_str(
+                r#"{"name":"cloud","subcommands":[
+                     {"name":"iam","description":"identities","subcommands":[
+                       {"name":"create-user"},{"name":"delete-user"}]},
+                     {"name":"tiny","description":"inline"}]}"#,
+                std::path::Path::new("<test>"),
+            )
+            .unwrap(),
+        );
+
+        for line in ["cloud ", "cloud ia", "cloud iam ", "cloud iam create"] {
+            let want = insertions(&complete(line, line.len(), &whole));
+            let got = wait_for(&split, line);
+            assert_eq!(got, want, "`{line}` must complete the same either way");
+        }
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The subtree file is not a command. It must not reach the name
+    /// list, `spec list`, or the cached-name count.
+    #[test]
+    fn an_external_subtree_is_not_a_command_name() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-split-names-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("cloud")).unwrap();
+        fs::write(
+            tmp.join("cloud.json"),
+            r#"{"name":"cloud","subcommands":[{"name":"iam","external":true}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("cloud/iam.json"),
+            r#"{"name":"iam","subcommands":[{"name":"create-user"}]}"#,
+        )
+        .unwrap();
+        let r = SpecRegistry::at_dir(&tmp);
+        wait_for(&r, "cloud iam ");
+
+        assert!(
+            r.lookup_external("cloud", "iam").is_some(),
+            "the subtree must be loadable by its own accessor"
+        );
+        assert!(
+            !r.cached_names()
+                .iter()
+                .any(|n| n.contains('/') || n == "iam")
+        );
+        assert_eq!(r.dir_listing(), vec!["cloud".to_string()]);
+        assert_eq!(r.len(), 1, "one command is cached, not two");
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The splice memo is keyed by pointer identity, not by name. Two
+    /// commands sharing the registry must not see each other's spliced
+    /// root, and neither must two subtrees of the same command.
+    #[test]
+    fn the_splice_memo_does_not_serve_the_wrong_tree() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-split-memo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("cloud")).unwrap();
+        fs::create_dir_all(tmp.join("edge")).unwrap();
+        fs::write(
+            tmp.join("cloud.json"),
+            r#"{"name":"cloud","subcommands":[
+                 {"name":"iam","external":true},{"name":"s3","external":true}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("cloud/iam.json"),
+            r#"{"name":"iam","subcommands":[{"name":"create-user"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("cloud/s3.json"),
+            r#"{"name":"s3","subcommands":[{"name":"ls"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("edge.json"),
+            r#"{"name":"edge","subcommands":[{"name":"iam","external":true}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.join("edge/iam.json"),
+            r#"{"name":"iam","subcommands":[{"name":"rotate-key"}]}"#,
+        )
+        .unwrap();
+        let r = SpecRegistry::at_dir(&tmp);
+
+        // Alternate: each must answer with its own subtree every time,
+        // not with whatever was spliced last.
+        for _ in 0..3 {
+            assert_eq!(wait_for(&r, "cloud iam "), vec!["create-user".to_string()]);
+            assert_eq!(wait_for(&r, "cloud s3 "), vec!["ls".to_string()]);
+            assert_eq!(wait_for(&r, "edge iam "), vec!["rotate-key".to_string()]);
+        }
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A stub name is data — it comes out of a spec file, which a user
+    /// can write. It must never be joined onto a layer dir as a path.
+    ///
+    /// Asserted over a window, not on one call: a cold lookup answers
+    /// `None` while its background parse runs, so a single call would
+    /// pass with the guard removed (it did — mutation, 2026-09-18). The
+    /// positive control in the same window proves the window is long
+    /// enough for a load to land.
+    #[test]
+    fn an_external_name_cannot_escape_the_spec_dir() {
+        use std::fs;
+        use std::time::{Duration, Instant};
+        let tmp = std::env::temp_dir().join(format!("nerv-split-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("cloud")).unwrap();
+        // The escape target: one level up from the subtree dir.
+        fs::write(tmp.join("git.json"), r#"{"name":"git"}"#).unwrap();
+        fs::write(tmp.join("cloud.json"), r#"{"name":"cloud"}"#).unwrap();
+        fs::write(tmp.join("cloud/iam.json"), r#"{"name":"iam"}"#).unwrap();
+        let r = SpecRegistry::at_dir(&tmp);
+
+        let window = Duration::from_millis(500);
+        let deadline = Instant::now() + window;
+        let mut control = false;
+        while Instant::now() < deadline {
+            control |= r.lookup_external("cloud", "iam").is_some();
+            for bad in ["../git", "a/b", "..", ".", ""] {
+                assert!(
+                    r.lookup_external("cloud", bad).is_none(),
+                    "`{bad}` resolved — a stub name reached the filesystem as a path"
+                );
+                assert!(r.lookup_external(bad, "iam").is_none(), "`{bad}` as a stem");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            control,
+            "the window must be long enough for a real subtree to load"
+        );
+
+        fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

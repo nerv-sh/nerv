@@ -151,6 +151,19 @@ pub struct Subcommand {
     /// CLIs (`docker`, `kubectl`).
     #[serde(default, rename = "flagsArePosixNoncompliant")]
     pub flags_are_posix_noncompliant: bool,
+    /// This node is a **stub**: its options, args and nested
+    /// subcommands live in `<stem>/<name>.json[.gz]` beside the root
+    /// spec file, and the registry splices them in when the line
+    /// actually descends into it.
+    ///
+    /// Set by `build-specs` for specs too large to parse on one
+    /// keystroke (`aws` is 117 MB of JSON and 1.3 s of parsing, of which
+    /// a line like `aws s3 ls` needs 90 KB). Never written by hand and
+    /// never true in a spec a user drops into the overlay dir — a stub
+    /// with no file behind it completes as an empty subcommand, which is
+    /// what the line already looked like.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub external: bool,
 }
 
 /// A long / short option flag, possibly with one or more attached

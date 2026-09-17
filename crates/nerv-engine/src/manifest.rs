@@ -16,9 +16,15 @@ use crate::spec::Manifest;
 
 /// Schema version this build of nerv understands. Bump when the spec JSON
 /// layout changes incompatibly; `build-specs` stamps the same value into
-/// `manifest.json` so old caches are rejected. Matches the `v2` documented
+/// `manifest.json` so old caches are rejected. Matches the `v3` documented
 /// in spec.rs / spec-conversion-policy.md.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+///
+/// v3 (2026-09-18): an oversized spec is split — its large top-level
+/// subcommands live in `<stem>/<name>.json[.gz]` and the root carries
+/// `external: true` stubs for them. A v2 daemon reading a v3 cache would
+/// complete `aws iam ` as an empty subcommand instead of failing, which
+/// is exactly the kind of silent wrong answer the gate exists to stop.
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 3;
 
 /// File name of the manifest inside the specs dir.
 pub const MANIFEST_NAME: &str = "manifest.json";
