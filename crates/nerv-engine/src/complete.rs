@@ -1284,14 +1284,69 @@ pub fn complete_in(
     // "Immediately execute" sentinel (widget-side) plus any longer
     // matches (`status-v2`) remain. Empty prefix means the user is
     // browsing a fresh token (`git `), so keep everything.
-    if !prefix.is_empty() {
-        items.retain(|s| s.insertion != prefix);
-    }
+    items = settle_typed_token(items, &prefix, mode);
 
     CompleteResult {
         items,
         reason: None,
     }
+}
+
+/// Case-insensitive `starts_with`, matching how fuzzy matching itself
+/// compares (`fuzzy_subsequence_match`): the rows a query pulled in may
+/// differ from it only in case.
+///
+/// Compared character by character, never by byte offset: a row is only
+/// required to *contain* the token's letters, so `d한ev` reaches here
+/// against `dev` and a `name[..token.len()]` slice would land mid-glyph
+/// and panic (CLAUDE.md §4, UTF-8).
+fn extends_token(name: &str, token: &str) -> bool {
+    let mut name = name.chars();
+    token
+        .chars()
+        .all(|t| name.next().is_some_and(|c| c.eq_ignore_ascii_case(&t)))
+}
+
+/// What the row list means once the token is taken into account.
+///
+/// Two rules, both keyed on the token the user typed:
+///
+/// 1. A row whose insertion *is* the token adds nothing, so it goes —
+///    the user who typed `git status` in full should see the sentinel,
+///    not `status` again. When such a row existed, the token is settled,
+///    and rows that merely contain its letters go with it: under fuzzy
+///    matching `pnpm dev` also pulls in `predev` (p-r-e-d-e-v), and with
+///    `dev` dropped that leftover would be the preselected row, so Enter
+///    would insert `predev` instead of running the command. Rows that
+///    *extend* the token (`dev:web`) are real next steps and stay.
+/// 2. Under fuzzy matching an extending row outranks one that only
+///    contains the letters, whatever the alphabet says. Stable, so each
+///    group keeps the order its emitter chose.
+///
+/// Both rules stand aside for rows a generator ranked itself (zoxide):
+/// there the insertion is a path and the token an abbreviation of it, so
+/// "extends the token" says nothing, and reordering would undo the
+/// generator's own frecency. An empty token means a fresh word
+/// (`git ⎵`), where every row is still a candidate.
+fn settle_typed_token(mut items: Vec<Suggestion>, token: &str, mode: MatchMode) -> Vec<Suggestion> {
+    if token.is_empty() || items.iter().any(|s| s.source_ranked) {
+        return items;
+    }
+    let typed_in_full = items
+        .iter()
+        .any(|s| s.insertion.eq_ignore_ascii_case(token));
+    items.retain(|s| !s.insertion.eq_ignore_ascii_case(token));
+    if typed_in_full {
+        items.retain(|s| extends_token(&s.insertion, token));
+    }
+    if mode == MatchMode::Fuzzy {
+        let (mut extending, contains): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|s| extends_token(&s.insertion, token));
+        extending.extend(contains);
+        items = extending;
+    }
+    items
 }
 
 /// True when the cursor (end of `text`) sits inside an unterminated
@@ -5823,6 +5878,132 @@ region = us-east-1
         assert!(r.is_loading("zpeh"));
         assert!(out.items.is_empty(), "{:?}", out.items);
         assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), Some("zpeh"));
+    }
+
+    fn fuzzy_spec_dir(name: &str, subcommands: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let subs: Vec<String> = subcommands
+            .iter()
+            .map(|s| format!("{{\"name\": \"{s}\"}}"))
+            .collect();
+        std::fs::write(
+            dir.path().join(format!("{name}.json")),
+            format!(
+                "{{\"name\": \"{name}\", \"subcommands\": [{}]}}",
+                subs.join(", ")
+            ),
+        )
+        .expect("write spec");
+        dir
+    }
+
+    fn fuzzy_rows(dir: &tempfile::TempDir, line: &str) -> Vec<String> {
+        let r = SpecRegistry::at_dir(dir.path());
+        complete_in(line, line.len(), &r, None, MatchMode::Fuzzy, None)
+            .items
+            .into_iter()
+            .map(|s| s.insertion)
+            .collect()
+    }
+
+    /// Fuzzy matching lets a fully typed name pull in rows that merely
+    /// contain its letters (`dev` → `predev`). The typed name itself is
+    /// dropped as a no-op, so that leftover would be the preselected row
+    /// and Enter would insert it instead of running the command.
+    #[test]
+    fn a_fully_typed_token_drops_rows_that_only_contain_its_letters() {
+        let dir = fuzzy_spec_dir("pn", &["dev", "predev"]);
+        assert!(fuzzy_rows(&dir, "pn dev").is_empty());
+    }
+
+    /// Names that continue what was typed are real next steps, so an
+    /// exact hit must not take them down with the noise.
+    #[test]
+    fn a_fully_typed_token_keeps_rows_that_extend_it() {
+        let dir = fuzzy_spec_dir("pn", &["dev", "dev:web", "predev"]);
+        assert_eq!(fuzzy_rows(&dir, "pn dev"), ["dev:web"]);
+    }
+
+    /// Without an exact hit the subsequence match is the whole point of
+    /// fuzzy mode and stays.
+    #[test]
+    fn an_unfinished_token_keeps_its_subsequence_matches() {
+        let dir = fuzzy_spec_dir("pn", &["dev", "predev"]);
+        assert_eq!(fuzzy_rows(&dir, "pn pdv"), ["predev"]);
+    }
+
+    /// A row that continues the token beats one that merely contains its
+    /// letters. `adev` sorts first alphabetically, so only the ranking
+    /// rule can put `devx` on top.
+    #[test]
+    fn rows_that_extend_the_token_rank_above_subsequence_matches() {
+        let dir = fuzzy_spec_dir("pn", &["adev", "devx"]);
+        assert_eq!(fuzzy_rows(&dir, "pn dev"), ["devx", "adev"]);
+    }
+
+    /// The rules key on the token, not on the mode: a spec that asked
+    /// for substring matching (`filterStrategy`) pulls in the same noise
+    /// under the default prefix mode, and Enter would insert it.
+    #[test]
+    fn a_fully_typed_token_settles_a_substring_arg_under_prefix_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("pn.json"),
+            r#"{"name": "pn", "args": [{"name": "script",
+               "filterStrategy": "substring",
+               "suggestions": ["dev", "predev", "dev:web"]}]}"#,
+        )
+        .expect("write spec");
+        let r = SpecRegistry::at_dir(dir.path());
+        let rows = |line: &str| -> Vec<String> {
+            complete_in(line, line.len(), &r, None, MatchMode::Prefix, None)
+                .items
+                .into_iter()
+                .map(|s| s.insertion)
+                .collect()
+        };
+        // Unfinished: substring keeps its promise.
+        assert_eq!(rows("pn dev:"), ["dev:web"]);
+        assert!(rows("pn red").contains(&"predev".to_string()));
+        // Finished: only what continues the token survives.
+        assert_eq!(rows("pn dev"), ["dev:web"]);
+    }
+
+    /// Fuzzy matching is case-insensitive, so the token it settles has
+    /// to be too — a `Dev` script typed as `dev` is finished.
+    #[test]
+    fn settling_the_token_ignores_case_like_the_matcher_does() {
+        let dir = fuzzy_spec_dir("pn", &["Dev", "predev"]);
+        assert!(fuzzy_rows(&dir, "pn dev").is_empty());
+    }
+
+    /// A row only has to contain the token's letters to get here, so the
+    /// comparison must not index into it by byte — `d한ev` would slice
+    /// mid-glyph and take the daemon down with it.
+    #[test]
+    fn settling_the_token_survives_multibyte_rows() {
+        assert!(!extends_token("d한ev", "dev"));
+        assert!(extends_token("dev한", "dev"));
+        assert!(extends_token("Dev:web", "dev"));
+        assert!(!extends_token("de", "dev"));
+
+        let dir = fuzzy_spec_dir("pn", &["d한ev", "dev"]);
+        assert!(fuzzy_rows(&dir, "pn dev").is_empty());
+    }
+
+    /// zoxide ranks its own rows and its insertions are paths, not
+    /// continuations of the abbreviation typed — both rules stand aside.
+    #[test]
+    fn rows_a_generator_ranked_itself_are_left_alone() {
+        let row = |insertion: &str| Suggestion {
+            insertion: insertion.into(),
+            display: insertion.into(),
+            source_ranked: true,
+            ..Default::default()
+        };
+        let items = vec![row("dev"), row("/home/me/dev"), row("/srv/predev")];
+        let settled = settle_typed_token(items.clone(), "dev", MatchMode::Fuzzy);
+        assert_eq!(settled, items);
     }
 
     /// Nothing close enough → the plain "no spec" empty, still tallied.
