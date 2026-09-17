@@ -12,7 +12,7 @@
 //! M0-1 PoC: just an echo server. Real matching arrives in M1 0–6주차.
 
 use anyhow::Context;
-use nerv_engine::complete::{CommandNames, is_command_name_position};
+use nerv_engine::complete::CommandNames;
 use nerv_engine::misses::MissCounter;
 use nerv_engine::{
     Config, FrecencyStore, MatchMode, Request, Response, SpecRegistry, Suggestion, complete_in,
@@ -223,14 +223,14 @@ async fn handle_connection(
                     tokio::task::spawn_blocking(move || {
                         // Building the name list means stat-ing every
                         // spec layer, cloning ~700 stems and folding the
-                        // frecency table. Only the first token can use
-                        // it, and that is a small minority of keystrokes.
-                        let cmd_names = is_command_name_position(&line, cursor)
-                            .then(|| names.names(&registry, &frecency));
+                        // frecency table. The engine calls this only for
+                        // the first token or a command word with no spec
+                        // — a small minority of keystrokes.
+                        let cmd_names = || names.names(&registry, &frecency);
                         let resp = engine_complete(
                             &registry,
                             &frecency,
-                            cmd_names.as_ref(),
+                            Some(&cmd_names),
                             &line,
                             cursor,
                             cwd.as_deref(),
@@ -505,7 +505,7 @@ const MAX_SUGGESTIONS: usize = 500;
 fn engine_complete(
     registry: &SpecRegistry,
     frecency: &FrecencyStore,
-    names: Option<&CommandNames>,
+    names: Option<&dyn Fn() -> CommandNames>,
     line: &str,
     cursor: usize,
     cwd: Option<&str>,
@@ -846,6 +846,7 @@ mod tests {
         // re-ranking them here with nerv frecency undid that.
         let zoxide = |name: &str| Suggestion {
             source_ranked: true,
+            replace: None,
             ..sugg(name)
         };
         let frecency = FrecencyStore::empty();

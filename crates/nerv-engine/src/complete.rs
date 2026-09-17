@@ -12,7 +12,7 @@
 //! Refs: PLAN.md §10 M0-6, docs/first-5-min.md §1-5
 
 use crate::config::MatchMode;
-use crate::ipc::{Suggestion, SuggestionKind};
+use crate::ipc::{ReplaceSpan, Suggestion, SuggestionKind};
 use crate::spec_loader::{SpecLoadError, load_spec_file};
 use crate::spec_parser::{
     Annotation, CursorContext, Spec, Subcommand, TokenKind, find_subcommand, parse_arguments,
@@ -821,36 +821,6 @@ pub fn executables_in(dirs: &[PathBuf]) -> Vec<String> {
     names
 }
 
-/// True when the cursor sits on the *first* token of the command under
-/// it — i.e. the user is still typing a command name and
-/// [`complete_command_name`] is what will answer.
-///
-/// Exists so a caller can skip building the (nontrivial) name list for
-/// the overwhelming majority of keystrokes, which land after a space.
-/// It mirrors the prelude of [`complete_in`] step for step — quote
-/// check, the segment under the cursor (`git co && ze` is a first token
-/// again), then the wrapper skip, which turns `sudo doc` into one. Any
-/// step left out here is a keystroke where the engine would answer and
-/// the caller never asks.
-pub fn is_command_name_position(line: &str, cursor: usize) -> bool {
-    let cursor = clamp_cursor_to_char_boundary(line, cursor);
-    let head = &line[..cursor];
-    if cursor_in_open_quote(head) {
-        return false;
-    }
-    let seg_start = command_segment_start(head).min(cursor);
-    let head = &head[seg_start..];
-    let tokens = tokenize(head);
-    let wrap_start = wrapped_command_start(&tokens).min(head.len());
-    let head = &head[wrap_start..];
-    let tokens = if wrap_start > 0 {
-        tokenize(head)
-    } else {
-        tokens
-    };
-    tokens.len() == 1 && current_prefix(head) == tokens[0].text
-}
-
 /// Rows for the first token of the line. Pure: no filesystem, no spec
 /// parsing — everything comes from `names`.
 ///
@@ -995,6 +965,35 @@ fn command_name_suggestion(name: &str, description: &str) -> Suggestion {
         priority: None,
         icon: None,
         source_ranked: true,
+        replace: None,
+    }
+}
+
+/// The correction for a finished command word that names nothing we
+/// know (`zpeh li`). A real binary without a spec is a complete name,
+/// not a typo, so it gets nothing and stays a miss. Neither is a path
+/// (`./instal`): the user picked that file, and a bare name is not it.
+fn command_word_correction(
+    word: &str,
+    names: &CommandNames,
+    span: ReplaceSpan,
+) -> Option<Suggestion> {
+    if word.contains('/') || names.is_complete_name(word) {
+        return None;
+    }
+    let name = did_you_mean(word, names)?;
+    Some(Suggestion {
+        replace: Some(span),
+        ..command_name_suggestion(name, "did you mean")
+    })
+}
+
+/// `bytes` of `line` as a character range.
+fn char_span(line: &str, bytes: std::ops::Range<usize>) -> ReplaceSpan {
+    let chars = |end: usize| line[..end].chars().count() as u32;
+    ReplaceSpan {
+        start: chars(bytes.start),
+        end: chars(bytes.end),
     }
 }
 
@@ -1023,9 +1022,12 @@ pub fn complete_in(
     registry: &SpecRegistry,
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
-    names: Option<&CommandNames>,
+    names: Option<&dyn Fn() -> CommandNames>,
 ) -> CompleteResult {
     let cursor = clamp_cursor_to_char_boundary(line, cursor);
+    // The request line as sent — correction spans are expressed against
+    // it, not against the segment/wrapper-trimmed views below.
+    let full_line = line;
 
     // Inside an unterminated quote the user is typing a free-text string
     // literal — a commit message, an `echo` argument, a `--foo="…` value.
@@ -1081,6 +1083,8 @@ pub fn complete_in(
     // miss tally as junk. Neither reason below starts with
     // NO_SPEC_REASON_PREFIX, so the tally stays clean either way.
     if tokens.len() == 1 && prefix == binary {
+        let names = names.map(|build| build());
+        let names = names.as_ref();
         let items = names
             .map(|n| complete_command_name(&prefix, n))
             .unwrap_or_default();
@@ -1102,6 +1106,27 @@ pub fn complete_in(
     }
 
     let Some(spec) = registry.lookup(binary) else {
+        // A command word we have never heard of is far more often a typo
+        // than a tool without a spec (the miss tally was all typos). Offer
+        // the correction; a non-empty answer also keeps it out of that
+        // tally. The name list is built only here and on the first token,
+        // never on an ordinary keystroke.
+        //
+        // Not while a load for it is still running: a real binary whose
+        // `--help` is being derived is on no list yet, and guessing now
+        // would hide the spec that lands a keystroke later.
+        let word = seg_start + wrap_start + tokens[0].span.start;
+        let span = char_span(full_line, word..word + binary.len());
+        let settled = !registry.is_loading(binary);
+        if let Some(row) = names
+            .filter(|_| settled)
+            .and_then(|build| command_word_correction(binary, &build(), span))
+        {
+            return CompleteResult {
+                items: vec![row],
+                reason: None,
+            };
+        }
         return CompleteResult {
             items: vec![],
             reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
@@ -1661,6 +1686,7 @@ fn emit_subcommands(node: &Subcommand, prefix: &str, mode: MatchMode) -> Vec<Sug
                 priority: sc.priority,
                 icon: sanitize_icon(sc.icon.as_deref()),
                 source_ranked: false,
+                replace: None,
             }
         })
         .collect();
@@ -1699,6 +1725,7 @@ fn emit_options_with_ancestors(
                 priority: opt.priority,
                 icon: sanitize_icon(opt.icon.as_deref()),
                 source_ranked: false,
+                replace: None,
             })
             .collect()
     };
@@ -1812,6 +1839,7 @@ fn emit_candidates_for_arg(
             priority: None,
             icon: None,
             source_ranked: false,
+            replace: None,
         })
         .collect();
 
@@ -1834,6 +1862,7 @@ fn emit_candidates_for_arg(
                     priority: s.priority,
                     icon: sanitize_icon(s.icon.as_deref()),
                     source_ranked: false,
+                    replace: None,
                 }
             }),
     );
@@ -1870,6 +1899,7 @@ fn emit_candidates_for_arg(
                         priority: None,
                         icon: None,
                         source_ranked: false,
+                        replace: None,
                     }),
             );
         }
@@ -1907,6 +1937,7 @@ fn emit_candidates_for_arg(
                                     priority: Some(1_000u32.saturating_sub(idx as u32)),
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -1939,6 +1970,7 @@ fn emit_candidates_for_arg(
                                         // subcommand rows (blank).
                                         icon: Some("$".into()),
                                         source_ranked: false,
+                                        replace: None,
                                     }
                                 }),
                         );
@@ -1963,6 +1995,7 @@ fn emit_candidates_for_arg(
                                     priority: None,
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -1986,6 +2019,7 @@ fn emit_candidates_for_arg(
                                     priority: None,
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -2006,6 +2040,7 @@ fn emit_candidates_for_arg(
                                     priority: None,
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -2023,6 +2058,7 @@ fn emit_candidates_for_arg(
                                     priority: None,
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -2048,6 +2084,7 @@ fn emit_candidates_for_arg(
                                     priority: None,
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -2070,6 +2107,7 @@ fn emit_candidates_for_arg(
                                     priority: None,
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -2100,6 +2138,7 @@ fn emit_candidates_for_arg(
                                         priority: None,
                                         icon: None,
                                         source_ranked: false,
+                                        replace: None,
                                     }),
                             );
                         }
@@ -2132,6 +2171,7 @@ fn emit_candidates_for_arg(
                                         priority: None,
                                         icon: None,
                                         source_ranked: false,
+                                        replace: None,
                                     }),
                             );
                         }
@@ -2175,6 +2215,7 @@ fn emit_candidates_for_arg(
                                     priority: None,
                                     icon: None,
                                     source_ranked: false,
+                                    replace: None,
                                 }),
                         );
                     }
@@ -2209,6 +2250,7 @@ fn emit_candidates_for_arg(
                                 priority: Some(10_000u32.saturating_sub(rank as u32)),
                                 icon: None,
                                 source_ranked: true,
+                                replace: None,
                             });
                         }
                     }
@@ -3691,6 +3733,7 @@ fn filepath_suggestions(
                 priority: Some(1_000u32.saturating_sub(idx as u32)),
                 icon,
                 source_ranked: false,
+                replace: None,
             },
         )
         .collect()
@@ -5350,7 +5393,14 @@ region = us-east-1
 
     fn cmd_complete(line: &str, names: &CommandNames) -> CompleteResult {
         let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
-        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, Some(names));
+        let out = complete_in(
+            line,
+            line.len(),
+            &r,
+            None,
+            MatchMode::Prefix,
+            Some(&|| names.clone()),
+        );
         assert!(
             r.is_empty(),
             "the first-token path must not populate the spec cache"
@@ -5428,31 +5478,33 @@ region = us-east-1
         assert!(executables_in(&[later]).is_empty());
     }
 
-    /// The daemon skips building the name list unless this says the
-    /// cursor is on a command name, so a disagreement here silently
-    /// kills first-token completion (or pays for the list on every
-    /// keystroke).
+    /// The name list costs a stat per spec layer plus the stem clone, so
+    /// the engine builds it only where it can answer from it: the first
+    /// token (including after `&&` and behind a wrapper) and a command
+    /// word with no spec. An ordinary keystroke never pays for it.
     #[test]
-    fn command_name_position_agrees_with_the_pipeline() {
+    fn name_list_is_built_only_where_it_is_used() {
+        use std::cell::Cell;
         let names = cmd_names();
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        let builds = |line: &str| {
+            let calls = Cell::new(0);
+            let build = || {
+                calls.set(calls.get() + 1);
+                names.clone()
+            };
+            let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, Some(&build));
+            (calls.get(), out)
+        };
         // `sudo doc` is two tokens, but the wrapper has no spec of its
         // own — the engine drops it and completes the command it runs.
-        for line in ["gi", "git c && gi", "sudo doc", "env FOO=1 gi"] {
-            assert!(
-                is_command_name_position(line, line.len()),
-                "{line:?} should be a command-name position"
-            );
-            assert!(
-                !cmd_complete(line, &names).items.is_empty(),
-                "{line:?} should yield command-name rows"
-            );
+        for line in ["gi", "git c && gi", "sudo doc", "env FOO=1 gi", "zpeh x"] {
+            let (calls, out) = builds(line);
+            assert_eq!(calls, 1, "{line:?} should build the list once");
+            assert!(!out.items.is_empty(), "{line:?} should yield rows");
         }
-
         for line in ["git ", "git ch", "echo \"gi"] {
-            assert!(
-                !is_command_name_position(line, line.len()),
-                "{line:?} must not be a command-name position"
-            );
+            assert_eq!(builds(line).0, 0, "{line:?} must not build the list");
         }
     }
 
@@ -5669,6 +5721,133 @@ region = us-east-1
         let out = cmd_complete("gi", &names);
         assert!(!out.items.is_empty());
         assert!(out.items.iter().all(|s| s.source_ranked));
+    }
+
+    fn complete_after_space(line: &str, names: Option<&CommandNames>) -> CompleteResult {
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        match names {
+            Some(n) => complete_in(
+                line,
+                line.len(),
+                &r,
+                None,
+                MatchMode::Prefix,
+                Some(&|| n.clone()),
+            ),
+            None => complete_in(line, line.len(), &r, None, MatchMode::Prefix, None),
+        }
+    }
+
+    fn only_correction(out: &CompleteResult) -> (&str, Option<ReplaceSpan>) {
+        assert_eq!(out.items.len(), 1, "{:?}", out);
+        let row = &out.items[0];
+        assert_eq!(row.description.as_deref(), Some("did you mean"));
+        (row.insertion.as_str(), row.replace)
+    }
+
+    /// Past the space a typo'd command word still gets its correction,
+    /// and the row names the span of the command word so accepting it
+    /// keeps the arguments (`zpeh li` → `zeph li`).
+    #[test]
+    fn unknown_command_word_after_space_offers_a_correction() {
+        let names = cmd_names();
+        let out = complete_after_space("zpeh li", Some(&names));
+        assert_eq!(
+            only_correction(&out),
+            ("zeph", Some(ReplaceSpan { start: 0, end: 4 }))
+        );
+        assert_eq!(out.reason, None);
+    }
+
+    /// A wrapper stays put: only the wrapped command word is replaced.
+    #[test]
+    fn correction_span_skips_wrapper_commands() {
+        let names = cmd_names();
+        let out = complete_after_space("sudo zpeh x", Some(&names));
+        assert_eq!(
+            only_correction(&out),
+            ("zeph", Some(ReplaceSpan { start: 5, end: 9 }))
+        );
+    }
+
+    /// The span counts characters: the widget indexes `$BUFFER` by
+    /// character, and `한` before the segment is three bytes.
+    #[test]
+    fn correction_span_is_in_characters() {
+        let names = cmd_names();
+        let out = complete_after_space("echo 한 && zpeh x", Some(&names));
+        assert_eq!(
+            only_correction(&out),
+            ("zeph", Some(ReplaceSpan { start: 10, end: 14 }))
+        );
+    }
+
+    /// A real binary without a spec is not a typo, however close it is
+    /// to a known name — it keeps the "no spec" reason, which is what
+    /// the miss tally counts.
+    #[test]
+    fn a_known_command_word_gets_no_correction() {
+        let names = CommandNames::from_parts(vec![], vec!["zeph".into()], vec!["zepf".into()]);
+        let out = complete_after_space("zepf x", Some(&names));
+        assert!(out.items.is_empty(), "{:?}", out.items);
+        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), Some("zepf"));
+    }
+
+    /// A command run by path is the file the user chose, never a name
+    /// typo — `./zeph` (two edits from `zeph`) must not become `zeph`.
+    #[test]
+    fn a_path_command_word_gets_no_correction() {
+        let names = cmd_names();
+        for line in ["./zeph x", "b/zeph x"] {
+            let out = complete_after_space(line, Some(&names));
+            assert!(out.items.is_empty(), "{line:?}: {:?}", out.items);
+        }
+    }
+
+    /// A word whose spec is still loading (a real binary mid-`--help`
+    /// derivation) is not a settled unknown, so it gets no guess.
+    #[test]
+    fn a_command_word_still_loading_gets_no_correction() {
+        let names = cmd_names();
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        r.inflight.lock().unwrap().insert("zpeh".into());
+        let line = "zpeh x";
+        let out = complete_in(
+            line,
+            line.len(),
+            &r,
+            None,
+            MatchMode::Prefix,
+            Some(&|| names.clone()),
+        );
+        assert!(r.is_loading("zpeh"));
+        assert!(out.items.is_empty(), "{:?}", out.items);
+        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), Some("zpeh"));
+    }
+
+    /// Nothing close enough → the plain "no spec" empty, still tallied.
+    #[test]
+    fn an_unknown_word_with_no_neighbour_stays_a_miss() {
+        let names = cmd_names();
+        let out = complete_after_space("nosuchbin x", Some(&names));
+        assert!(out.items.is_empty());
+        assert_eq!(
+            no_spec_binary(out.reason.as_deref().unwrap()),
+            Some("nosuchbin")
+        );
+        // Without a name list there is nothing to correct against.
+        let out = complete_after_space("zpeh x", None);
+        assert!(out.items.is_empty());
+        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), Some("zpeh"));
+    }
+
+    /// Rows that complete the token under the cursor never carry a span.
+    #[test]
+    fn ordinary_rows_have_no_replace_span() {
+        let names = cmd_names();
+        let out = complete_after_space("git ", Some(&names));
+        assert!(!out.items.is_empty());
+        assert!(out.items.iter().all(|s| s.replace.is_none()));
     }
 
     /// A stem-backed row says so, so the user can tell which commands
@@ -5989,6 +6168,7 @@ region = us-east-1
             priority: prio,
             icon: None,
             source_ranked: false,
+            replace: None,
         }
     }
 

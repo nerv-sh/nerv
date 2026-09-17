@@ -295,6 +295,12 @@ THEN:
   도는 동안 빈 응답을 내는데, 그건 miss 가 아니다 — 다음 키에 완성이 뜬다. 데몬은
   `SpecRegistry::is_loading` 이 false 일 때만 기록한다. 명령 이름을 치는 중인
   부분 입력 (`ze`, `zep`) 은 애초에 lookup 을 안 하므로 집계에 안 들어간다.
+- **교정된 오타는 miss 가 아니다.** 공백 뒤 명령 단어가 PATH·spec stem·frecency 어디에도
+  없고 가까운 이름이 있으면 (`zpeh li`) 엔진이 `did you mean zeph` 행을 돌려준다
+  (first-5-min §0.9). 응답이 비어 있지 않으므로 집계되지 않는다. 가까운 이름이 없는
+  단어(`nosuchbin`)와 spec 없는 실제 바이너리(PATH 에 있음)는 그대로 센다 — 후자가
+  overlay spec 을 쓸 진짜 대상이다. 도입 전(v0.1.11 이하)에 쌓인 오타 행은 자동 정리하지
+  않는다 (`rm ~/Library/Caches/nerv/misses.tsv`).
 
 ### 3.6.4 derived specs 안내 (soft notice)
 
@@ -416,3 +422,4 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 *문서 v1.1 — PLAN.md §5.5 의 정밀 명세. v1.0 → v1.1 변경: §3.6 doctor 자동 실행 트리거 신설, spec age soft notice 추가, E2 의 잔존 `nerv spec update` 참조 제거 (PLAN GO 조건 ①). 변경 트리거: 새 라이벌 도구 출현, schema v3 도입, doctor 추가 항목 합의 시.*
 *v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: spec 디렉터리 경로 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` (PRD §8 정합), E2 감지 수단에 `nerv-engine::spec_loader` (loadSpec.ts 포팅) 명시, §5.1 에 v0.6 구현 매핑 추가 (nerv-diag 흡수 활용 + cmd_doctor 필터링). 5종 카탈로그 / 메시지 톤 / exit code 규약 모두 무변경. 변경 트리거: figterm path 의 신규 에러 클래스 발견, rquickjs Tier C 실행 실패 시나리오 정의 시 (E6 후보).*
 *v1.4 — 롱테일 spec 커버리지 정합 (2026-09-05). v1.3 → v1.4 변경: §3.6.3 `spec misses` 신설 (데몬의 로컬 miss 집계 `misses.tsv` — throttle 5s, temp+rename, 확정된 miss 만, 텔레메트리 아님), §3.6.4 `derived specs` 신설 (`--help` 파생 spec 행 + 파손 시 "delete that file" 안내, doctor/spec list 는 읽기 전용), 기존 §3.6.3 디바운스 / §3.6.4 비목표 를 §3.6.5 / §3.6.6 으로 재번호. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경. 변경 트리거: 파생 spec 파싱 실패 클래스가 사용자 가시 에러로 승격될 때 (E6 후보), miss 집계에 명령별 조치 hint 추가 시.*
+*v1.5 — 공백 뒤 명령 이름 교정 (2026-09-17). v1.4 → v1.5 변경: §3.6.3 에 교정된 오타 비집계 조항 추가 (실측: v0.1.11 `misses.tsv` 24행 전부 오타). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*

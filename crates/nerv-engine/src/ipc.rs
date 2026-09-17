@@ -87,6 +87,22 @@ pub struct Suggestion {
     /// In-process only: never crosses the socket.
     #[serde(skip)]
     pub source_ranked: bool,
+    /// Span of the line this row replaces, when it is not the token under
+    /// the cursor. Set only by the command-name correction offered after a
+    /// space (`zpeh li` → `zeph`), which rewrites the command word and
+    /// leaves the arguments alone. `None` = replace the current token, the
+    /// behavior every other row has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replace: Option<ReplaceSpan>,
+}
+
+/// Half-open range of the request `line`, in **characters** (not bytes):
+/// the zsh widget indexes `$BUFFER` by character, so a byte offset would
+/// land mid-glyph after any multibyte text before the command word.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplaceSpan {
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,6 +145,7 @@ mod tests {
             priority: Some(75),
             icon: Some("📦".into()),
             source_ranked: false,
+            replace: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: Suggestion = serde_json::from_str(&json).unwrap();

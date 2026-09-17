@@ -10,7 +10,7 @@
 //!
 //! Tests share a small spawn helper so each scenario stays focused.
 
-use nerv_engine::{Request, Response, SuggestionKind};
+use nerv_engine::{ReplaceSpan, Request, Response, SuggestionKind};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -271,6 +271,63 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
         fields.next(),
         Some("3"),
         "all three keystrokes must survive the throttle window"
+    );
+}
+
+/// A typo'd command word keeps its correction past the space — and a
+/// corrected word is not a coverage gap, so it never reaches the miss
+/// tally, while a word with nothing close still does.
+#[tokio::test]
+async fn corrected_command_word_is_offered_and_not_tallied() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let misses = daemon.misses.clone();
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        let line = "dokcer run";
+        for cursor in [7usize, 8, 10] {
+            let resp = round_trip(
+                &mut stream,
+                &Request::Complete {
+                    line: line[..cursor].to_string(),
+                    cursor,
+                    cwd: None,
+                },
+            )
+            .await;
+            let Response::Suggestions { items } = resp else {
+                panic!("expected a correction at {cursor}, got {resp:?}");
+            };
+            assert_eq!(items.len(), 1, "{items:?}");
+            assert_eq!(items[0].insertion, "docker");
+            assert_eq!(
+                items[0].replace,
+                Some(ReplaceSpan { start: 0, end: 6 }),
+                "the row must say which word it replaces"
+            );
+        }
+        round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "nosuchbin ".into(),
+                cursor: 10,
+                cwd: None,
+            },
+        )
+        .await;
+    })
+    .await;
+    let _tmp = daemon.terminate().await;
+    run.expect("test timeout");
+
+    let text = std::fs::read_to_string(&misses).expect("misses.tsv written");
+    let names: Vec<&str> = text
+        .lines()
+        .filter_map(|row| row.split('\t').next())
+        .collect();
+    assert_eq!(
+        names,
+        ["nosuchbin"],
+        "only the uncorrectable word is a miss"
     );
 }
 
