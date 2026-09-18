@@ -166,9 +166,10 @@ fn bundled_specs_dirs() -> Vec<PathBuf> {
 /// top of this):
 ///
 /// 1. `NERV_SPECS_DIR` env override (tests, power users) — always wins,
-///    even when empty, so test isolation is airtight.
+///    even when empty or stale, so test isolation is airtight.
 /// 2. The user cache (`~/Library/Caches/nerv/specs/`) *if it actually
-///    holds specs* — a `build-specs` run there overrides the bundle.
+///    holds specs and this build can read them* — a `build-specs` run
+///    there overrides the bundle.
 /// 3. A bundled read-only set next to the binary (Homebrew `share/`,
 ///    or `specs/` in an unpacked tarball) — what a fresh `brew install`
 ///    user completes against without ever running `build-specs`.
@@ -181,7 +182,7 @@ fn resolve_specs_dir() -> Option<PathBuf> {
     }
     let user = specs_dir();
     if let Some(u) = &user {
-        if has_specs(u) {
+        if has_specs(u) && !is_unreadable_schema(u) {
             return user;
         }
     }
@@ -194,6 +195,44 @@ fn resolve_specs_dir() -> Option<PathBuf> {
         }
     }
     user
+}
+
+/// Does `dir` hold specs stamped for a different schema version?
+///
+/// Only an explicit mismatch counts. A missing or corrupt manifest is
+/// read leniently everywhere else (pre-manifest installs keep working)
+/// and is read leniently here too.
+fn is_unreadable_schema(dir: &std::path::Path) -> bool {
+    matches!(
+        crate::manifest::check_schema(dir),
+        crate::manifest::SchemaStatus::Mismatch { .. }
+    )
+}
+
+/// The user spec cache when it is being **skipped** for holding specs of
+/// another schema version, together with the version found there.
+///
+/// An upgrade that bumps the schema strands every cache a user ever
+/// filled with `build-specs`, and the cache outranks the bundle, so
+/// before this the whole install went dark: completion disabled by the
+/// E5 gate, and `nerv doctor` advising `brew reinstall nerv`, which
+/// reinstalls the bundle the cache is already winning against
+/// (observed on 0.1.13 → 0.1.14, the v2 → v3 split-spec bump).
+///
+/// Returns `None` when the cache is usable, absent, empty, or when
+/// `NERV_SPECS_DIR` is set — an explicit choice is not second-guessed.
+pub fn stale_spec_cache() -> Option<(PathBuf, u32)> {
+    if std::env::var_os("NERV_SPECS_DIR").is_some() {
+        return None;
+    }
+    let user = specs_dir()?;
+    if !has_specs(&user) {
+        return None;
+    }
+    match crate::manifest::check_schema(&user) {
+        crate::manifest::SchemaStatus::Mismatch { found } => Some((user, found)),
+        _ => None,
+    }
 }
 
 /// `~/.config/nerv/specs/` — user-authored overlay specs (tools upstream
@@ -438,6 +477,118 @@ mod tests {
         with_temp_home(|home| {
             let got = resolve_specs_dir();
             assert_eq!(got, Some(home.join("Library/Caches/nerv/specs")));
+        });
+    }
+
+    /// Write a manifest stamping `dir` for `version`.
+    #[cfg(test)]
+    fn stamp_schema(dir: &std::path::Path, version: u32) {
+        std::fs::write(
+            dir.join("manifest.json"),
+            format!(r#"{{"schema_version":{version},"nerv_version":"t","withfig_commit":"t","build_date":"0","specs":[]}}"#),
+        )
+        .unwrap();
+    }
+
+    /// A bundled spec set next to the running test binary, removed again
+    /// however the test ends — left behind it would make every later
+    /// resolution in this crate find a bundle that isn't there.
+    struct BundledSpecs(PathBuf);
+
+    impl BundledSpecs {
+        fn create() -> Self {
+            let dir = std::env::current_exe()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join(SPECS_SUBDIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("git.json"), "{}").unwrap();
+            stamp_schema(&dir, crate::manifest::SUPPORTED_SCHEMA_VERSION);
+            Self(dir)
+        }
+    }
+
+    impl Drop for BundledSpecs {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A cache built by an older nerv must not win over the bundle.
+    ///
+    /// It used to, and the E5 gate then disabled completion wholesale:
+    /// every user who had ever run `build-specs` went dark on the v2 → v3
+    /// bump, with doctor advising a reinstall that replaces the bundle
+    /// the cache was beating (observed on 0.1.13 → 0.1.14).
+    #[test]
+    fn resolve_skips_a_user_cache_built_for_another_schema() {
+        with_temp_home(|home| {
+            let bundled = BundledSpecs::create();
+            let user = home.join("Library/Caches/nerv/specs");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(user.join("git.json"), "{}").unwrap();
+            stamp_schema(&user, crate::manifest::SUPPORTED_SCHEMA_VERSION + 1);
+
+            let got = resolve_specs_dir().unwrap();
+            assert_ne!(got, user, "a cache of the wrong schema must not be read");
+            assert_eq!(got, std::fs::canonicalize(&bundled.0).unwrap());
+        });
+    }
+
+    /// The same cache stamped for *this* schema still wins — the skip is
+    /// about being unreadable, not about being a cache.
+    #[test]
+    fn resolve_keeps_a_user_cache_built_for_this_schema() {
+        with_temp_home(|home| {
+            let _bundled = BundledSpecs::create();
+            let user = home.join("Library/Caches/nerv/specs");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(user.join("git.json"), "{}").unwrap();
+            stamp_schema(&user, crate::manifest::SUPPORTED_SCHEMA_VERSION);
+            assert_eq!(resolve_specs_dir(), Some(user));
+        });
+    }
+
+    /// No manifest at all is read leniently everywhere else (pre-manifest
+    /// installs keep working), so it is read leniently here too.
+    #[test]
+    fn resolve_keeps_a_user_cache_with_no_manifest() {
+        with_temp_home(|home| {
+            let _bundled = BundledSpecs::create();
+            let user = home.join("Library/Caches/nerv/specs");
+            std::fs::create_dir_all(&user).unwrap();
+            std::fs::write(user.join("git.json"), "{}").unwrap();
+            assert_eq!(resolve_specs_dir(), Some(user));
+        });
+    }
+
+    /// What doctor reports. Some only while a cache is actually being
+    /// skipped — a usable one, or an explicit `NERV_SPECS_DIR`, is not
+    /// something to warn about.
+    #[test]
+    fn stale_cache_is_reported_only_while_it_is_skipped() {
+        with_temp_home(|home| {
+            let user = home.join("Library/Caches/nerv/specs");
+            std::fs::create_dir_all(&user).unwrap();
+            assert_eq!(stale_spec_cache(), None, "empty cache");
+
+            std::fs::write(user.join("git.json"), "{}").unwrap();
+            assert_eq!(stale_spec_cache(), None, "no manifest");
+
+            stamp_schema(&user, crate::manifest::SUPPORTED_SCHEMA_VERSION);
+            assert_eq!(stale_spec_cache(), None, "current schema");
+
+            stamp_schema(&user, 1);
+            assert_eq!(stale_spec_cache(), Some((user.clone(), 1)));
+
+            unsafe { std::env::set_var("NERV_SPECS_DIR", &user) };
+            let under_override = stale_spec_cache();
+            unsafe { std::env::remove_var("NERV_SPECS_DIR") };
+            assert_eq!(
+                under_override, None,
+                "an explicit choice is not second-guessed"
+            );
         });
     }
 

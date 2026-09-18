@@ -541,6 +541,18 @@ fn check_schema_version(r: &mut DoctorReport) {
     let Some(layers) = paths::resolve_spec_layers(config().derived.enabled) else {
         return;
     };
+    // A cache built by an older nerv is skipped rather than obeyed, so
+    // completion keeps working off the bundle. Say so: the files are
+    // still on disk taking up room, and the user is the only one who can
+    // decide to rebuild or delete them.
+    if let Some((dir, found)) = paths::stale_spec_cache() {
+        r.push(
+            DoctorLevel::Warn,
+            "stale spec cache",
+            format!("ignoring {} (built for v{found})", dir.display()),
+            Some(format!("run: rm -rf {}", dir.display())),
+        );
+    }
     match nerv_engine::manifest::check_schema(&layers.primary) {
         nerv_engine::manifest::SchemaStatus::Ok => r.push(
             DoctorLevel::Ok,
@@ -558,7 +570,13 @@ fn check_schema_version(r: &mut DoctorReport) {
                 "mismatch — daemon expects v{}, found v{found}",
                 nerv_engine::manifest::SUPPORTED_SCHEMA_VERSION
             ),
-            Some("run: brew reinstall nerv".into()),
+            // Reinstalling replaces the bundle, which is not necessarily
+            // the directory being read — name the one that holds the
+            // wrong version so the fix lands on it.
+            Some(format!(
+                "specs in {} were built for v{found} — reinstall or rebuild that directory",
+                layers.primary.display()
+            )),
         ),
     }
 }
