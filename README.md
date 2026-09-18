@@ -18,9 +18,9 @@
 **Nerv** (`nerv-sh/nerv`) is an open-source, IDE-style inline autocomplete
 for the macOS terminal: a Rust daemon plus a zsh widget that shows the next
 token — subcommands, flags, git branches, npm scripts, kubectl resources — as
-you type, with descriptions, in any terminal emulator. It is a successor to
+you type, with descriptions, inside the terminal you already use. It is a successor to
 Fig's autocomplete: it runs the Fig completion engine that AWS open-sourced and
-the 700+ community specs from `withfig/autocomplete`, without Fig's cloud, login,
+the 715 community specs from `withfig/autocomplete`, without Fig's cloud, login,
 AI, or Electron app. Apache-2.0, installed with Homebrew.
 
 | | |
@@ -33,16 +33,14 @@ AI, or Electron app. Apache-2.0, installed with Homebrew.
 | **Latency** | 0.055 ms engine p95 against a 25 ms per-keystroke budget |
 | **Network / accounts / telemetry** | None — documented non-goals |
 | **License** | Apache-2.0 (engine), MIT (spec corpus) |
-| **Latest release** | v0.1.15 (2026-09-18) — [Releases](https://github.com/nerv-sh/nerv/releases) |
 
 Fig gave the terminal IDE-grade autocomplete: type `git ch` and the next token
 is just *there*. Then Fig was acquired, folded into Amazon Q, and the
 experience got buried under a mandatory Builder ID login, AI chat, and a
 multi-hundred-megabyte bundle.
 
-Nerv digs it back out. It runs the actual Fig completion engine — the Rust
-codebase AWS preserved and open-sourced — plus 700+ of the community-maintained
-completion specs from [`withfig/autocomplete`](https://github.com/withfig/autocomplete),
+Nerv digs it back out. The engine is the Rust code AWS preserved and
+open-sourced; the specs are [`withfig/autocomplete`](https://github.com/withfig/autocomplete),
 compiled to static JSON at build time. What shipped as a desktop app with a
 cloud attached is now a local daemon and a zsh widget.
 
@@ -54,7 +52,7 @@ cloud attached is now a local daemon and a zsh widget.
 
 ## Highlights
 
-- **700+ CLI specs** — `git`, `docker`, `kubectl`, `aws`, `npm`, `cargo`, `gh`,
+- **715 CLI specs** — `git`, `docker`, `kubectl`, `aws`, `npm`, `cargo`, `gh`,
   `brew`, `terraform`, … converted from `withfig/autocomplete` at build time.
 - **Live values, not just flags** — git branches, npm scripts, kubectl
   namespaces and resources, AWS profiles and resource IDs, SSH hosts, make
@@ -90,7 +88,7 @@ eval "$(nerv init zsh)"
 
 That's the whole install. The `eval` line writes an idempotent, marker-fenced
 block into your `~/.zshrc` and activates completion in the current session;
-the daemon starts itself on demand, and the 700+ completion specs ship inside
+the daemon starts itself on demand, and the 715 completion specs ship inside
 the package. Type `git ` — the popup should appear. If it doesn't, run
 `nerv doctor`: it checks the shell hook, the daemon, the spec cache, and the
 schema version, and tells you exactly what's wrong.
@@ -159,13 +157,21 @@ One optional file, `~/.config/nerv/nerv.toml`:
 
 ```toml
 [matching]
-mode = "fuzzy"   # default: "prefix"
+mode = "fuzzy"     # default: "prefix"
+
+[derived]
+enabled = false    # default: true
 ```
 
 Prefix matching is the default and the contract: `git co` matches `commit`,
 not `checkout` (checkout starts with c-h-e). Fuzzy matching is a deliberate
-opt-in and only kicks in from 3 typed characters. Restart the daemon after
-editing (`nerv stop && nerv start`).
+opt-in and only kicks in from 3 typed characters.
+
+`[derived]` controls the `--help` fallback: when a command has no spec in
+any layer, Nerv runs `<command> --help` once (no shell, 1 s timeout, output
+capped, cached under `~/Library/Caches/nerv/derived/`) and builds a spec from
+it. Set `enabled = false` and nothing is ever spawned. Either setting is read
+once at daemon start, so restart after editing (`nerv stop && nerv start`).
 
 ### Add your own specs
 
