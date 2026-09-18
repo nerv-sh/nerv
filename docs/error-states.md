@@ -202,6 +202,13 @@ THEN:
 - 데몬 시작 시 `~/Library/Caches/nerv/specs/manifest.json` 의 `schema_version` (현재 `3`) 과 데몬 빌드의 supported schema 비교.
   v3 = 큰 spec 분할 (`<stem>/<sub>.json[.gz]` + 루트의 `external` stub, spec-conversion-policy §6.3). v2 데몬이 v3 캐시를 읽으면 `aws iam ` 이 빈 서브커맨드로 완성되므로 — 조용한 오답이라 — 게이트가 막는다.
 - 사용자가 수동으로 `~/Library/Caches/nerv/specs/` 를 다른 버전 nerv 의 것으로 바꿔치기한 경우 발생.
+- **다만 사용자 캐시가 mismatch 면 해석 체인이 그 층을 건너뛰고 번들로 간다** (`paths::resolve_specs_dir`).
+  캐시는 번들을 이기므로, 안 건너뛰면 `build-specs` 를 한 번이라도 돌린 사용자는 스키마 bump 마다
+  완성이 통째로 죽는다 (실측: 0.1.13 → 0.1.14 의 v2 → v3). 건너뛴 사실은 doctor 의
+  `stale spec cache` 회색 행이 알리고(삭제 명령 포함), E5 는 **읽는 디렉터리가 실제로 어긋날 때만** 뜬다.
+  `NERV_SPECS_DIR` 이 있으면 건너뛰지 않는다 — 명시 선택은 되묻지 않는다.
+- E5 힌트는 `brew reinstall` 이 아니라 **어긋난 디렉터리 이름**을 댄다. 재설치는 번들을 갈아끼우는데,
+  읽히는 것이 번들이 아닐 수 있다 (그 오안내가 0.1.14 에서 실제로 나왔다).
 
 **사용자 화면** (stderr, 데몬 로그):
 
