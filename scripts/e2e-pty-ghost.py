@@ -12,11 +12,13 @@ Requires: cargo-built debug binaries, a `zsh` on PATH.
 """
 
 import fcntl
+import json
 import os
 import pty
 import select
 import signal
 import struct
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -73,12 +75,28 @@ def main():
     with open(os.path.join(zdot, ".zshrc"), "w") as f:
         f.write("PS1='> '\nPROMPT='> '\n")
         f.write(f"source {PTY_ZSH}\n")
+        # A widget that dumps the edit buffer to a file: the only way to
+        # read what a rewrite actually left on the line, since the pty
+        # transcript shows the erase/retype traffic rather than the result.
+        f.write("__dump() { print -r -- \"$BUFFER\" > $HOME/buffer }\n")
+        f.write("zle -N __dump\nbindkey '^X^B' __dump\n")
 
     env = dict(os.environ)
     env["HOME"] = home
     env["ZDOTDIR"] = zdot
     env["SHELL"] = "/bin/zsh"
-    env["NERV_SPECS_DIR"] = SPECS
+    # The fixture specs plus an `expo` stem — the builtin `export` is two
+    # edits from it, which is what makes the builtin guard provable. A
+    # copy, because the correction cases need a stem the checked-in
+    # fixture dir has no reason to carry.
+    specs = os.path.join(home, "specs")
+    shutil.copytree(SPECS, specs)
+    with open(os.path.join(specs, "expo.json"), "w") as f:
+        json.dump({"name": "expo", "description": "Expo CLI"}, f)
+    env["NERV_SPECS_DIR"] = specs
+    # Keep the correction candidates to those specs: on a machine where
+    # PATH happens to hold a near-miss the hint text would differ.
+    env["NERV_PATH_SCAN"] = "0"
     # Make sure no stale session id leaks in as the wrapper.
     env.pop("NERV_PTY_SESSION_ID", None)
 
@@ -154,8 +172,42 @@ def main():
         if not nav_ok:
             log(f"  tail repr: {out[-400:]!r}")
 
-        if ghost_ok and frec_ok and popup_ok and nav_ok:
-            log("PASS — ghost + accept/frecency + popup + navigation e2e")
+        # 7. Correction: a command word that matches no spec, no PATH
+        #    entry and no frecency name draws a faint hint behind which
+        #    the fix waits. Right-arrow rewrites the word and keeps the
+        #    arguments; nothing happens until then.
+        os.write(master, b"\x15")             # Ctrl-U: clear the line
+        drain(master, 0.5)
+        os.write(master, b"dokcer ps")
+        out = drain(master, 2.0)
+        hint_ok = FAINT in out and b"did you mean docker" in out
+        log(f"correction hint: FAINT={FAINT in out} TEXT={b'did you mean docker' in out} -> {hint_ok}")
+        if not hint_ok:
+            log(f"  tail repr: {out[-400:]!r}")
+
+        buf_path = os.path.join(home, "buffer")
+        os.write(master, b"\x1b[C")           # Right-arrow accepts the fix
+        drain(master, 1.5)
+        os.write(master, b"\x18\x02")        # ^X^B dumps $BUFFER
+        drain(master, 0.8)
+        buf = open(buf_path).read().strip() if os.path.exists(buf_path) else "<no dump>"
+        fix_ok = buf == "docker ps"
+        log(f"correction accept: buffer={buf!r} -> {fix_ok}")
+
+        # A builtin must never be offered a fix: zsh owns the name and the
+        # daemon, which only sees specs/PATH/frecency, reads `export` as a
+        # typo of the bundled `expo` spec.
+        os.write(master, b"\x15")
+        drain(master, 0.5)
+        os.write(master, b"export FOO=1 ")
+        out = drain(master, 1.5)
+        builtin_ok = b"did you mean" not in out
+        log(f"builtin guard: no hint for 'export FOO=1 ' -> {builtin_ok}")
+        if not builtin_ok:
+            log(f"  tail repr: {out[-300:]!r}")
+
+        if ghost_ok and frec_ok and popup_ok and nav_ok and hint_ok and fix_ok and builtin_ok:
+            log("PASS — ghost + accept/frecency + popup + navigation + correction e2e")
             rc = 0
         else:
             log("FAIL — see per-check output above")

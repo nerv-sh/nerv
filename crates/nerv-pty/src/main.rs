@@ -2,6 +2,7 @@ mod ansi;
 #[cfg(target_os = "linux")]
 mod cleanup;
 pub mod cli;
+mod correction;
 mod engine_client;
 mod event_handler;
 mod ghost;
@@ -338,6 +339,10 @@ struct Overlay {
     ghost: Option<String>,
     /// Popup list, when there are ≥2 suggestions.
     popup: Option<popup::Popup>,
+    /// Pending command-word rewrite, when the daemon answered the line
+    /// with a correction instead of completions. Mutually exclusive with
+    /// `popup`: the engine returns a correction as its only row.
+    correction: Option<correction::Correction>,
     /// Buffer the current popup was built for — used to keep the
     /// selection stable across re-queries while the line is unchanged.
     buffer: String,
@@ -384,7 +389,21 @@ where
         .as_ref()
         .map(|p| p.display().to_string());
 
-    let suggestions = engine_client::complete(&buffer, cursor, cwd).await;
+    let rows = engine_client::complete(&buffer, cursor, cwd).await;
+
+    // A correction rewrites text behind the cursor, so it can be neither
+    // a ghost (which only appends) nor a popup row (which splices into
+    // the current token). It is drawn as a faint hint and applied only on
+    // an explicit Right-arrow.
+    overlay.correction = correction::from_rows(&buffer, &rows);
+    if let Some(c) = &overlay.correction {
+        overlay.ghost = Some(c.hint());
+        overlay.popup = None;
+        overlay.buffer = buffer;
+        return;
+    }
+
+    let suggestions = correction::only_current_token(rows);
     if suggestions.is_empty() {
         overlay.ghost = None;
         overlay.popup = None;
@@ -875,6 +894,28 @@ fn figterm_main(command: Option<&[String]>) -> Result<()> {
                                             if event.key == KeyCode::RightArrow
                                                 && event.modifiers == Modifiers::NONE
                                             {
+                                                if let Some(c) = overlay.correction.take() {
+                                                    // Rewrite the command
+                                                    // word, keeping the
+                                                    // arguments. No
+                                                    // frecency record:
+                                                    // the widget does not
+                                                    // record one either,
+                                                    // and the name being
+                                                    // fixed is not a pick
+                                                    // out of a list.
+                                                    let bytes =
+                                                        c.apply_bytes(&overlay.buffer);
+                                                    overlay.ghost = None;
+                                                    draw_overlay(
+                                                        &mut stdout,
+                                                        &mut overlay,
+                                                        cols,
+                                                    )
+                                                    .await;
+                                                    write_buffer.extend(bytes);
+                                                    continue;
+                                                }
                                                 if let Some(rem) = overlay.ghost.take() {
                                                     // Frecency: record the accepted insertion so
                                                     // the next request can boost it (mirrors the

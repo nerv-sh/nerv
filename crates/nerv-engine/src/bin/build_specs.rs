@@ -118,6 +118,32 @@ fn process_one(input: &Path, output_dir: &Path, stem: &str, compress: bool) -> R
         load_spec_file(input).with_context(|| format!("loading {}", input.display()))?;
     let ext = if compress { "json.gz" } else { "json" };
     let out_path = output_dir.join(format!("{stem}.{ext}"));
+
+    // A spec too big to parse on one keystroke gives up its large
+    // top-level subcommands to `<stem>/<name>.<ext>`; the root keeps a
+    // stub for each. `aws` is 117 MB and 1.3 s of parsing, of which a
+    // line like `aws s3 ls` needs 90 KB (spec-conversion-policy §6.3).
+    let (spec, extracted) = nerv_engine::split_oversized(spec);
+    let subtree_dir = output_dir.join(stem);
+    if extracted.is_empty() {
+        // A spec that stopped being oversized (or was never split)
+        // must not keep serving a stale subtree dir from an earlier
+        // build: the root no longer points at it, so it is dead weight
+        // that `spec list` would still count.
+        if subtree_dir.is_dir() {
+            std::fs::remove_dir_all(&subtree_dir)
+                .with_context(|| format!("removing stale {}", subtree_dir.display()))?;
+        }
+    } else {
+        std::fs::create_dir_all(&subtree_dir)
+            .with_context(|| format!("creating {}", subtree_dir.display()))?;
+        for (name, subtree) in &extracted {
+            let path = subtree_dir.join(format!("{name}.{ext}"));
+            write_spec_file(subtree, &path)
+                .with_context(|| format!("writing {}", path.display()))?;
+        }
+    }
+
     write_spec_file(&spec, &out_path).with_context(|| format!("writing {}", out_path.display()))?;
     // Defensive cleanup: SpecRegistry::load_from_disk prefers a plain
     // `<stem>.json` over the `<stem>.json.gz` form when both exist.

@@ -402,6 +402,37 @@ upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없�
 | manifest (E5) | derived 에는 두지 않는다. 게이트는 primary 만 |
 | doctor / spec list | derived 층을 **읽기만** 한다 (`load_dirs` 는 파생을 안 한다) — 진단 명령이 사용자 명령을 실행하는 일은 없다 |
 
+### 6.3 분할 spec — `<stem>/<sub>.json[.gz]` (2026-09-18)
+
+한 파일로는 키스트로크 안에 못 읽는 spec 이 있다. 실측(release, 2026-09-18):
+
+| spec | 텍스트 | 파싱 | RSS |
+|---|---|---|---|
+| aws | 117.2 MB | **1307 ms** | +247 MB |
+| gcloud | 36.5 MB | 225 ms | +52 MB |
+| 그 다음(mongocli) | 2.0 MB | ~3 ms | +2 MB |
+
+`SPEC_LOAD_SYNC_WAIT`(50 ms) 밖이므로 사용자에겐 "첫 키 빈 결과" 지만, 백그라운드가 1.3초를
+태우고 200 MB 바이트 예산을 혼자 넘긴다. 파싱은 **할당 바운드**(117 MB 텍스트 → 247 MB 구조체,
+90 MB/s)라 소유 구조체를 만드는 다른 포맷(bincode·postcard)으로 바꿔도 배수 개선에 그친다.
+읽는 양을 줄이는 것만이 창 안에 들어간다 — `aws s3 ls` 에 필요한 건 117 MB 중 90 KB 다.
+
+| 항목 | 규칙 |
+|------|------|
+| 분할 시점 | **빌드 타임** (`build-specs`). 런타임은 stub 을 보고 파일 하나를 더 읽을 뿐 |
+| 대상 | 직렬화 길이 > `SPLIT_SPEC_ABOVE_BYTES`(4 MB ≈ 45 ms) 인 spec. 현재 코퍼스에선 aws·gcloud 둘뿐 |
+| 무엇을 뺄까 | 최상위 서브커맨드를 **큰 것부터**, 남는 루트가 `SPLIT_ROOT_TARGET_BYTES`(1 MB ≈ 11 ms) 이하가 될 때까지. 서브커맨드당 고정 임계가 아니다 — 64 KB 고정으로 해보니 aws 루트에 7.7 MB(각각은 작지만 합이 큰 136개)가 남았다 |
+| 출력 | `<out>/<stem>/<sub>.json[.gz]`. 루트에는 stub 이 남는다: `name`·`aliases`·`description`·`icon`·`priority`·`hidden` + `"external": true`. **부모 레벨이 그리는 것만** 남기고 payload 는 옮긴다 |
+| 실측 (aws) | 루트 2.19 MB + 서브트리 343개. `aws ` 첫 호출 **3.9 ms / 409행**, `aws s3 ` 2.0 ms, `aws iam ` 8.5 ms. RSS +5.5 MB. 전부 **첫 키에 착지** (이전: 빈 결과 + 1307 ms 백그라운드) |
+| 런타임 | `SpecRegistry::lookup_external(stem, sub)` = `lookup("<stem>/<sub>")`. 캐시·mtime·LRU·바이트 예산·in-flight dedup 을 기존 경로 그대로 쓴다. `/` 든 이름은 **파생 대상이 아니다** (`aws/iam --help` 는 없다) |
+| 스플라이스 | `complete_in` 이 명령 단어 뒤 토큰 중 external stub 이름과 맞는 첫 토큰을 찾아 그 서브트리를 루트에 끼워 넣는다. 결과는 분할 전 트리와 **구조적으로 동일** — 파서·워크·emit 은 분할을 모른다. 옵션이 앞설 수 있어(`aws --region x iam`) 첫 토큰만 보지 않는다 |
+| 재스플라이스 방지 | 한 칸짜리 memo. 키는 이름이 아니라 **두 `Arc` 의 포인터 동일성** — 파일이 다시 읽히면 다른 `Arc` 가 와서 memo 가 스스로 빗나간다 (신선도 규칙을 두 번 쓰지 않는다) |
+| 이름 격리 | 서브트리는 명령이 아니다. `spec_files`(비재귀 `read_dir`)가 디렉터리를 무시하고, `cached_names`/`len` 이 `/` 든 키를 뺀다 — 안 그러면 `nerv _complete "ia"` 가 `iam` 을 명령 이름으로 추천한다 |
+| 경로 탈출 | stub 이름은 **데이터**다(overlay 에 사용자가 쓴 spec 일 수 있다). `is_plain_stem` 이 `/`·`\\`·`.`·`..`·빈 문자열을 막는다 |
+| `spec list` | 루트 파일 기준으로 센다 — 분할 후 aws 는 SUBS 694(서브트리 제외). 진단 표시이지 완성 능력의 척도가 아니다 |
+| 스키마 | manifest `schema_version` **3**. v2 데몬이 v3 캐시를 읽으면 `aws iam ` 이 빈 서브커맨드로 완성된다(조용한 오답) → E5 게이트가 차단 |
+| 되돌리기 | 임계값 아래로 내려간 spec 은 다음 빌드에서 서브트리 디렉터리째 삭제된다 — 루트가 더 이상 안 가리키는 파일이 남지 않는다 |
+
 ---
 
 ## 7. 회귀 정책

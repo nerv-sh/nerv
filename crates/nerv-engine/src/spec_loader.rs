@@ -17,7 +17,7 @@
 //! Refs: docs/spec-conversion-policy.md §3 (Tier A/B static JSON),
 //! PRD v0.6 §10 M0-6.
 
-use crate::spec_parser::Spec;
+use crate::spec_parser::{Spec, Subcommand};
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
@@ -110,6 +110,96 @@ pub fn parse_spec_str(text: &str, origin: &Path) -> Result<Spec, SpecLoadError> 
             source: e,
         }
     })
+}
+
+/// A spec bigger than this is split: its top-level subcommands are
+/// written as their own files, largest first, until the root is small
+/// enough to parse on a keystroke.
+///
+/// 4 MB is roughly 45 ms of parsing (117 MB of `aws` takes 1307 ms in a
+/// release build, measured 2026-09-18), which is where a cold load stops
+/// fitting in the registry's `SPEC_LOAD_SYNC_WAIT` window and starts
+/// costing the user a blank first keystroke. Only `aws` (117 MB) and
+/// `gcloud` (36 MB) are above it in the current corpus; the next biggest
+/// spec is 2 MB.
+pub const SPLIT_SPEC_ABOVE_BYTES: usize = 4 * 1024 * 1024;
+
+/// What a split aims to leave behind: roughly 11 ms of parsing, so the
+/// root lands inside the sync window with room for the subtree that
+/// follows it on the same keystroke.
+///
+/// The target is what decides how many subcommands move out, rather than
+/// a fixed per-subcommand threshold: a fixed one leaves however much the
+/// tail happens to weigh. A 64 KB threshold left `aws` with a 7.7 MB
+/// root — 136 services that were each small enough to keep, and together
+/// far too big (measured 2026-09-18).
+pub const SPLIT_ROOT_TARGET_BYTES: usize = 1024 * 1024;
+
+/// Split `spec` into a root with stubs plus the extracted subtrees, or
+/// return it unchanged when it is small enough to parse in one go.
+///
+/// A stub keeps everything the *parent* level renders — name, aliases,
+/// description, icon, priority, hidden — and drops what only matters
+/// once the line descends into it. `external` marks it so the registry
+/// knows to go looking for the rest.
+///
+/// Splitting is one level deep on purpose. It buys the whole win (`aws
+/// s3 ls` needs 90 KB of a 117 MB spec) and keeps each subtree file a
+/// plain spec that the existing loader, the mtime watcher and
+/// `nerv spec list` already understand.
+pub fn split_oversized(spec: Spec) -> (Spec, Vec<(String, Spec)>) {
+    let total = serialized_len(&spec);
+    if total <= SPLIT_SPEC_ABOVE_BYTES {
+        return (spec, Vec::new());
+    }
+    let mut root = spec;
+
+    // Biggest first, stopping as soon as what is left fits the target:
+    // the file that saves the most parsing per extra open goes first, and
+    // the small tail stays inline where it costs nothing to carry.
+    let mut sizes: Vec<(usize, usize)> = root
+        .subcommands
+        .iter()
+        .enumerate()
+        .map(|(i, sub)| (i, serialized_len(sub)))
+        .collect();
+    sizes.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let mut remaining = total;
+    let mut take: Vec<usize> = Vec::new();
+    for (idx, size) in sizes {
+        if remaining <= SPLIT_ROOT_TARGET_BYTES {
+            break;
+        }
+        if root.subcommands[idx].name.is_empty() {
+            continue;
+        }
+        remaining -= size;
+        take.push(idx);
+    }
+    take.sort_unstable();
+
+    let mut extracted = Vec::with_capacity(take.len());
+    for idx in take {
+        let sub = &mut root.subcommands[idx];
+        let stub = Subcommand {
+            name: sub.name.clone(),
+            aliases: sub.aliases.clone(),
+            description: sub.description.clone(),
+            icon: sub.icon.clone(),
+            priority: sub.priority,
+            hidden: sub.hidden,
+            external: true,
+            ..Default::default()
+        };
+        let name = sub.name.clone();
+        extracted.push((name, std::mem::replace(sub, stub)));
+    }
+    (root, extracted)
+}
+
+fn serialized_len(spec: &Subcommand) -> usize {
+    serde_json::to_string(spec).map(|s| s.len()).unwrap_or(0)
 }
 
 /// Serialize a spec to a JSON string. Pretty-printed for human
@@ -372,6 +462,139 @@ mod tests {
         let json = write_spec_str(&spec).unwrap();
         let restored = parse_spec_str(&json, Path::new("<test>")).unwrap();
         assert_eq!(spec, restored);
+    }
+
+    /// A subcommand whose serialized form is at least `bytes` long,
+    /// with the weight in a nested child so a stub can be told from the
+    /// payload.
+    fn bulky(name: &str, bytes: usize) -> Subcommand {
+        Subcommand {
+            name: name.to_string(),
+            subcommands: vec![Subcommand {
+                name: format!("{name}-child"),
+                description: Some("x".repeat(bytes).into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_small_spec_is_left_whole() {
+        let spec = Spec {
+            name: "git".into(),
+            subcommands: vec![bulky("log", 128 * 1024)],
+            ..Default::default()
+        };
+        let (root, extracted) = split_oversized(spec.clone());
+        assert_eq!(
+            root, spec,
+            "a spec under the threshold must be byte-identical"
+        );
+        assert!(extracted.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_spec_gives_up_its_big_subcommands() {
+        let spec = Spec {
+            name: "aws".into(),
+            subcommands: vec![bulky("iam", SPLIT_SPEC_ABOVE_BYTES), bulky("tiny", 1024)],
+            ..Default::default()
+        };
+        let (root, extracted) = split_oversized(spec);
+        assert_eq!(extracted.len(), 1, "only the big subcommand moves out");
+        assert_eq!(extracted[0].0, "iam");
+        assert!(
+            !extracted[0].1.subcommands.is_empty(),
+            "the payload moves with it"
+        );
+        assert_eq!(root.subcommands[1].name, "tiny");
+        assert!(
+            !root.subcommands[1].subcommands.is_empty(),
+            "small ones stay inline"
+        );
+    }
+
+    #[test]
+    fn a_stub_keeps_what_the_parent_level_renders() {
+        let mut big = bulky("iam", SPLIT_SPEC_ABOVE_BYTES);
+        big.aliases = vec!["identity".into()];
+        big.description = Some("Identity and Access Management".into());
+        big.icon = Some("i".into());
+        big.priority = Some(60);
+        let spec = Spec {
+            name: "aws".into(),
+            subcommands: vec![big],
+            ..Default::default()
+        };
+        let (root, _) = split_oversized(spec);
+        let stub = &root.subcommands[0];
+        assert!(stub.external, "a stub must say so");
+        assert_eq!(stub.aliases, vec!["identity".to_string()]);
+        assert_eq!(
+            stub.description.as_deref(),
+            Some("Identity and Access Management")
+        );
+        assert_eq!(stub.icon.as_deref(), Some("i"));
+        assert_eq!(stub.priority, Some(60));
+        assert!(
+            stub.subcommands.is_empty(),
+            "the payload must not be duplicated"
+        );
+        assert!(stub.options.is_empty());
+    }
+
+    #[test]
+    fn splitting_keeps_the_root_small_enough_to_parse_on_a_keystroke() {
+        // Eight services, each under any plausible fixed threshold for a
+        // single subcommand, that together blow the budget.
+        let mut subs: Vec<Subcommand> = (0..8)
+            .map(|i| bulky(&format!("svc{i}"), SPLIT_SPEC_ABOVE_BYTES / 4))
+            .collect();
+        subs.push(bulky("small", 1024));
+        let spec = Spec {
+            name: "aws".into(),
+            subcommands: subs,
+            ..Default::default()
+        };
+        let (root, extracted) = split_oversized(spec);
+        assert!(!extracted.is_empty());
+        assert!(
+            serialized_len(&root) <= SPLIT_ROOT_TARGET_BYTES,
+            "the split must reach the target, not stop at a fixed per-subcommand size: {} bytes",
+            serialized_len(&root)
+        );
+    }
+
+    #[test]
+    fn a_stub_round_trips_through_the_file_format() {
+        let spec = Spec {
+            name: "aws".into(),
+            subcommands: vec![Subcommand {
+                name: "iam".into(),
+                external: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let restored =
+            parse_spec_str(&write_spec_str(&spec).unwrap(), Path::new("<test>")).unwrap();
+        assert!(restored.subcommands[0].external);
+    }
+
+    /// An ordinary spec must not grow an `external` key — every bundled
+    /// file would churn and the field would stop meaning "stub".
+    #[test]
+    fn an_ordinary_subcommand_serializes_without_the_marker() {
+        let spec = Spec {
+            name: "git".into(),
+            subcommands: vec![Subcommand {
+                name: "log".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(!write_spec_str(&spec).unwrap().contains("external"));
     }
 
     /// `SpecLoadError::Parse` Display surfaces both the origin path

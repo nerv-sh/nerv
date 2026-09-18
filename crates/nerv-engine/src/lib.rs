@@ -40,7 +40,7 @@ pub use frecency::FrecencyStore;
 pub use ipc::{ReplaceSpan, Request, Response, Suggestion, SuggestionKind};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};
 pub use spec_loader::{
-    SpecLoadError, load_spec_file, parse_spec_str, write_spec_file, write_spec_str,
+    SpecLoadError, load_spec_file, parse_spec_str, split_oversized, write_spec_file, write_spec_str,
 };
 pub use spec_parser::{
     Annotation, Arg, CursorContext, Generator, Opt, ParserResult, Spec, Subcommand, TemplateKind,

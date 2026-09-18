@@ -199,7 +199,8 @@ THEN:
 
 **감지**:
 
-- 데몬 시작 시 `~/Library/Caches/nerv/specs/manifest.json` 의 `schema_version` (예: `2`) 과 데몬 빌드의 supported schema 비교.
+- 데몬 시작 시 `~/Library/Caches/nerv/specs/manifest.json` 의 `schema_version` (현재 `3`) 과 데몬 빌드의 supported schema 비교.
+  v3 = 큰 spec 분할 (`<stem>/<sub>.json[.gz]` + 루트의 `external` stub, spec-conversion-policy §6.3). v2 데몬이 v3 캐시를 읽으면 `aws iam ` 이 빈 서브커맨드로 완성되므로 — 조용한 오답이라 — 게이트가 막는다.
 - 사용자가 수동으로 `~/Library/Caches/nerv/specs/` 를 다른 버전 nerv 의 것으로 바꿔치기한 경우 발생.
 
 **사용자 화면** (stderr, 데몬 로그):

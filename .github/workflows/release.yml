@@ -164,6 +164,12 @@ jobs:
             --compress
           ls staged-specs | head -5
           test -f staged-specs/manifest.json
+          # An oversized spec must have been split into per-subcommand
+          # files (spec-conversion-policy §6.3). Shipping `aws` whole
+          # costs the first `aws ` keystroke 1.3 s of parsing, and the
+          # only visible symptom is that nothing appears — so assert the
+          # layout here rather than wait for someone to notice.
+          test -d staged-specs/aws
 
       - name: stage tarball
         id: stage
