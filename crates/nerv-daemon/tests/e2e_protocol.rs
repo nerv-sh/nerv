@@ -457,6 +457,91 @@ async fn oversized_request_line_is_discarded_connection_survives() {
     run.expect("test timeout");
 }
 
+/// Plan slice 03: pruning clears skew-left miss rows for names the
+/// daemon now knows are shell functions, and leaves every other row —
+/// notably a real spec-less binary — alone. The rows are produced by
+/// the live tally (typing `p10k` and `zztool` before any registration)
+/// so the test exercises the same file the daemon owns.
+#[tokio::test]
+async fn pruning_after_registration_drops_shell_name_row_keeps_others() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let misses_path = daemon.misses.clone();
+    let run = tokio::time::timeout(Duration::from_secs(20), async {
+        let mut stream = daemon.connect().await;
+        // Simulate the skew era: both words settle as spec-less misses
+        // while the daemon knows no shell names. The trailing space is
+        // what settles the tally — a bare word is still "typing the
+        // command name" (§3.6.3), while `word ␣` completes the args of
+        // an unknown binary. Early rounds may land while the fixture
+        // specs are still parsing (the tally skips `is_loading` words
+        // on purpose), so repeat until the file shows up.
+        for _ in 0..90 {
+            for (word, cursor) in [("p10k ", 5), ("zztool ", 7)] {
+                let resp = round_trip(
+                    &mut stream,
+                    &Request::Complete {
+                        line: word.into(),
+                        cursor,
+                        cwd: None,
+                    },
+                )
+                .await;
+                assert!(
+                    matches!(resp, Response::Empty { .. }),
+                    "{word} must settle as a miss, got {resp:?}"
+                );
+            }
+            if let Ok(text) = std::fs::read_to_string(&misses_path) {
+                if text.contains("p10k\t") && text.contains("zztool\t") {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let seeded = std::fs::read_to_string(&misses_path).expect("misses file");
+        assert!(
+            seeded.contains("p10k\t"),
+            "seed state missing p10k: {seeded:?}"
+        );
+        assert!(seeded.contains("zztool\t"), "seed state missing zztool");
+
+        // Registration is the moment the daemon learns `p10k` is a shell
+        // function — the row's advice is wrong from here on.
+        let ack = round_trip(
+            &mut stream,
+            &Request::RegisterShellNames {
+                names: vec!["p10k".into()],
+            },
+        )
+        .await;
+        assert!(
+            matches!(ack, Response::Empty { .. }),
+            "registration must be acknowledged: {ack:?}"
+        );
+
+        // The prune write happens off the async workers; poll for it.
+        let mut text = seeded.clone();
+        for _ in 0..50 {
+            text = std::fs::read_to_string(&misses_path).unwrap_or_else(|_| text.clone());
+            if !text.contains("p10k\t") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            !text.contains("p10k\t"),
+            "registered shell-function row must be pruned: {text:?}"
+        );
+        assert!(
+            text.contains("zztool\t"),
+            "spec-less binary row must survive pruning: {text:?}"
+        );
+    })
+    .await;
+    daemon.shutdown().await;
+    run.expect("test timeout");
+}
+
 #[tokio::test]
 async fn corrected_command_word_is_offered_and_not_tallied() {
     let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
