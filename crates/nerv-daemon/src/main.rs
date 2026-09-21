@@ -140,29 +140,6 @@ async fn main() -> anyhow::Result<()> {
     let names = Arc::new(NameCache::from_env());
     names.prewarm();
 
-    // Plan slice 03: once the first PATH scan lands, prune the miss
-    // tally of rows the registered shell names make wrong (a function
-    // the shell completes itself is never worth an overlay spec). With
-    // no names registered yet the prune is a no-op — the registration
-    // handler runs the same pass, which is what actually catches the
-    // late-arriving first precmd.
-    {
-        let misses = misses.clone();
-        let names_for_hook = names.clone();
-        let path_cache = Arc::clone(&names_for_hook.path);
-        // Capturing the `NameCache` Arc makes a names→path→callback→names
-        // cycle; both sides live until process exit anyway, so the cycle
-        // costs nothing on a daemon.
-        path_cache.set_on_scan_complete(Box::new(move || {
-            let set: std::collections::HashSet<String> =
-                shell_lock(&names_for_hook.shell).iter().cloned().collect();
-            let dropped = misses.prune(&set);
-            if dropped > 0 {
-                info!(dropped, "pruned shell-name rows from the miss tally");
-            }
-        }));
-    }
-
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -364,9 +341,9 @@ async fn handle_connection(
                     };
                     // A function·alias the shell completes itself must
                     // not keep a miss row: doctor would advise an overlay
-                    // spec for it, which is always wrong advice. Prune
-                    // here AND at first-scan completion — whichever sees
-                    // the names first wins, the other is a no-op. File IO
+                    // spec for it, which is always wrong advice. This is
+                    // the only place the tally can be pruned — the names
+                    // exist nowhere else, and they arrive here. File IO
                     // stays off the async workers, like every tally write.
                     let misses = misses.clone();
                     let _ = tokio::task::spawn_blocking(move || {
@@ -473,11 +450,6 @@ struct PathCache {
     dirs: Vec<std::path::PathBuf>,
     snap: std::sync::Mutex<PathSnapshot>,
     scanning: std::sync::atomic::AtomicBool,
-    /// Plan slice 03: work that must wait for the first full PATH scan.
-    /// The daemon installs one hook — misses pruning, which may only
-    /// classify rows once the scan (and, in practice, the shell-name
-    /// registration that usually lands around it) is done.
-    on_scan_complete: std::sync::Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 /// `PATH` directories to scan, or none when the scan is switched off.
@@ -621,28 +593,9 @@ impl PathCache {
     fn rescan(&self) {
         let stamp = self.stamps();
         let names = Arc::new(nerv_engine::complete::executables_in(&self.dirs));
-        {
-            let mut snap = self.lock();
-            snap.names = names;
-            snap.stamp = Some(stamp);
-        }
-        if let Some(cb) = self
-            .on_scan_complete
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-        {
-            cb();
-        }
-    }
-
-    /// Install the first-scan-completion hook (plan slice 03). Called
-    /// once at daemon boot, before any scan can run.
-    fn set_on_scan_complete(&self, cb: Box<dyn Fn() + Send + Sync>) {
-        *self
-            .on_scan_complete
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cb);
+        let mut snap = self.lock();
+        snap.names = names;
+        snap.stamp = Some(stamp);
     }
 
     fn stamps(&self) -> Vec<Option<std::time::SystemTime>> {
