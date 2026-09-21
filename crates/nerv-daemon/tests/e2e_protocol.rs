@@ -277,6 +277,186 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
 /// A typo'd command word keeps its correction past the space — and a
 /// corrected word is not a coverage gap, so it never reaches the miss
 /// tally, while a word with nothing close still does.
+/// Shell-name rows in a directory listing, sorted — the "wrote no file"
+/// assertion compares these before/after.
+fn dir_listing(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read_dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// RegisterShellNames (plan slice 02): a session's function·alias names
+/// become first-token candidates and reach no file — the daemon's temp
+/// dir must hold exactly the sock+pid pair it started with, before and
+/// after registration.
+#[tokio::test]
+async fn register_shell_names_serve_as_candidates_memory_only() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let tmp_path = daemon._tmp.path().to_path_buf();
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        let files_before = dir_listing(&tmp_path);
+        let ack = round_trip(
+            &mut stream,
+            &Request::RegisterShellNames {
+                names: vec!["p10k".into(), "g".into()],
+            },
+        )
+        .await;
+        assert!(
+            matches!(ack, Response::Empty { .. }),
+            "registration must be acknowledged: {ack:?}"
+        );
+
+        let partial = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "p1".into(),
+                cursor: 2,
+                cwd: None,
+            },
+        )
+        .await;
+        let Response::Suggestions { items, .. } = partial else {
+            panic!("expected shell-name rows, got {partial:?}");
+        };
+        assert!(
+            items.iter().any(
+                |s| s.insertion == "p10k" && s.description.as_deref() == Some("shell function")
+            ),
+            "shell names must be offered: {items:?}"
+        );
+
+        // Fully typed → silence (the exit-4 contract).
+        let exact = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "p10k".into(),
+                cursor: 4,
+                cwd: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(exact, Response::Empty { .. }),
+            "exact shell name must be empty: {exact:?}"
+        );
+
+        let files_after = dir_listing(&tmp_path);
+        assert_eq!(files_before, files_after, "shell names must reach no file");
+    })
+    .await;
+    let _tmp = daemon.terminate().await;
+    run.expect("test timeout");
+}
+
+/// The union cap is 4096 with the oldest dropped (plan slice 02): a
+/// second session pushing past the cap evicts the first session's
+/// oldest names — observable over the wire.
+#[tokio::test]
+async fn shell_names_cap_drops_oldest_across_sessions() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let run = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut stream = daemon.connect().await;
+        round_trip(
+            &mut stream,
+            &Request::RegisterShellNames {
+                names: (0..4000).map(|i| format!("fn{i}")).collect(),
+            },
+        )
+        .await;
+        round_trip(
+            &mut stream,
+            &Request::RegisterShellNames {
+                names: (0..1000).map(|i| format!("new{i}")).collect(),
+            },
+        )
+        .await;
+
+        // fn0 was the oldest of 5000 → evicted: the "fn" prefix must
+        // offer later fn-names but not fn0. (Probing the exact name
+        // would prove nothing — a complete name is silent either way.)
+        let evicted = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "fn".into(),
+                cursor: 2,
+                cwd: None,
+            },
+        )
+        .await;
+        let Response::Suggestions { items, .. } = evicted else {
+            panic!("fn-prefix must still offer survivors, got {evicted:?}");
+        };
+        assert!(
+            !items.iter().any(|s| s.insertion == "fn0"),
+            "evicted name must not be offered: {items:?}"
+        );
+        // With the cap, the oldest survivor is fn904 — it must rank
+        // first. (fn3999 exists but sits past the response row cap.)
+        assert!(
+            items.iter().any(|s| s.insertion == "fn904"),
+            "oldest surviving name must be offered: {items:?}"
+        );
+        // The newest session's names all survive.
+        let kept = round_trip(
+            &mut stream,
+            &Request::Complete {
+                line: "new".into(),
+                cursor: 3,
+                cwd: None,
+            },
+        )
+        .await;
+        let Response::Suggestions { items, .. } = kept else {
+            panic!("surviving names must be offered, got {kept:?}");
+        };
+        assert!(
+            items.iter().any(|s| s.insertion == "new0"),
+            "newest session's names must survive the cap: {items:?}"
+        );
+    })
+    .await;
+    let _tmp = daemon.terminate().await;
+    run.expect("test timeout");
+}
+
+/// A request line over 256 KiB is discarded before parsing and the
+/// connection survives (plan slice 02): the oversized line produces no
+/// response of its own, and the very next line on the same socket still
+/// gets a Pong.
+#[tokio::test]
+async fn oversized_request_line_is_discarded_connection_survives() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let stream = daemon.connect().await;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut junk = vec![b'x'; 256 * 1024 + 1];
+        junk.push(b'\n');
+        write_half.write_all(&junk).await.expect("write junk");
+        let ping = serde_json::to_string(&Request::Ping).unwrap() + "\n";
+        write_half
+            .write_all(ping.as_bytes())
+            .await
+            .expect("write ping");
+        write_half.flush().await.expect("flush");
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read");
+        let resp: Response = serde_json::from_str(line.trim()).expect("decode");
+        assert!(
+            matches!(resp, Response::Pong { .. }),
+            "oversized line must be discarded, next one served: got {resp:?}"
+        );
+    })
+    .await;
+    daemon.shutdown().await;
+    run.expect("test timeout");
+}
+
 #[tokio::test]
 async fn corrected_command_word_is_offered_and_not_tallied() {
     let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;

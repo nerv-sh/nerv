@@ -81,6 +81,11 @@ enum Command {
         /// The insertion string the user committed.
         insertion: String,
     },
+    /// Internal: register this zsh session's function·alias names with
+    /// the daemon so they surface as first-token candidates. Reads the
+    /// names on stdin, one per line. Not user-facing.
+    #[command(name = "_shell-names", hide = true)]
+    InternalShellNames,
 }
 
 #[derive(Subcommand, Debug)]
@@ -136,6 +141,7 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Uninstall { keep_config, quiet } => cmd_uninstall(keep_config, quiet),
         Command::InternalComplete { line, cursor } => cmd_internal_complete(&line, cursor),
+        Command::InternalShellNames => cmd_internal_shell_names(),
         Command::InternalRecord { spec, insertion } => cmd_internal_record(&spec, &insertion),
     }
 }
@@ -1642,6 +1648,29 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
         // Any other response → no output → no popup in zsh.
         _ => {}
     }
+    Ok(())
+}
+
+/// `_shell-names`: read function·alias names on stdin (one per line)
+/// and hand them to the daemon. The names are dotfile content — they
+/// exist only in this stdin path and in the daemon's memory; nothing
+/// here writes a file. A daemon that isn't up yet fails loudly
+/// (non-zero exit) so the zsh hook retries on the next precmd instead
+/// of swallowing the failure.
+fn cmd_internal_shell_names() -> anyhow::Result<()> {
+    use std::io::BufRead;
+    let mut names = Vec::new();
+    for line in std::io::stdin().lock().lines() {
+        let name = line?;
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    let req = nerv_engine::Request::RegisterShellNames { names };
+    nerv_engine::ipc_client::query_sync(&req)?;
     Ok(())
 }
 

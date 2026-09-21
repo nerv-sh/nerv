@@ -35,6 +35,16 @@ pub enum Request {
         /// The insertion string the user committed.
         insertion: String,
     },
+    /// Register a zsh session's shell function·alias names so they
+    /// surface as first-token completion candidates (plan slice 02).
+    /// Fire-and-forget: the daemon keeps them memory-only and replies
+    /// `Empty`. The names are dotfile content — the daemon never
+    /// writes them anywhere.
+    RegisterShellNames {
+        /// User-visible function·alias names (internals already
+        /// filtered out by the sender).
+        names: Vec<String>,
+    },
 }
 
 /// Response from daemon to ZLE widget.
@@ -124,6 +134,26 @@ pub enum SuggestionKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `RegisterShellNames` (plan slice 02): one zsh session's
+    /// function·alias names ride a single request. The wire tag follows
+    /// the enum's snake_case convention.
+    #[test]
+    fn register_shell_names_roundtrips() {
+        let req = Request::RegisterShellNames {
+            names: vec!["p10k".into(), "g".into()],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert_eq!(
+            json,
+            r#"{"method":"register_shell_names","names":["p10k","g"]}"#
+        );
+        let back: Request = serde_json::from_str(&json).unwrap();
+        match back {
+            Request::RegisterShellNames { names } => assert_eq!(names.len(), 2),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
 
     /// A daemon from before `token_complete` sends no such key; the new
     /// client must still read its rows.

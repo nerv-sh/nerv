@@ -65,7 +65,12 @@ zmodload -F zsh/parameter p:aliases 2>/dev/null
 # is a cheap no-op on every shell after the first. Backgrounded in a
 # subshell: never blocks the prompt, no job-control noise. E1 ("daemon
 # not running — run: nerv start") remains the fallback if this fails.
-( "$__NERV_BIN" start >/dev/null 2>&1 & ) 2>/dev/null
+# NERV_AUTOSTART=0 opts out — test harnesses that manage the daemon
+# themselves set it so a session's first prompt can observe the
+# daemon-down path.
+if [[ "${NERV_AUTOSTART:-1}" != "0" ]]; then
+  ( "$__NERV_BIN" start >/dev/null 2>&1 & ) 2>/dev/null
+fi
 
 __nerv_reset_state() {
   __NERV_ACTIVE=0
@@ -753,6 +758,18 @@ __nerv_complete() {
     return
   fi
 
+  # Shell-name rows arrive with the engine's generic description. An
+  # alias knows its expansion locally ($aliases is already loaded for
+  # line expansion) — paint `alias → body` instead.
+  local __sn_i __sn_ins tab=$'\t'
+  for (( __sn_i = 1; __sn_i <= ${#rlines}; __sn_i++ )); do
+    __sn_ins="${rlines[__sn_i]%%$tab*}"
+    if (( ${+aliases[$__sn_ins]} )); then
+      local -a __sn_fields=("${(@ps:\t:)rlines[__sn_i]}")
+      __sn_fields[3]="alias → ${aliases[$__sn_ins]}"
+      rlines[__sn_i]="${(pj:\t:)__sn_fields}"
+    fi
+  done
   __NERV_ITEMS=("${rlines[@]}")
   __nerv_measure_items   # size the box once; show_popup reads the cache
   # The "Immediately execute" sentinel shows ONLY at a segment boundary —
@@ -1151,4 +1168,40 @@ __nerv_rebind() {
 autoload -Uz add-zsh-hook 2>/dev/null && {
   add-zsh-hook precmd __nerv_precmd_reset
   add-zsh-hook precmd __nerv_rebind
+  add-zsh-hook precmd __nerv_register_shell_names
+}
+
+# Register this session's function·alias names with the daemon so they
+# surface as first-token candidates (docs: plan slice 02). Fires on the
+# first `precmd`, never at sourcing: `nerv start` is still backgrounding
+# the daemon then, and plugins like p10k define their functions after
+# nerv is sourced (same reason __nerv_rebind runs late). The transfer
+# runs in a background subshell — prompt blocking 0 — and the names go
+# to the daemon's memory only; nothing here writes a file.
+# A daemon that isn't up yet fails the transfer, and the failure is NOT
+# swallowed: the next precmd retries until one attempt succeeds, then
+# the hook detaches.
+typeset -gi __NERV_SN_PID=0
+__nerv_register_shell_names() {
+  if (( __NERV_SN_PID )); then
+    if kill -0 "$__NERV_SN_PID" 2>/dev/null; then
+      return  # previous attempt still in flight
+    fi
+    local st
+    wait "$__NERV_SN_PID" 2>/dev/null
+    st=$?
+    __NERV_SN_PID=0
+    if (( st == 0 )); then
+      add-zsh-hook -d precmd __nerv_register_shell_names
+      return
+    fi
+    # fell through: the attempt failed — retry below
+  fi
+  local -a snames
+  snames=( "${(@k)functions[@]}" "${(@k)aliases[@]}" )
+  snames=( "${(@)snames:#[._]*}" )          # internals: _foo, .foo
+  (( ${#snames} )) || { add-zsh-hook -d precmd __nerv_register_shell_names; return }
+  (( ${#snames} > 2000 )) && snames=( "${(@)snames[1,2000]}" )
+  ( print -rC1 -- "${snames[@]}" | "$__NERV_BIN" _shell-names >/dev/null 2>&1 ) &
+  __NERV_SN_PID=$!
 }

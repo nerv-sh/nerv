@@ -137,3 +137,74 @@ fn percentile_us(sorted: &[u128], pct: f64) -> u128 {
     let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
     sorted[idx.min(sorted.len() - 1)]
 }
+
+/// Same budget with the session's shell names registered (plan slice
+/// 02): the daemon stores them behind a shared `Arc` and serves them
+/// without per-request clones, so 2,000 extra names must not move p95.
+#[tokio::test]
+#[ignore]
+async fn ipc_roundtrip_p95_with_shell_names_under_threshold() {
+    let tmp = tempfile::tempdir().expect("create tempdir");
+    let sock_path = tmp.path().join("nervd.sock");
+    let pid_path = tmp.path().join("nervd.pid");
+    let specs_dir = fixture_specs_dir();
+
+    let mut child = tokio::process::Command::new(nervd_bin())
+        .env("NERV_SOCK", &sock_path)
+        .env("NERV_PID", &pid_path)
+        .env("NERV_SPECS_DIR", &specs_dir)
+        .env("NERV_FRECENCY_FILE", "-")
+        .env("NERV_MISSES_FILE", "-")
+        .env("NERV_PATH_SCAN", "0")
+        .env("NERV_LOG", "warn")
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn nervd");
+
+    for _ in 0..30 {
+        if sock_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(sock_path.exists(), "nervd socket did not appear");
+
+    // Register what one large zsh session carries (~2,000 names, one
+    // line of JSON) before sampling.
+    let names: Vec<String> = (0..2000).map(|i| format!("zzfn{i}")).collect();
+    let stream = UnixStream::connect(&sock_path).await.expect("connect");
+    let (read_half, mut write_half) = stream.into_split();
+    let req = Request::RegisterShellNames { names };
+    let mut json = serde_json::to_string(&req).unwrap();
+    json.push('\n');
+    write_half.write_all(json.as_bytes()).await.unwrap();
+    let mut reader = BufReader::new(read_half);
+    let mut resp_line = String::new();
+    reader.read_line(&mut resp_line).await.unwrap();
+    assert!(
+        resp_line.contains("registered"),
+        "register ack: {resp_line:?}"
+    );
+
+    for _ in 0..10 {
+        roundtrip(&sock_path).await;
+    }
+    let mut samples_us: Vec<u128> = Vec::with_capacity(ITERATIONS);
+    for _ in 0..ITERATIONS {
+        let start = Instant::now();
+        roundtrip(&sock_path).await;
+        samples_us.push(start.elapsed().as_micros());
+    }
+    samples_us.sort_unstable();
+    let p95 = percentile_us(&samples_us, 95.0);
+    let p95_ms = p95 as f64 / 1000.0;
+    println!("with 2,000 shell names, p95: {p95_ms:.3} ms");
+
+    child.kill().await.ok();
+    assert!(
+        p95_ms < P95_THRESHOLD_MS,
+        "p95 with shell names {p95_ms:.3} ms exceeds threshold {P95_THRESHOLD_MS} ms"
+    );
+}

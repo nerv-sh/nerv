@@ -93,6 +93,8 @@ the package. Type `git ` — the popup should appear. If it doesn't, run
 `nerv doctor`: it checks the shell hook, the daemon (including a stale daemon
 left behind by an upgrade — its version mismatching the CLI is reported), the
 spec cache, and the schema version, and tells you exactly what's wrong.
+Functions and aliases you already have (`g`, `dockr`, …) complete at the first
+token too; their names live in the daemon's memory only, never on disk.
 
 > Homebrew installs don't trip Gatekeeper: `brew` doesn't quarantine its
 > downloads, and the ad-hoc signature from the Rust toolchain is sufficient on
