@@ -90,8 +90,9 @@ That's the whole install. The `eval` line writes an idempotent, marker-fenced
 block into your `~/.zshrc` and activates completion in the current session;
 the daemon starts itself on demand, and the 715 completion specs ship inside
 the package. Type `git ` — the popup should appear. If it doesn't, run
-`nerv doctor`: it checks the shell hook, the daemon, the spec cache, and the
-schema version, and tells you exactly what's wrong.
+`nerv doctor`: it checks the shell hook, the daemon (including a stale daemon
+left behind by an upgrade — its version mismatching the CLI is reported), the
+spec cache, and the schema version, and tells you exactly what's wrong.
 
 > Homebrew installs don't trip Gatekeeper: `brew` doesn't quarantine its
 > downloads, and the ad-hoc signature from the Rust toolchain is sufficient on

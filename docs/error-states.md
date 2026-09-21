@@ -342,6 +342,25 @@ THEN:
 - 네트워크 호출 (latest version 확인 등) X. spec age 는 빌드 메타 (`manifest.json` 의 build_date) 만 비교.
 - 사용자 모르게 자동 수정 (auto-fix) X.
 
+### 3.6.7 데몬/CLI 버전 스큐 (warning) — v1.7
+
+실행 중 데몬의 버전이 CLI 버전과 다르면 `nerv doctor` 가 warning 행 1개를 표시:
+
+```
+  ! daemon               nervd 0.1.6 running (pid 1437) but CLI is 0.1.15
+                        → run: nerv stop && nerv start
+```
+
+- **왜 잡는가**: `brew upgrade` 는 바이너리만 갈아끼운다 — 이미 떠 있는 데몬은
+  구버전 프로세스로 남는다 (실측: 0.1.6 데몬이 0.1.15 CLI 를 상대하는데 doctor 는
+  초록). 스크우 기간엔 최신 엔진의 수정 (예: v1.5 오타 필터) 이 사용자에게 도달하지
+  않고, 그 동안 쌓인 miss 집계는 오답이다 (§3.6.3 프루닝 조항).
+- 판정 소스는 pong 의 `version` 필드다. 필드가 없는 응답에는 **경고하지 않는다** —
+  행 없음 (현재와 동일). doctor 가 조용히 넘어가는 유일한 자리.
+- 버전이 같으면 **행이 없다** — 신규 설치 출력 불변.
+- 자동 재기동은 하지 않는다 (§3.6.6 / README "What Nerv will never do"). 조치는
+  사용자가 명령을 실행하는 것.
+
 ---
 
 ## 4. 메시지 톤 가이드
@@ -434,3 +453,4 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 *v1.4 — 롱테일 spec 커버리지 정합 (2026-09-05). v1.3 → v1.4 변경: §3.6.3 `spec misses` 신설 (데몬의 로컬 miss 집계 `misses.tsv` — throttle 5s, temp+rename, 확정된 miss 만, 텔레메트리 아님), §3.6.4 `derived specs` 신설 (`--help` 파생 spec 행 + 파손 시 "delete that file" 안내, doctor/spec list 는 읽기 전용), 기존 §3.6.3 디바운스 / §3.6.4 비목표 를 §3.6.5 / §3.6.6 으로 재번호. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경. 변경 트리거: 파생 spec 파싱 실패 클래스가 사용자 가시 에러로 승격될 때 (E6 후보), miss 집계에 명령별 조치 hint 추가 시.*
 *v1.5 — 공백 뒤 명령 이름 교정 (2026-09-17). v1.4 → v1.5 변경: §3.6.3 에 교정된 오타 비집계 조항 추가 (실측: v0.1.11 `misses.tsv` 24행 전부 오타). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
 *v1.6 — `_complete` exit 4 (행 + 토큰 완성, 에러 아님) 명시 (2026-09-17). 5종 카탈로그 무변경.*
+*v1.7 — §3.6.7 데몬/CLI 버전 스큐 경고 신설 (2026-09-21). 실행 중 데몬 pong 의 `version` ≠ CLI 면 warning 행 1개 + `nerv stop && nerv start` 조치. version 필드 없는 pong 은 무경고, 같은 버전은 행 없음 (신규 설치 출력 불변). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
