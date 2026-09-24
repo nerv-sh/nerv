@@ -193,8 +193,60 @@ async fn handle_connection(
     schema_block: Arc<Option<String>>,
 ) {
     let (read_half, mut write_half) = stream.into_split();
-    let mut lines = BufReader::new(read_half).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let mut reader = BufReader::new(read_half);
+    loop {
+        // Bounded line read. `BufReader::lines()` is unbounded, and a
+        // shell-name registration rides one long line — a buggy client
+        // must not grow the daemon's heap without limit. Bytes past
+        // MAX_REQUEST_LINE are drained to the newline and the line is
+        // discarded before parsing; the connection stays usable.
+        let mut line = String::new();
+        let mut oversized = false;
+        let mut eof = false;
+        loop {
+            let available = match reader.fill_buf().await {
+                Ok(buf) => buf,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return,
+            };
+            if available.is_empty() {
+                eof = true;
+                break;
+            }
+            if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                if !oversized {
+                    if line.len() + pos > MAX_REQUEST_LINE {
+                        oversized = true;
+                    } else {
+                        line.push_str(&String::from_utf8_lossy(&available[..pos]));
+                    }
+                }
+                reader.consume(pos + 1);
+                break;
+            }
+            if !oversized {
+                if line.len() + available.len() > MAX_REQUEST_LINE {
+                    oversized = true;
+                    line = String::new();
+                } else {
+                    line.push_str(&String::from_utf8_lossy(available));
+                }
+            }
+            let len = available.len();
+            reader.consume(len);
+        }
+        if oversized {
+            if eof {
+                break;
+            }
+            continue;
+        }
+        if line.is_empty() {
+            if eof {
+                break;
+            }
+            continue;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -275,6 +327,39 @@ async fn handle_connection(
                     reason: Some("recorded".to_string()),
                 }
             }
+            Ok(Request::RegisterShellNames { names: incoming }) => {
+                // Memory-only by contract: the names are dotfile content
+                // (docs/error-states.md §3.6.3 — local only, no
+                // telemetry), so registration itself touches no file. The
+                // prune below rewrites the MISS tally, which is ordinary
+                // daemon-owned state — the names never reach it.
+                if !incoming.is_empty() {
+                    let shell_snapshot = {
+                        let mut shell = shell_lock(&names.shell);
+                        *shell = shell_names_union(&shell, &incoming);
+                        shell.clone()
+                    };
+                    // A function·alias the shell completes itself must
+                    // not keep a miss row: doctor would advise an overlay
+                    // spec for it, which is always wrong advice. This is
+                    // the only place the tally can be pruned — the names
+                    // exist nowhere else, and they arrive here. File IO
+                    // stays off the async workers, like every tally write.
+                    let misses = misses.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let set: std::collections::HashSet<String> =
+                            shell_snapshot.iter().cloned().collect();
+                        let dropped = misses.prune(&set);
+                        if dropped > 0 {
+                            info!(dropped, "pruned shell-name rows from the miss tally");
+                        }
+                    })
+                    .await;
+                }
+                Response::Empty {
+                    reason: Some("registered".to_string()),
+                }
+            }
             Err(e) => Response::Error {
                 message: format!("invalid request: {e}"),
             },
@@ -302,6 +387,52 @@ async fn handle_connection(
 struct NameCache {
     stems: std::sync::Mutex<StemSnapshot>,
     path: Arc<PathCache>,
+    /// Shell function·alias names registered by zsh sessions (plan
+    /// slice 02). Memory-only — the names are dotfile content and must
+    /// reach no file. Sessions union; the cap drops the oldest.
+    shell: SharedShellNames,
+}
+
+/// The shell-name store behind `NameCache::shell`: an `Arc` under a
+/// mutex, so a registration swaps the whole list in place while
+/// concurrent keystrokes keep serving the previous `Arc` untouched.
+type SharedShellNames = std::sync::Mutex<Arc<Vec<String>>>;
+
+/// Cap on the union of registered shell names (plan slice 02). A zsh
+/// session caps itself at 2,000 before sending; the daemon accepts
+/// several sessions, so the union cap is the next power of two up.
+const SHELL_NAMES_CAP: usize = 4096;
+
+/// Request-line length cap (plan slice 02). A shell-name registration
+/// rides one long line — thousands of names at ~20 bytes each — so the
+/// cap sits a power of ten above real traffic; anything longer is
+/// garbage or hostile and is discarded before parsing.
+const MAX_REQUEST_LINE: usize = 256 * 1024;
+
+/// Union of the sessions' shell names, oldest session first: dedup,
+/// cap at `SHELL_NAMES_CAP`, overflow drops the oldest. Free-standing
+/// so the cap contract is unit-testable without a daemon.
+fn shell_names_union(existing: &[String], incoming: &[String]) -> Arc<Vec<String>> {
+    let mut seen = std::collections::HashSet::with_capacity(existing.len() + incoming.len());
+    let mut union: Vec<String> = Vec::with_capacity(existing.len() + incoming.len());
+    for name in existing.iter().chain(incoming.iter()) {
+        if seen.insert(name.as_str()) {
+            union.push(name.clone());
+        }
+    }
+    if union.len() > SHELL_NAMES_CAP {
+        union.drain(..union.len() - SHELL_NAMES_CAP);
+    }
+    Arc::new(union)
+}
+
+/// A poisoned mutex would take every later keystroke down with it; the
+/// shell list is a plain cache, so recovering the inner value is safe.
+fn shell_lock(shell: &SharedShellNames) -> std::sync::MutexGuard<'_, Arc<Vec<String>>> {
+    shell.lock().unwrap_or_else(|poisoned| {
+        shell.clear_poison();
+        poisoned.into_inner()
+    })
 }
 
 /// Executable names on `PATH`, the last source offered for a command
@@ -376,7 +507,14 @@ impl NameCache {
             frecency.spec_names(),
             self.stems(registry),
             self.path.names(),
+            self.shell_names(),
         )
+    }
+
+    /// The registered shell names, as a shared list. Locking is only
+    /// ever an `Arc` clone — registrations swap, they never mutate.
+    fn shell_names(&self) -> Arc<Vec<String>> {
+        shell_lock(&self.shell).clone()
     }
 
     /// Spec stems, re-listed only when a layer's mtime moved. The
@@ -670,6 +808,26 @@ mod tests {
         frecency.record("zeph", "x");
         let names = cache.names(&registry, &frecency);
         assert!(names.is_complete_name("zeph") && names.is_complete_name("bar"));
+    }
+
+    /// Sessions union into the shell-name list, deduped, capped at 4096
+    /// with the oldest dropped (plan slice 02). Free-standing so the cap
+    /// contract is testable without a daemon.
+    #[test]
+    fn shell_names_union_caps_at_4096_dropping_oldest() {
+        let existing: Vec<String> = (0..4000).map(|i| format!("fn{i}")).collect();
+        let incoming: Vec<String> = (0..1000).map(|i| format!("new{i}")).collect();
+        let union = shell_names_union(&existing, &incoming);
+        assert_eq!(union.len(), 4096, "cap must hold across sessions");
+        // Oldest dropped: fn0 is gone, the newest of both sides survive.
+        assert!(!union.iter().any(|n| n == "fn0"));
+        assert!(union.iter().any(|n| n == "fn3999"));
+        assert!(union.iter().any(|n| n == "new999"));
+        // Dedup across sessions.
+        let dup = shell_names_union(&["g".to_string()], &["g".to_string(), "h".to_string()]);
+        assert_eq!(*dup, vec!["g".to_string(), "h".to_string()]);
+        // Nothing registered → nothing stored.
+        assert!(shell_names_union(&[], &[]).is_empty());
     }
 
     fn exe(dir: &std::path::Path, name: &str) {

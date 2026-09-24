@@ -81,6 +81,11 @@ enum Command {
         /// The insertion string the user committed.
         insertion: String,
     },
+    /// Internal: register this zsh session's function·alias names with
+    /// the daemon so they surface as first-token candidates. Reads the
+    /// names on stdin, one per line. Not user-facing.
+    #[command(name = "_shell-names", hide = true)]
+    InternalShellNames,
 }
 
 #[derive(Subcommand, Debug)]
@@ -136,6 +141,7 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Uninstall { keep_config, quiet } => cmd_uninstall(keep_config, quiet),
         Command::InternalComplete { line, cursor } => cmd_internal_complete(&line, cursor),
+        Command::InternalShellNames => cmd_internal_shell_names(),
         Command::InternalRecord { spec, insertion } => cmd_internal_record(&spec, &insertion),
     }
 }
@@ -778,11 +784,12 @@ fn check_daemon(r: &mut DoctorReport) {
         .map(|s| daemon_responds_at(&s))
         .unwrap_or(false);
     if responds {
-        let detail = match pid {
-            Some(pid) => format!("nervd running (pid {pid})"),
-            None => "nervd running".into(),
-        };
-        r.push(DoctorLevel::Ok, "daemon", detail, None);
+        let pong = paths::socket_path().and_then(|s| daemon_pong(&s));
+        check_daemon_responding(
+            r,
+            pong.as_ref().map(|(version, pid)| (version.as_str(), *pid)),
+            pid,
+        );
         return;
     }
     // Socket silent — fall back to the PID file for a precise message.
@@ -806,6 +813,31 @@ fn check_daemon(r: &mut DoctorReport) {
             Some("run: nerv start".into()),
         ),
     }
+}
+
+/// Doctor row for a daemon whose socket answered. Split from `check_daemon`
+/// so the skew decision is unit-testable without sockets or HOME (same
+/// pattern as `check_specs_in`). A version/CLI mismatch gets one Warn row
+/// with the restart command; anything else — same version, or a pong whose
+/// version couldn't be read — keeps today's single Ok row byte-identical.
+fn check_daemon_responding(r: &mut DoctorReport, pong: Option<(&str, u32)>, pid_file: Option<u32>) {
+    if let Some((version, pid)) = pong {
+        let cli = env!("CARGO_PKG_VERSION");
+        if version != cli {
+            r.push(
+                DoctorLevel::Warn,
+                "daemon",
+                format!("nervd {version} running (pid {pid}) but CLI is {cli}"),
+                Some("run: nerv stop && nerv start".into()),
+            );
+            return;
+        }
+    }
+    let detail = match pid_file {
+        Some(pid) => format!("nervd running (pid {pid})"),
+        None => "nervd running".into(),
+    };
+    r.push(DoctorLevel::Ok, "daemon", detail, None);
 }
 
 /// Synchronous liveness probe: connect to the daemon's UDS socket at `sock`
@@ -834,13 +866,16 @@ fn daemon_responds_at(sock: &std::path::Path) -> bool {
     }
 }
 
-/// Ask the daemon for its PID over the socket: send a `Ping` and parse the
-/// `pid` out of the `pong` reply. Returns None if nothing answers, the reply
-/// isn't a pong, or it carries no usable pid (an older daemon predating the
-/// `pid` field decodes it as 0 via `#[serde(default)]` — those are stoppable
-/// only through the PID file). Lets `nerv stop` / `uninstall` terminate a live
-/// daemon whose PID file is missing or stale.
-fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
+/// Ask the daemon for its version and PID over the socket: send a `Ping`
+/// and parse both out of the `pong` reply. Returns None if nothing answers,
+/// the reply isn't a pong, it carries no usable pid (an older daemon
+/// predating the `pid` field decodes it as 0 via `#[serde(default)]` — those
+/// are stoppable only through the PID file), or it carries no `version` —
+/// `nerv doctor` must never invent a skew warning from a pong that can't
+/// name its version. Lets `nerv doctor` detect a CLI/daemon skew and lets
+/// `nerv stop` / `uninstall` terminate a live daemon whose PID file is
+/// missing or stale.
+fn daemon_pong(sock: &std::path::Path) -> Option<(String, u32)> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
 
@@ -855,9 +890,10 @@ fn daemon_pid_via_socket(sock: &std::path::Path) -> Option<u32> {
     if v.get("kind")?.as_str()? != "pong" {
         return None;
     }
+    let version = v.get("version")?.as_str()?.to_string();
     match v.get("pid")?.as_u64()? {
         0 => None, // older daemon (serde default) — no usable pid
-        p => Some(p as u32),
+        p => Some((version, p as u32)),
     }
 }
 
@@ -1095,8 +1131,8 @@ fn cmd_stop() -> anyhow::Result<()> {
     // (or that was started outside `nerv start`) is still stoppable.
     let pid = match file_pid {
         Some(pid) if process_alive(pid) => pid,
-        _ => match paths::socket_path().and_then(|s| daemon_pid_via_socket(&s)) {
-            Some(pid) => pid,
+        _ => match paths::socket_path().and_then(|s| daemon_pong(&s)) {
+            Some((_, pid)) => pid,
             None => {
                 if file_pid.is_some() {
                     let _ = fs::remove_file(&pid_path);
@@ -1400,8 +1436,8 @@ fn stop_daemon_for_uninstall(log: &mut UninstallLog) -> bool {
     let file_pid = read_pid(&pid_path);
     let pid = match file_pid {
         Some(pid) if process_alive(pid) => pid,
-        _ => match paths::socket_path().and_then(|s| daemon_pid_via_socket(&s)) {
-            Some(pid) => pid,
+        _ => match paths::socket_path().and_then(|s| daemon_pong(&s)) {
+            Some((_, pid)) => pid,
             None => {
                 match file_pid {
                     Some(pid) => log.ok("daemon", format!("stale pid {pid} ignored")),
@@ -1612,6 +1648,29 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
         // Any other response → no output → no popup in zsh.
         _ => {}
     }
+    Ok(())
+}
+
+/// `_shell-names`: read function·alias names on stdin (one per line)
+/// and hand them to the daemon. The names are dotfile content — they
+/// exist only in this stdin path and in the daemon's memory; nothing
+/// here writes a file. A daemon that isn't up yet fails loudly
+/// (non-zero exit) so the zsh hook retries on the next precmd instead
+/// of swallowing the failure.
+fn cmd_internal_shell_names() -> anyhow::Result<()> {
+    use std::io::BufRead;
+    let mut names = Vec::new();
+    for line in std::io::stdin().lock().lines() {
+        let name = line?;
+        if !name.is_empty() {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        return Ok(());
+    }
+    let req = nerv_engine::Request::RegisterShellNames { names };
+    nerv_engine::ipc_client::query_sync(&req)?;
     Ok(())
 }
 
@@ -2029,7 +2088,7 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
     }
 
-    /// A one-shot `pong` server for the `daemon_pid_via_socket` tests:
+    /// A one-shot `pong` server for the `daemon_pong` tests:
     /// accepts one connection, ignores the request, replies with `reply`.
     #[cfg(unix)]
     fn pong_server(tag: &str, reply: &'static str) -> std::path::PathBuf {
@@ -2051,33 +2110,20 @@ mod tests {
         sock
     }
 
-    /// `daemon_pid_via_socket` extracts the daemon PID from a `pong` so
-    /// `nerv stop` / `uninstall` can signal a daemon with no PID file.
-    #[cfg(unix)]
-    #[test]
-    fn daemon_pid_via_socket_extracts_pid() {
-        let sock = pong_server(
-            "pid",
-            "{\"kind\":\"pong\",\"version\":\"0.1.0\",\"pid\":4242}\n",
-        );
-        assert_eq!(daemon_pid_via_socket(&sock), Some(4242));
-        let _ = std::fs::remove_file(&sock);
-    }
-
     /// A pong from an older daemon (no `pid`, decoded as 0) or with an
     /// explicit 0 yields None — not a usable target to signal.
     #[cfg(unix)]
     #[test]
-    fn daemon_pid_via_socket_none_without_usable_pid() {
+    fn daemon_pong_none_without_usable_pid() {
         let no_pid = pong_server("nopid", "{\"kind\":\"pong\",\"version\":\"0.1.0\"}\n");
-        assert_eq!(daemon_pid_via_socket(&no_pid), None);
+        assert_eq!(daemon_pong(&no_pid), None);
         let _ = std::fs::remove_file(&no_pid);
 
         let zero = pong_server(
             "zero",
             "{\"kind\":\"pong\",\"version\":\"0.1.0\",\"pid\":0}\n",
         );
-        assert_eq!(daemon_pid_via_socket(&zero), None);
+        assert_eq!(daemon_pong(&zero), None);
         let _ = std::fs::remove_file(&zero);
 
         let missing = std::path::PathBuf::from(format!(
@@ -2085,7 +2131,65 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&missing);
-        assert_eq!(daemon_pid_via_socket(&missing), None);
+        assert_eq!(daemon_pong(&missing), None);
+    }
+
+    /// `daemon_pong` returns the daemon's version next to the pid so
+    /// `nerv doctor` can flag a CLI/daemon version skew (plan slice 01).
+    #[cfg(unix)]
+    #[test]
+    fn daemon_pong_extracts_version_and_pid() {
+        let sock = pong_server(
+            "ver",
+            "{\"kind\":\"pong\",\"version\":\"0.1.6\",\"pid\":1437}\n",
+        );
+        assert_eq!(daemon_pong(&sock), Some(("0.1.6".to_string(), 1437)));
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A pong with no `version` field reads as None — doctor must skip the
+    /// skew warning silently, not warn about a missing field.
+    #[cfg(unix)]
+    #[test]
+    fn daemon_pong_none_without_version() {
+        let sock = pong_server("nover", "{\"kind\":\"pong\",\"pid\":5}\n");
+        assert_eq!(daemon_pong(&sock), None);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Version skew between daemon and CLI → exactly one Warn row whose
+    /// hint is the restart command.
+    #[test]
+    fn check_daemon_responding_warns_on_skew() {
+        let mut r = DoctorReport::default();
+        check_daemon_responding(&mut r, Some(("0.1.6", 1437)), Some(1437));
+        assert_eq!(r.entries.len(), 1);
+        let e = &r.entries[0];
+        assert!(matches!(e.level, DoctorLevel::Warn));
+        assert_eq!(
+            e.detail,
+            format!(
+                "nervd 0.1.6 running (pid 1437) but CLI is {}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
+        assert_eq!(e.hint.as_deref(), Some("run: nerv stop && nerv start"));
+    }
+
+    /// Same version (and a version-less pong) must keep today's single Ok
+    /// row byte-identical — 신규 설치 출력 불변.
+    #[test]
+    fn check_daemon_responding_same_version_row_unchanged() {
+        let cli = env!("CARGO_PKG_VERSION");
+        for pong in [Some((cli, 1437)), None] {
+            let mut r = DoctorReport::default();
+            check_daemon_responding(&mut r, pong, Some(1437));
+            assert_eq!(r.entries.len(), 1);
+            let e = &r.entries[0];
+            assert!(matches!(e.level, DoctorLevel::Ok));
+            assert_eq!(e.detail, "nervd running (pid 1437)");
+            assert_eq!(e.hint, None);
+        }
     }
 
     /// `strip_shell_hooks` cycles through .zshrc, .zshenv, .zprofile,

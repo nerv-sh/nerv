@@ -25,7 +25,7 @@
 //! tally. Daemon shutdown calls [`MissCounter::flush_now`] to persist
 //! the last window.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -162,6 +162,41 @@ impl MissCounter {
         self.flush_inner(true);
     }
 
+    /// Plan slice 03: drop rows for names the daemon now knows are shell
+    /// functions or aliases. The version-skew era tallied such words as
+    /// spec-less misses — the old daemon had no shell-name source — and
+    /// doctor would go on advising overlay specs for functions the shell
+    /// completes itself, which is always wrong advice. The decision
+    /// source comes from the caller (the daemon owns the registration
+    /// state); everything not named here survives byte-identical, so a
+    /// spec-less PATH binary keeps its row. An empty decision source is
+    /// a no-op: before any registration nothing may be classified, and
+    /// names are memory-only, so the post-registration pass is the one
+    /// that decides (the order-inversion guard). The rewrite goes through
+    /// [`crate::paths::write_atomic`] like every other tally write.
+    /// Returns the number of rows dropped.
+    pub fn prune(&self, shell_names: &HashSet<String>) -> usize {
+        if shell_names.is_empty() {
+            return 0;
+        }
+        let Ok(mut st) = self.state.lock() else {
+            return 0;
+        };
+        let before = st.table.len();
+        st.table.retain(|name, _| !shell_names.contains(name));
+        let removed = before - st.table.len();
+        if removed == 0 {
+            return 0;
+        }
+        st.dirty = true;
+        drop(st);
+        // Force: pruning runs once per shell-name registration, and
+        // doctor may read the file right after — the throttled
+        // cadence must not sit on the cleanup for 5 seconds.
+        self.flush_now();
+        removed
+    }
+
     fn flush_inner(&self, force: bool) {
         let Some(path) = &self.path else {
             return;
@@ -294,6 +329,47 @@ mod tests {
             c.record(bad);
         }
         assert!(c.is_empty(), "rejected names must not be stored");
+    }
+
+    /// Plan slice 03: pruning clears skew-left rows for names the daemon
+    /// now knows are shell functions — and ONLY those. A spec-less PATH
+    /// binary (`zztool`) is a real overlay target; doctor must keep
+    /// advising it, so its row survives byte-identical.
+    #[test]
+    fn prune_removes_registered_shell_names_keeps_other_rows() {
+        let path = tmp_path("prune-shell");
+        let seed = "p10k\t3\t1700000000\nzztool\t2\t1700000100\n";
+        std::fs::write(&path, seed).expect("seed");
+        let c = MissCounter::load(&path);
+        let shell: std::collections::HashSet<String> = ["p10k".to_string()].into_iter().collect();
+        let removed = c.prune(&shell);
+        assert_eq!(removed, 1, "only the registered shell-function row goes");
+        let out = std::fs::read_to_string(&path).expect("read back");
+        assert_eq!(
+            out, "zztool\t2\t1700000100\n",
+            "PATH-binary rows must survive byte-identical"
+        );
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The order-inversion guard: pruning before any registration (empty
+    /// shell-name set) must touch nothing. A `p10k` row removed then
+    /// would be lost for the whole session — names are memory-only, so
+    /// the post-registration pass is the one that gets to decide.
+    #[test]
+    fn prune_with_empty_shell_set_is_a_noop() {
+        let path = tmp_path("prune-noop");
+        let seed = "p10k\t3\t1700000000\nzztool\t2\t1700000100\n";
+        std::fs::write(&path, seed).expect("seed");
+        let c = MissCounter::load(&path);
+        let removed = c.prune(&std::collections::HashSet::new());
+        assert_eq!(removed, 0);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            seed,
+            "an empty decision source must not rewrite the tally"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

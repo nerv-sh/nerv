@@ -55,6 +55,14 @@ def log(msg):
 TRANSCRIPT = []
 
 
+def _session_leader():
+    # New session with the pty as its controlling terminal, like a real
+    # terminal tab: without it zsh runs with job control off and the
+    # job-notice check below could never fail.
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 def pump(fd, seconds):
     out = b""
     deadline = time.time() + seconds
@@ -91,11 +99,17 @@ def main():
         f.write("HISTSIZE=1000\nSAVEHIST=1000\n")
         f.write("PS1='%# '\n")
         f.write("alias k=kubectl\n")
+        # A shell alias whose prefix matches no spec: typing `q` offers
+        # only this row, so the footer paints its description.
+        f.write("alias qk=qstat\n")
         # One edit from `docker`: a function the daemon cannot see.
         f.write("dockr() { :; }\n")
         # Expands to a typo: the engine corrects the *expanded* line, so
         # its span does not index what the user typed.
         f.write("alias dk=dokcer\n")
+        # An alias sharing a spec subcommand's name: `git checko` must keep
+        # the spec's own description, not the alias expansion.
+        f.write("alias checkout=qcheckout\n")
         # Ctrl-X Ctrl-B writes the edit buffer to a file: the only way to
         # read what Enter left behind without parsing redraw escapes.
         f.write(f"__dump() {{ print -rn -- \"$BUFFER\" > {home}/buffer; }}\n")
@@ -158,7 +172,7 @@ def main():
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         proc = subprocess.Popen(
             ["/bin/zsh"],
-            preexec_fn=os.setsid,
+            preexec_fn=_session_leader,
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -167,6 +181,12 @@ def main():
         )
         os.close(slave)
         pump(master, 2.0)  # reach prompt
+
+        # Shell-name registration happens on the first `precmd` in a
+        # background subshell; the next prompt is the earliest point it
+        # is provably done (the hook checks the job, then detaches).
+        os.write(master, b"\r")
+        pump(master, 1.0)
 
         # 1 + 3: a partial command name opens the popup, and the history
         # ghost is painted alongside it.
@@ -208,6 +228,42 @@ def main():
         if "[1/" in text:
             failures.append("exact command name 'git' still drew a popup")
         log(f"'git': popup redrawn={'[1/' in text}")
+
+        # 2b: a shell FUNCTION the daemon now knows (registered from
+        # ${(k)functions} at the first precmd) is offered like any name.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"dock")
+        text = pump(master, 1.5).decode(errors="replace")
+        if "dockr" not in text:
+            failures.append("shell function 'dockr' was not offered for 'dock'")
+        log(f"'dock': function offered={'dockr' in text}")
+
+        # 2c: a shell ALIAS is offered too, and its description names the
+        # expansion (`alias → body`) — the widget already reads $aliases
+        # for line expansion. `q` matches only the alias, so the row is
+        # selected and the footer paints the description.
+        os.write(master, b"\x15")
+        pump(master, 0.6)
+        os.write(master, b"q")
+        text = pump(master, 1.5).decode(errors="replace")
+        if "qk" not in text:
+            failures.append("shell alias 'qk' was not offered for 'q'")
+        if "alias → qstat" not in text:
+            failures.append("alias row did not describe its expansion")
+        log(f"'q': alias offered={'qk' in text} desc={'alias → qstat' in text}")
+
+        # 2d: only shell-name rows take the alias description — a spec row
+        # that happens to share an alias's name keeps its own.
+        os.write(master, b"\x07\x15")
+        pump(master, 0.6)
+        os.write(master, b"git checko")
+        text = pump(master, 1.5).decode(errors="replace")
+        if "alias → qcheckout" in text:
+            failures.append("spec row 'checkout' took the alias description")
+        if "Switch branches" not in text:
+            failures.append("'git checko' did not show the spec row's description")
+        log(f"'git checko': spec desc kept={'Switch branches' in text and 'alias →' not in text}")
 
         # A typo reaches the name it meant. Prefix matching cannot: the
         # whole top of misses.tsv is transpositions like this one.
@@ -284,11 +340,17 @@ def main():
         log(f"'dokcer d'+Right: {last.decode(errors='replace').strip()!r}")
 
         # Words the shell runs itself get no row once they are finished.
-        # The engine does offer one for each (checked directly), so the
-        # silence is the widget's. Only the output after the final
-        # keystroke counts: a partial like `expor` is itself one edit from
-        # `expo`, and that row is fair while the word is unfinished.
-        for typed in (b"dockr x", b"export FOO=1 ", b"export", b"hash x"):
+        # For the builtins the engine still offers a correction and the
+        # widget silences it. `dockr` is different since slice 02: the
+        # daemon now KNOWS the function (registered shell names), so the
+        # engine itself refuses to correct it — a correction aimed at a
+        # real function is always wrong.
+        for typed, engine_offers in (
+            (b"dockr x", False),
+            (b"export FOO=1 ", True),
+            (b"export", True),
+            (b"hash x", True),
+        ):
             line = typed.decode()
             direct = subprocess.run(
                 [NERV, "_complete", line, str(len(line))],
@@ -296,7 +358,7 @@ def main():
                 capture_output=True,
                 text=True,
             ).stdout
-            if "did you mean" not in direct:
+            if engine_offers and "did you mean" not in direct:
                 failures.append(f"engine drew no correction for {line!r} — check is vacuous")
             os.write(master, b"\x15")
             pump(master, 0.6)
@@ -438,6 +500,79 @@ def main():
             os.close(master)
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
 
+    # Registration must not swallow a daemon-down failure: a session that
+    # reached its first prompt before the daemon retries on the next
+    # precmd and registers as soon as an attempt succeeds.
+    # NERV_AUTOSTART=0 keeps the harness in charge of the daemon so the
+    # first attempt deterministically fails.
+    log("retry session: daemon down at the first prompt")
+    env2 = dict(env)
+    env2["NERV_AUTOSTART"] = "0"
+    master2 = None
+    proc2 = None
+    try:
+        m2, s2 = pty.openpty()
+        fcntl.ioctl(s2, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        proc2 = subprocess.Popen(
+            ["/bin/zsh"],
+            preexec_fn=_session_leader,
+            stdin=s2,
+            stdout=s2,
+            stderr=s2,
+            env=env2,
+            close_fds=True,
+        )
+        os.close(s2)
+        master2 = m2
+        pump(m2, 2.0)  # first prompt: the registration attempt fails
+        os.write(m2, b"dock")
+        text = pump(m2, 1.5).decode(errors="replace")
+        if "dockr" in text:
+            failures.append("shell names registered despite the daemon being down")
+        log(f"daemon down: function offered={'dockr' in text}")
+        os.write(m2, b"\x15")
+
+        subprocess.run([NERV, "start"], env=env, capture_output=True)
+        time.sleep(1.0)
+        os.write(m2, b"\r")  # next prompt → the hook retries
+        pump(m2, 1.5)
+        os.write(m2, b"dock")
+        text = pump(m2, 1.5).decode(errors="replace")
+        if "dockr" not in text:
+            failures.append("registration was not retried on the next precmd")
+        log(f"after retry: function offered={'dockr' in text}")
+        # Ctrl-G closes the open popup first; otherwise the Enter below
+        # would accept its row instead of running the empty line.
+        os.write(m2, b"\x07\x15")
+
+        # The names live in the daemon's memory: a restart (what `nerv
+        # doctor` tells a skewed user to do) must be followed by a
+        # re-registration at the next prompt, keyed on the new pid.
+        subprocess.run([NERV, "stop"], env=env, capture_output=True)
+        subprocess.run([NERV, "start"], env=env, capture_output=True)
+        time.sleep(1.0)
+        os.write(m2, b"\r")  # next prompt → new daemon pid → re-register
+        pump(m2, 1.5)
+        os.write(m2, b"dock")
+        text = pump(m2, 1.5).decode(errors="replace")
+        if "dockr" not in text:
+            failures.append("shell names were not re-registered after a daemon restart")
+        log(f"after restart: function offered={'dockr' in text}")
+        os.write(m2, b"\x15exit\n")
+        time.sleep(0.3)
+    except OSError as e:
+        failures.append(f"pty error (retry session): {e}")
+    finally:
+        if proc2 is not None:
+            proc2.send_signal(signal.SIGTERM)
+            try:
+                proc2.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc2.kill()
+        if master2 is not None:
+            os.close(master2)
+        subprocess.run([NERV, "stop"], env=env, capture_output=True)
+
     # No widget may leak shell diagnostics onto the terminal — a second
     # `local` on an existing variable prints `NAME=value` (v0.1.12 did this
     # on every accepted completion).
@@ -453,15 +588,27 @@ def main():
         failures.append(f"widget printed variable dumps: {leaked[:3]!r}")
     log(f"variable dumps: {len(leaked)}")
 
-    # 4: none of those keystrokes may be tallied as a missing spec.
+    # The registration runs as a background job; an interactive shell
+    # must not announce it (`[1] 12345`, `[1]  + done …`) at prompts.
+    jobs = re.findall(rb"\[\d+\]\s+(?:\+\s+)?(?:done|\d+)", strip_ansi(b"".join(TRANSCRIPT)))
+    if jobs:
+        failures.append(f"job-control notices leaked: {jobs[:3]!r}")
+    log(f"job notices: {len(jobs)}")
+
+    # 4: none of those keystrokes may be tallied as a missing spec —
+    # except `dockr`: the direct engine probes above settle a shell
+    # function the daemon now knows about (slice 02), and the misses
+    # rows that leaves are slice 03's pruning target (error-states.md
+    # §3.6.3 프루닝 조항).
     tally = env["NERV_MISSES_FILE"]
     recorded = ""
     if os.path.exists(tally):
         with open(tally) as f:
             recorded = f.read().strip()
-    if recorded:
-        failures.append(f"first-token keystrokes were tallied: {recorded!r}")
-    log(f"misses.tsv: {recorded or '(empty)'}")
+    stray = [r for r in recorded.splitlines() if not r.startswith("dockr\t")]
+    if stray:
+        failures.append(f"first-token keystrokes were tallied: {stray!r}")
+    log(f"misses.tsv: {recorded.splitlines() or '(empty)'}")
 
     # Accepting a completion records; accepting a correction must not.
     rows = ""
@@ -481,7 +628,9 @@ def main():
     log(
         "PASS — command-name popup + Tab insert, correction after the "
         "space (wrapper-safe, no ghost, shell words skipped), exact-name "
-        "and alias silence, ghost (with and without a daemon), clean tally"
+        "and alias silence, shell function·alias candidates (alias desc "
+        "names the expansion, spec rows keep theirs), registration retried after the daemon "
+        "came up and after it restarted, no job notices, ghost (with and without a daemon), clean tally"
     )
     return 0
 

@@ -311,6 +311,15 @@ THEN:
   단어(`nosuchbin`)와 spec 없는 실제 바이너리(PATH 에 있음)는 그대로 센다 — 후자가
   overlay spec 을 쓸 진짜 대상이다. 도입 전(v0.1.11 이하)에 쌓인 오타 행은 자동 정리하지
   않는다 (`rm ~/Library/Caches/nerv/misses.tsv`).
+- **스큐가 남긴 shell 이름 행은 프루닝된다 — v1.8.** 버전 스큐(§3.6.7) 기간의 데몬은
+  shell 함수·alias 이름 소스가 없어, shell 이 실제로 완성하는 단어(`p10k`)가 miss 로
+  집계될 수 있다. 등록된 shell 이름을 아는 새 데몬이 그런 행을 지운다 — shell 이 스스로
+  완성하는 이름에 overlay spec 조언은 항상 오답이다. 판정 소스는 데몬이 넘기는 등록
+  이름 집합이고, 실행 시점은 **shell 이름 등록** 한 곳이다 — 판정 소스가 그 요청으로
+  들어오므로 그보다 이른 시점에는 지울 근거가 없다. 등록은 메모리 전용이라 재시작마다
+  사라지고, shell 은 데몬 pid 가 바뀔 때마다 다시 등록한다 — 등록마다 프루닝이 돈다. PATH 에 실재하는 spec
+  없는 바이너리 행은 진짜 overlay 대상이라 건드리지 않고, 재작성은 같은 temp+rename
+  원자 경로를 쓴다.
 
 ### 3.6.4 derived specs 안내 (soft notice)
 
@@ -341,6 +350,25 @@ THEN:
 - 백그라운드에서 주기적으로 자동 실행하는 daemon timer X.
 - 네트워크 호출 (latest version 확인 등) X. spec age 는 빌드 메타 (`manifest.json` 의 build_date) 만 비교.
 - 사용자 모르게 자동 수정 (auto-fix) X.
+
+### 3.6.7 데몬/CLI 버전 스큐 (warning) — v1.7
+
+실행 중 데몬의 버전이 CLI 버전과 다르면 `nerv doctor` 가 warning 행 1개를 표시:
+
+```
+  ! daemon               nervd 0.1.6 running (pid 1437) but CLI is 0.1.15
+                        → run: nerv stop && nerv start
+```
+
+- **왜 잡는가**: `brew upgrade` 는 바이너리만 갈아끼운다 — 이미 떠 있는 데몬은
+  구버전 프로세스로 남는다 (실측: 0.1.6 데몬이 0.1.15 CLI 를 상대하는데 doctor 는
+  초록). 스크우 기간엔 최신 엔진의 수정 (예: v1.5 오타 필터) 이 사용자에게 도달하지
+  않고, 그 동안 쌓인 miss 집계는 오답이다 (§3.6.3 프루닝 조항).
+- 판정 소스는 pong 의 `version` 필드다. 필드가 없는 응답에는 **경고하지 않는다** —
+  기존 `✓ daemon` 행 그대로. doctor 가 조용히 넘어가는 유일한 자리.
+- 버전이 같으면 **경고 행이 없다** — `✓ daemon` 행만, 신규 설치 출력 불변.
+- 자동 재기동은 하지 않는다 (§3.6.6 / README "What Nerv will never do"). 조치는
+  사용자가 명령을 실행하는 것.
 
 ---
 
@@ -434,3 +462,5 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 *v1.4 — 롱테일 spec 커버리지 정합 (2026-09-05). v1.3 → v1.4 변경: §3.6.3 `spec misses` 신설 (데몬의 로컬 miss 집계 `misses.tsv` — throttle 5s, temp+rename, 확정된 miss 만, 텔레메트리 아님), §3.6.4 `derived specs` 신설 (`--help` 파생 spec 행 + 파손 시 "delete that file" 안내, doctor/spec list 는 읽기 전용), 기존 §3.6.3 디바운스 / §3.6.4 비목표 를 §3.6.5 / §3.6.6 으로 재번호. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경. 변경 트리거: 파생 spec 파싱 실패 클래스가 사용자 가시 에러로 승격될 때 (E6 후보), miss 집계에 명령별 조치 hint 추가 시.*
 *v1.5 — 공백 뒤 명령 이름 교정 (2026-09-17). v1.4 → v1.5 변경: §3.6.3 에 교정된 오타 비집계 조항 추가 (실측: v0.1.11 `misses.tsv` 24행 전부 오타). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
 *v1.6 — `_complete` exit 4 (행 + 토큰 완성, 에러 아님) 명시 (2026-09-17). 5종 카탈로그 무변경.*
+*v1.7 — §3.6.7 데몬/CLI 버전 스큐 경고 신설 (2026-09-21). 실행 중 데몬 pong 의 `version` ≠ CLI 면 warning 행 1개 + `nerv stop && nerv start` 조치. version 필드 없는 pong 은 무경고, 같은 버전은 행 없음 (신규 설치 출력 불변). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
+*v1.8 — §3.6.3 shell 이름 행 프루닝 조항 신설 (2026-09-21). 등록된 shell 함수·alias 이름을 아는 데몬이 스큐 기간에 쌓인 해당 miss 행을 shell 이름 등록 시점에 원자 재작성으로 정리한다. 판정 소스가 등록 요청으로 들어오므로 트리거는 그 한 곳, PATH 실재 바이너리 행은 보존. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*

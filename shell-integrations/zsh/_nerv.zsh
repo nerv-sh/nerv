@@ -65,7 +65,12 @@ zmodload -F zsh/parameter p:aliases 2>/dev/null
 # is a cheap no-op on every shell after the first. Backgrounded in a
 # subshell: never blocks the prompt, no job-control noise. E1 ("daemon
 # not running — run: nerv start") remains the fallback if this fails.
-( "$__NERV_BIN" start >/dev/null 2>&1 & ) 2>/dev/null
+# NERV_AUTOSTART=0 opts out — test harnesses that manage the daemon
+# themselves set it so a session's first prompt can observe the
+# daemon-down path.
+if [[ "${NERV_AUTOSTART:-1}" != "0" ]]; then
+  ( "$__NERV_BIN" start >/dev/null 2>&1 & ) 2>/dev/null
+fi
 
 __nerv_reset_state() {
   __NERV_ACTIVE=0
@@ -753,6 +758,21 @@ __nerv_complete() {
     return
   fi
 
+  # Shell-name rows arrive with the engine's generic description. An
+  # alias knows its expansion locally ($aliases is already loaded for
+  # line expansion) — paint `alias → body` instead.
+  local __sn_i __sn_ins tab=$'\t'
+  for (( __sn_i = 1; __sn_i <= ${#rlines}; __sn_i++ )); do
+    __sn_ins="${rlines[__sn_i]%%$tab*}"
+    (( ${+aliases[$__sn_ins]} )) || continue
+    local -a __sn_fields=("${(@ps:\t:)rlines[__sn_i]}")
+    # Only rows the engine sourced from the shell-name registry — a spec
+    # row that happens to share the name (`git gr` → `grep`) keeps its own.
+    if [[ "${__sn_fields[3]}" == "shell function" ]]; then
+      __sn_fields[3]="alias → ${aliases[$__sn_ins]}"
+      rlines[__sn_i]="${(pj:\t:)__sn_fields}"
+    fi
+  done
   __NERV_ITEMS=("${rlines[@]}")
   __nerv_measure_items   # size the box once; show_popup reads the cache
   # The "Immediately execute" sentinel shows ONLY at a segment boundary —
@@ -1151,4 +1171,50 @@ __nerv_rebind() {
 autoload -Uz add-zsh-hook 2>/dev/null && {
   add-zsh-hook precmd __nerv_precmd_reset
   add-zsh-hook precmd __nerv_rebind
+  add-zsh-hook precmd __nerv_register_shell_names
+}
+
+# Register this session's function·alias names with the daemon so they
+# surface as first-token candidates (docs: plan slice 02). Fires on
+# `precmd`, never at sourcing: `nerv start` is still backgrounding the
+# daemon then, and plugins like p10k define their functions after nerv
+# is sourced (same reason __nerv_rebind runs late). The transfer runs
+# asynchronously — prompt blocking 0 — and the names go to the daemon's
+# memory only; nothing here writes a file.
+# The names live in the daemon's memory, so a restarted daemon (the fix
+# `nerv doctor` itself suggests) has none. The hook therefore stays
+# attached and keys the registration on the daemon's pid: each precmd
+# reads the pid file with the `read` builtin (no fork) and re-sends when
+# it names a daemon this shell hasn't registered with. No pid file =
+# no daemon, so nothing is sent. A failed transfer is NOT swallowed:
+# the pid stays unregistered and the next precmd retries.
+# The transfer is a process substitution, not a `&` job: an interactive
+# shell announces every job it reaps (`[1]  + done …`) at the next
+# prompt, even one started under `nomonitor`. Its exit status comes back
+# as a line on the substitution's fd instead of through `wait`.
+typeset -gi __NERV_SN_FD=0 __NERV_SN_DPID=0 __NERV_SN_TRY=0
+__nerv_register_shell_names() {
+  if (( __NERV_SN_FD )); then
+    local st
+    read -t 0 -u $__NERV_SN_FD st 2>/dev/null || return  # still in flight
+    exec {__NERV_SN_FD}<&-
+    __NERV_SN_FD=0
+    [[ "$st" == 0 ]] && __NERV_SN_DPID=$__NERV_SN_TRY
+  fi
+  local dpid
+  { read -r dpid < "${NERV_PID:-$HOME/Library/Caches/nerv/nervd.pid}" } 2>/dev/null
+  [[ "$dpid" == <1-> ]] || return        # daemon not up (yet)
+  (( dpid == __NERV_SN_DPID )) && return  # this daemon already has them
+  local -a snames
+  # Aliases first: the 2000 cap below trims from the end, and a shell
+  # with hundreds of plugin functions would otherwise drop every alias.
+  snames=( "${(@k)aliases[@]}" "${(@k)functions[@]}" )
+  snames=( "${(@)snames:#[._]*}" )          # internals: _foo, .foo
+  (( ${#snames} )) || { add-zsh-hook -d precmd __nerv_register_shell_names; return }
+  (( ${#snames} > 2000 )) && snames=( "${(@)snames[1,2000]}" )
+  __NERV_SN_TRY=$dpid
+  exec {__NERV_SN_FD}< <(
+    print -rC1 -- "${snames[@]}" | "$__NERV_BIN" _shell-names >/dev/null 2>&1
+    print -r -- $?
+  )
 }

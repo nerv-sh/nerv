@@ -837,27 +837,32 @@ pub struct CommandNames {
     /// for a list that changed only when a directory did.
     stems: Arc<Vec<String>>,
     path: Arc<Vec<String>>,
+    /// Shell function·alias names registered by zsh sessions. Shared
+    /// like the other two: the daemon swaps an `Arc` in place, and a
+    /// first-token keystroke must not clone a few thousand names.
+    shell: Arc<Vec<String>>,
 }
 
 impl CommandNames {
-    /// Build from the three sources. `frecent` is expected most-used
-    /// first, `stems` and `path` sorted; this type preserves the order
-    /// it is given and only dedupes across sources.
+    /// Build from the three owned sources; the shell-name source stays
+    /// empty (only the daemon fills it, via `from_shared`).
     pub fn from_parts(frecent: Vec<String>, stems: Vec<String>, path: Vec<String>) -> Self {
-        Self::from_shared(frecent, Arc::new(stems), Arc::new(path))
+        Self::from_shared(frecent, Arc::new(stems), Arc::new(path), Arc::default())
     }
 
-    /// Same, with the two cached lists handed in by reference count —
+    /// Same, with the cached lists handed in by reference count —
     /// what a caller that rebuilds this per keystroke should use.
     pub fn from_shared(
         frecent: Vec<String>,
         stems: Arc<Vec<String>>,
         path: Arc<Vec<String>>,
+        shell: Arc<Vec<String>>,
     ) -> Self {
         Self {
             frecent,
             stems,
             path,
+            shell,
         }
     }
 
@@ -872,6 +877,7 @@ impl CommandNames {
         self.frecent.iter().any(|c| c == name)
             || self.stems.iter().any(|c| c == name)
             || (path_prefix_allowed(name) && self.path.iter().any(|c| c == name))
+            || self.shell.iter().any(|c| c == name)
     }
 }
 
@@ -972,6 +978,10 @@ pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggesti
             },
             "bin",
         ),
+        // Shell function·alias names, the session-local fourth source
+        // (plan slice 02). The widget rewrites alias rows to describe
+        // the expansion — it already reads $aliases.
+        (names.shell.as_slice(), "shell function"),
     ];
 
     let mut seen = std::collections::HashSet::new();
@@ -5794,6 +5804,32 @@ region = us-east-1
             // `w` is a real one-letter binary on macOS.
             vec!["w".into(), "zcat".into(), "zsh".into()],
         )
+    }
+
+    /// Shell function·alias names are the fourth source of first-token
+    /// candidates (plan slice 02): they complete like any other name,
+    /// count as complete once fully typed, and carry the shell-function
+    /// description (the widget rewrites alias rows to `alias → body`).
+    #[test]
+    fn shell_names_complete_from_the_fourth_source() {
+        let names = CommandNames::from_shared(
+            Vec::new(),
+            Arc::new(vec![]),
+            Arc::new(vec![]),
+            Arc::new(vec!["p10k".to_string(), "g".to_string()]),
+        );
+        let items = complete_command_name("p1", &names);
+        assert!(
+            items.iter().any(
+                |s| s.insertion == "p10k" && s.description.as_deref() == Some("shell function")
+            ),
+            "shell names must be offered with the shell-function desc: {items:?}"
+        );
+        // A fully typed shell name is complete → no rows (exit-4 silence).
+        assert!(complete_command_name("p10k", &names).is_empty());
+        assert!(names.is_complete_name("p10k"));
+        // Nothing leaks into unrelated prefixes.
+        assert!(complete_command_name("zzz", &names).is_empty());
     }
 
     fn cmd_complete(line: &str, names: &CommandNames) -> CompleteResult {
