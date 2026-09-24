@@ -55,6 +55,14 @@ def log(msg):
 TRANSCRIPT = []
 
 
+def _session_leader():
+    # New session with the pty as its controlling terminal, like a real
+    # terminal tab: without it zsh runs with job control off and the
+    # job-notice check below could never fail.
+    os.setsid()
+    fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+
+
 def pump(fd, seconds):
     out = b""
     deadline = time.time() + seconds
@@ -99,6 +107,9 @@ def main():
         # Expands to a typo: the engine corrects the *expanded* line, so
         # its span does not index what the user typed.
         f.write("alias dk=dokcer\n")
+        # An alias sharing a spec subcommand's name: `git checko` must keep
+        # the spec's own description, not the alias expansion.
+        f.write("alias checkout=qcheckout\n")
         # Ctrl-X Ctrl-B writes the edit buffer to a file: the only way to
         # read what Enter left behind without parsing redraw escapes.
         f.write(f"__dump() {{ print -rn -- \"$BUFFER\" > {home}/buffer; }}\n")
@@ -161,7 +172,7 @@ def main():
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         proc = subprocess.Popen(
             ["/bin/zsh"],
-            preexec_fn=os.setsid,
+            preexec_fn=_session_leader,
             stdin=slave,
             stdout=slave,
             stderr=slave,
@@ -241,6 +252,18 @@ def main():
         if "alias → qstat" not in text:
             failures.append("alias row did not describe its expansion")
         log(f"'q': alias offered={'qk' in text} desc={'alias → qstat' in text}")
+
+        # 2d: only shell-name rows take the alias description — a spec row
+        # that happens to share an alias's name keeps its own.
+        os.write(master, b"\x07\x15")
+        pump(master, 0.6)
+        os.write(master, b"git checko")
+        text = pump(master, 1.5).decode(errors="replace")
+        if "alias → qcheckout" in text:
+            failures.append("spec row 'checkout' took the alias description")
+        if "Switch branches" not in text:
+            failures.append("'git checko' did not show the spec row's description")
+        log(f"'git checko': spec desc kept={'Switch branches' in text and 'alias →' not in text}")
 
         # A typo reaches the name it meant. Prefix matching cannot: the
         # whole top of misses.tsv is transpositions like this one.
@@ -492,7 +515,7 @@ def main():
         fcntl.ioctl(s2, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         proc2 = subprocess.Popen(
             ["/bin/zsh"],
-            preexec_fn=os.setsid,
+            preexec_fn=_session_leader,
             stdin=s2,
             stdout=s2,
             stderr=s2,
@@ -518,6 +541,23 @@ def main():
         if "dockr" not in text:
             failures.append("registration was not retried on the next precmd")
         log(f"after retry: function offered={'dockr' in text}")
+        # Ctrl-G closes the open popup first; otherwise the Enter below
+        # would accept its row instead of running the empty line.
+        os.write(m2, b"\x07\x15")
+
+        # The names live in the daemon's memory: a restart (what `nerv
+        # doctor` tells a skewed user to do) must be followed by a
+        # re-registration at the next prompt, keyed on the new pid.
+        subprocess.run([NERV, "stop"], env=env, capture_output=True)
+        subprocess.run([NERV, "start"], env=env, capture_output=True)
+        time.sleep(1.0)
+        os.write(m2, b"\r")  # next prompt → new daemon pid → re-register
+        pump(m2, 1.5)
+        os.write(m2, b"dock")
+        text = pump(m2, 1.5).decode(errors="replace")
+        if "dockr" not in text:
+            failures.append("shell names were not re-registered after a daemon restart")
+        log(f"after restart: function offered={'dockr' in text}")
         os.write(m2, b"\x15exit\n")
         time.sleep(0.3)
     except OSError as e:
@@ -547,6 +587,13 @@ def main():
     if leaked:
         failures.append(f"widget printed variable dumps: {leaked[:3]!r}")
     log(f"variable dumps: {len(leaked)}")
+
+    # The registration runs as a background job; an interactive shell
+    # must not announce it (`[1] 12345`, `[1]  + done …`) at prompts.
+    jobs = re.findall(rb"\[\d+\]\s+(?:\+\s+)?(?:done|\d+)", strip_ansi(b"".join(TRANSCRIPT)))
+    if jobs:
+        failures.append(f"job-control notices leaked: {jobs[:3]!r}")
+    log(f"job notices: {len(jobs)}")
 
     # 4: none of those keystrokes may be tallied as a missing spec —
     # except `dockr`: the direct engine probes above settle a shell
@@ -582,8 +629,8 @@ def main():
         "PASS — command-name popup + Tab insert, correction after the "
         "space (wrapper-safe, no ghost, shell words skipped), exact-name "
         "and alias silence, shell function·alias candidates (alias desc "
-        "names the expansion), registration retried after the daemon "
-        "came up, ghost (with and without a daemon), clean tally"
+        "names the expansion, spec rows keep theirs), registration retried after the daemon "
+        "came up and after it restarted, no job notices, ghost (with and without a daemon), clean tally"
     )
     return 0
 

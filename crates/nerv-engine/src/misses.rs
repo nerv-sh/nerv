@@ -190,8 +190,8 @@ impl MissCounter {
         }
         st.dirty = true;
         drop(st);
-        // Force: pruning is once per trigger (registration, first PATH
-        // scan), and doctor may read the file right after — the throttled
+        // Force: pruning runs once per shell-name registration, and
+        // doctor may read the file right after — the throttled
         // cadence must not sit on the cleanup for 5 seconds.
         self.flush_now();
         removed
