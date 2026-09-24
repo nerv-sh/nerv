@@ -424,10 +424,68 @@ async fn shell_names_cap_drops_oldest_across_sessions() {
     run.expect("test timeout");
 }
 
+/// A registration line that arrives in two reads split inside a
+/// multi-byte character still registers the name intact: the daemon
+/// decodes a line once, not per read (a per-chunk decode turned each
+/// half of `é` into U+FFFD).
+#[tokio::test]
+async fn register_shell_names_split_mid_character_decodes_intact() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let stream = daemon.connect().await;
+        let (read_half, mut write_half) = stream.into_split();
+        let req = serde_json::to_string(&Request::RegisterShellNames {
+            names: vec!["héllo".into()],
+        })
+        .unwrap()
+            + "\n";
+        let bytes = req.as_bytes();
+        let split = req.find('é').expect("é present") + 1; // inside é
+        write_half
+            .write_all(&bytes[..split])
+            .await
+            .expect("write head");
+        write_half.flush().await.expect("flush");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        write_half
+            .write_all(&bytes[split..])
+            .await
+            .expect("write tail");
+        let complete = serde_json::to_string(&Request::Complete {
+            line: "h".into(),
+            cursor: 1,
+            cwd: None,
+        })
+        .unwrap()
+            + "\n";
+        write_half
+            .write_all(complete.as_bytes())
+            .await
+            .expect("write complete");
+        write_half.flush().await.expect("flush");
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read ack");
+        line.clear();
+        reader.read_line(&mut line).await.expect("read rows");
+        let resp: Response = serde_json::from_str(line.trim()).expect("decode");
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected shell-name rows, got {resp:?}");
+        };
+        assert!(
+            items.iter().any(|s| s.insertion == "héllo"),
+            "split name must register intact: {items:?}"
+        );
+    })
+    .await;
+    daemon.shutdown().await;
+    run.expect("test timeout");
+}
+
 /// A request line over 256 KiB is discarded before parsing and the
-/// connection survives (plan slice 02): the oversized line produces no
-/// response of its own, and the very next line on the same socket still
-/// gets a Pong.
+/// connection survives (plan slice 02): the oversized line is answered
+/// with an Error — a client blocked on its reply must not hang — and the
+/// very next line on the same socket still gets a Pong.
 #[tokio::test]
 async fn oversized_request_line_is_discarded_connection_survives() {
     let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
@@ -448,8 +506,15 @@ async fn oversized_request_line_is_discarded_connection_survives() {
         reader.read_line(&mut line).await.expect("read");
         let resp: Response = serde_json::from_str(line.trim()).expect("decode");
         assert!(
+            matches!(resp, Response::Error { .. }),
+            "oversized line must be answered with an Error: got {resp:?}"
+        );
+        line.clear();
+        reader.read_line(&mut line).await.expect("read");
+        let resp: Response = serde_json::from_str(line.trim()).expect("decode");
+        assert!(
             matches!(resp, Response::Pong { .. }),
-            "oversized line must be discarded, next one served: got {resp:?}"
+            "connection must survive, next line served: got {resp:?}"
         );
     })
     .await;
