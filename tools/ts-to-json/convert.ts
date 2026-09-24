@@ -44,6 +44,53 @@ const FIG_GENERATORS_PRELUDE: string = (() => {
   return parts.join("\n");
 })();
 
+const GIT_LOCAL_BRANCHES = [
+  "git",
+  "--no-optional-locks",
+  "branch",
+  "--no-color",
+  "--sort=-committerdate",
+];
+
+/**
+ * git's branch enumeration closures — `localOrRemoteBranches` in
+ * vendor git.ts (`branch -d/-D`) and git-flow's `typeBranches`. Both
+ * shell out to `git ... branch ... --sort=-committerdate`, and the
+ * `* ` / `+ ` markers they strip are handled by sanitize_generator_line.
+ *
+ * `localOrRemoteBranches` lists remote branches only when the user typed
+ * `-r`. A static script can't see tokens, so it takes the default: the
+ * local branches `branch -d/-D` can delete. The format prints an empty
+ * line (dropped by the engine) for any branch checked out in a worktree,
+ * which covers the current branch too — git refuses to delete those.
+ */
+export const detectGitBranchScript = (src: string): string[] | null => {
+  if (!src.includes("--sort=-committerdate")) return null;
+  if (!src.includes('"branch"') && !src.includes("'branch'")) return null;
+  if (/tokens\.includes\(["']-r["']\)/.test(src)) {
+    return [
+      ...GIT_LOCAL_BRANCHES,
+      "--format=%(if)%(worktreepath)%(then)%(else)%(refname:short)%(end)",
+    ];
+  }
+  return GIT_LOCAL_BRANCHES;
+};
+
+/**
+ * `git branch -a --sort=-committerdate` interleaves local and remote
+ * branches by date, burying the local ones `checkout`/`merge` usually
+ * want. git applies the last `--sort` as the primary key, so adding
+ * `refname:rstrip=-2` (`refs/heads` < `refs/remotes`) groups locals
+ * first and keeps the date order inside each group.
+ */
+export const groupBranchesLocalFirst = (script: string[]): string[] =>
+  script[0] === "git" &&
+  script.includes("branch") &&
+  script.includes("-a") &&
+  script.at(-1) === "--sort=-committerdate"
+    ? [...script, "--sort=refname:rstrip=-2"]
+    : script;
+
 /**
  * Detect whether a Fig generator object came from `filepaths()` or
  * `folders()` in `@fig/autocomplete-generators`. Both build a custom
@@ -335,9 +382,13 @@ const TEMPLATE_MAP: Record<string, string> = {
   help: "help",
 };
 
-const convertTemplate = (t: string | string[] | undefined): string | null => {
+// The engine takes one kind per arg. `["folders", "filepaths"]` (rm,
+// trash, subl, …) means both, and `filepaths` already lists folders —
+// taking the first entry dropped every file from those popups.
+export const convertTemplate = (t: string | string[] | undefined): string | null => {
   if (t == null) return null;
   const candidates = Array.isArray(t) ? t : [t];
+  if (candidates.some((c) => String(c).toLowerCase() === "filepaths")) return "filepaths";
   for (const c of candidates) {
     const key = String(c).toLowerCase();
     if (TEMPLATE_MAP[key]) return TEMPLATE_MAP[key];
@@ -686,40 +737,8 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
         };
       }
     }
-    // Well-known: git's branch enumeration closures
-    // (`gitGenerators.localBranches` / `localOrRemoteBranches`
-    // in vendor/withfig-autocomplete/src/git.ts). Both shell out to
-    // `git ... branch ... --no-color --sort=-committerdate` and
-    // post-process to strip the `* ` / `+ ` markers. Rewrite to a
-    // Template form — sanitize_generator_line already handles the
-    // marker stripping. False positives essentially zero (the
-    // git-marker + --sort=-committerdate co-occurrence is unique).
-    if (
-      (src.includes("--sort=-committerdate") ||
-        src.includes("'-sort=-committerdate'")) &&
-      (src.includes('"branch"') || src.includes("'branch'"))
-    ) {
-      const wantsRemote = src.includes('"-r"') || src.includes("'-r'");
-      return {
-        type: "template",
-        script: wantsRemote
-          ? [
-              "git",
-              "--no-optional-locks",
-              "branch",
-              "-a",
-              "--no-color",
-              "--sort=-committerdate",
-            ]
-          : [
-              "git",
-              "--no-optional-locks",
-              "branch",
-              "--no-color",
-              "--sort=-committerdate",
-            ],
-      };
-    }
+    const gitBranches = detectGitBranchScript(src);
+    if (gitBranches) return { type: "template", script: gitBranches };
     // Well-known: cargo's `targetGenerator({ kind })` — runs
     // `cargo metadata --format-version 1 --no-deps` and walks
     // `packages[*].targets[*]`, optionally filtering by
@@ -815,6 +834,7 @@ const convertOneGenerator = async (g: any): Promise<NervGenerator | null> => {
     } else if (typeof g.script === "string") {
       scriptArr = splitShellCommand(g.script);
     }
+    scriptArr = groupBranchesLocalFirst(scriptArr);
     if (scriptArr.length === 0) {
       // Function-form script we couldn't reduce to a static command.
       // Synthesize a Tier C custom source that runs script(tokens) →

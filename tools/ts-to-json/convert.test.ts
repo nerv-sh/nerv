@@ -1,12 +1,134 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
+  convertTemplate,
   curatedExtensions,
   detectAwsJsonPath,
   detectAwsListCustom,
   detectCargoMetadataPackages,
   detectFilepathsGenerator,
+  detectGitBranchScript,
   enrichK8sNamespaces,
+  groupBranchesLocalFirst,
 } from "./convert";
+
+describe("convertTemplate", () => {
+  test("a folders+filepaths array keeps files (rm, trash, subl)", () => {
+    expect(convertTemplate(["folders", "filepaths"])).toBe("filepaths");
+    expect(convertTemplate(["filepaths", "folders"])).toBe("filepaths");
+  });
+
+  test("a single kind passes through", () => {
+    expect(convertTemplate("folders")).toBe("folders");
+    expect(convertTemplate(["folders"])).toBe("folders");
+    expect(convertTemplate(["history"])).toBe("history");
+    expect(convertTemplate(undefined)).toBeNull();
+  });
+});
+
+// Run the real converter on the live vendor file: the closure source it
+// sniffs is what bun transpiles (`true` → `!0`, reflowed), not the .ts
+// text. A subprocess because the vendor files import `@fig/*`, which
+// resolves only through NODE_PATH, and `bun test` ignores NODE_PATH.
+const convertVendor = (name: string): any => {
+  const dir = mkdtempSync(`${tmpdir()}/nerv-convert-test-`);
+  const out = `${dir}/${name}.json`;
+  const r = Bun.spawnSync(
+    ["bun", "convert.ts", "--input", `../../vendor/withfig-autocomplete/src/${name}.ts`, "--output", out],
+    { cwd: import.meta.dir, env: { ...process.env, NODE_PATH: `${import.meta.dir}/node_modules` } },
+  );
+  try {
+    if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+    return JSON.parse(readFileSync(out, "utf8"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+const named = (list: any[], name: string): any =>
+  list.find((n) => [n.names ?? n.name].flat().includes(name));
+const GIT = ["git", "--no-optional-locks", "branch", "--no-color", "--sort=-committerdate"];
+
+describe("git branch generators (converted vendor git.ts)", () => {
+  const git = convertVendor("git");
+  const branch = named(git.subcommands, "branch");
+  const checkoutGens = named(git.subcommands, "checkout").args[0].generators;
+
+  test("branch -d/-D lists only branches git can delete", () => {
+    for (const flag of ["-d", "-D"]) {
+      expect(named(branch.options, flag).args[0].generators).toEqual([
+        {
+          type: "template",
+          script: [...GIT, "--format=%(if)%(worktreepath)%(then)%(else)%(refname:short)%(end)"],
+        },
+      ]);
+    }
+  });
+
+  test("checkout lists local branches before remote ones", () => {
+    expect(checkoutGens[0]).toEqual({
+      type: "template",
+      script: [
+        "git",
+        "--no-optional-locks",
+        "branch",
+        "-a",
+        "--no-color",
+        "--sort=-committerdate",
+        "--sort=refname:rstrip=-2",
+      ],
+    });
+  });
+
+  test("branch -m keeps the current branch and the date order", () => {
+    // `localBranches` (object form): renaming the current branch is valid.
+    expect(named(branch.options, "-m").args[0].generators).toEqual([
+      { type: "template", script: GIT },
+    ]);
+  });
+
+  test("checkout tags are left alone", () => {
+    expect(checkoutGens[1]).toEqual({
+      type: "template",
+      script: ["git", "--no-optional-locks", "tag", "--list", "--sort=-committerdate"],
+    });
+  });
+});
+
+describe("git-flow typeBranches (converted vendor git-flow.ts)", () => {
+  test("keeps its local branch script", () => {
+    const finish = named(named(convertVendor("git-flow").subcommands, "feature").subcommands, "finish");
+    expect(finish.args[0].generators).toEqual([{ type: "template", script: GIT }]);
+  });
+});
+
+describe("detectGitBranchScript", () => {
+  test("an unrelated closure is not a branch generator", () => {
+    expect(detectGitBranchScript('async () => run("git", ["tag"])')).toBeNull();
+  });
+});
+
+describe("groupBranchesLocalFirst", () => {
+  const all = ["git", "branch", "-a", "--sort=-committerdate"];
+
+  test("adds the local-first key after the date sort", () => {
+    expect(groupBranchesLocalFirst(all)).toEqual([...all, "--sort=refname:rstrip=-2"]);
+  });
+
+  test("leaves local-only and non-git scripts alone", () => {
+    expect(groupBranchesLocalFirst(["git", "branch", "--sort=-committerdate"])).toEqual([
+      "git",
+      "branch",
+      "--sort=-committerdate",
+    ]);
+    expect(groupBranchesLocalFirst(["echo", "branch", "-a", "--sort=-committerdate"])).toEqual([
+      "echo",
+      "branch",
+      "-a",
+      "--sort=-committerdate",
+    ]);
+  });
+});
 
 describe("curatedExtensions", () => {
   test("injects git flow (loadSpec git-flow) at the top level", () => {
