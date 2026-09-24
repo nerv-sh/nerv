@@ -199,8 +199,11 @@ async fn handle_connection(
         // shell-name registration rides one long line — a buggy client
         // must not grow the daemon's heap without limit. Bytes past
         // MAX_REQUEST_LINE are drained to the newline and the line is
-        // discarded before parsing; the connection stays usable.
-        let mut line = String::new();
+        // answered with an Error before parsing — a client blocked on
+        // its reply must not wait forever — and the connection stays
+        // usable. Bytes are decoded once per line: a multi-byte name
+        // split across two reads would decode as U+FFFD per chunk.
+        let mut line: Vec<u8> = Vec::new();
         let mut oversized = false;
         let mut eof = false;
         loop {
@@ -218,7 +221,7 @@ async fn handle_connection(
                     if line.len() + pos > MAX_REQUEST_LINE {
                         oversized = true;
                     } else {
-                        line.push_str(&String::from_utf8_lossy(&available[..pos]));
+                        line.extend_from_slice(&available[..pos]);
                     }
                 }
                 reader.consume(pos + 1);
@@ -227,32 +230,35 @@ async fn handle_connection(
             if !oversized {
                 if line.len() + available.len() > MAX_REQUEST_LINE {
                     oversized = true;
-                    line = String::new();
+                    line = Vec::new();
                 } else {
-                    line.push_str(&String::from_utf8_lossy(available));
+                    line.extend_from_slice(available);
                 }
             }
             let len = available.len();
             reader.consume(len);
         }
-        if oversized {
+        if oversized && eof {
+            break;
+        }
+        if !oversized && line.is_empty() {
             if eof {
                 break;
             }
             continue;
         }
-        if line.is_empty() {
-            if eof {
-                break;
-            }
-            continue;
-        }
+        let line = String::from_utf8_lossy(&line);
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if !oversized && trimmed.is_empty() {
             continue;
         }
         debug!(req = trimmed, "received");
-        let resp = match serde_json::from_str::<Request>(trimmed) {
+        let request = if oversized {
+            Err(format!("request line exceeds {MAX_REQUEST_LINE} bytes"))
+        } else {
+            serde_json::from_str::<Request>(trimmed).map_err(|e| format!("invalid request: {e}"))
+        };
+        let resp = match request {
             Ok(Request::Ping) => Response::Pong {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 pid: std::process::id(),
@@ -360,9 +366,7 @@ async fn handle_connection(
                     reason: Some("registered".to_string()),
                 }
             }
-            Err(e) => Response::Error {
-                message: format!("invalid request: {e}"),
-            },
+            Err(message) => Response::Error { message },
         };
         if let Ok(s) = serde_json::to_string(&resp) {
             if write_half.write_all(s.as_bytes()).await.is_err()
@@ -409,13 +413,18 @@ const SHELL_NAMES_CAP: usize = 4096;
 /// garbage or hostile and is discarded before parsing.
 const MAX_REQUEST_LINE: usize = 256 * 1024;
 
-/// Union of the sessions' shell names, oldest session first: dedup,
-/// cap at `SHELL_NAMES_CAP`, overflow drops the oldest. Free-standing
-/// so the cap contract is unit-testable without a daemon.
+/// Union of the sessions' shell names, oldest first: dedup, cap at
+/// `SHELL_NAMES_CAP`, overflow drops the oldest. A name the incoming
+/// registration repeats moves to the newest end — a shell that just
+/// re-registered it is the freshest owner, and must not lose it to the
+/// cap as if it were stale. Free-standing so the cap contract is
+/// unit-testable without a daemon.
 fn shell_names_union(existing: &[String], incoming: &[String]) -> Arc<Vec<String>> {
+    let fresh: std::collections::HashSet<&str> = incoming.iter().map(String::as_str).collect();
     let mut seen = std::collections::HashSet::with_capacity(existing.len() + incoming.len());
     let mut union: Vec<String> = Vec::with_capacity(existing.len() + incoming.len());
-    for name in existing.iter().chain(incoming.iter()) {
+    let kept = existing.iter().filter(|n| !fresh.contains(n.as_str()));
+    for name in kept.chain(incoming.iter()) {
         if seen.insert(name.as_str()) {
             union.push(name.clone());
         }
@@ -826,6 +835,24 @@ mod tests {
         // Dedup across sessions.
         let dup = shell_names_union(&["g".to_string()], &["g".to_string(), "h".to_string()]);
         assert_eq!(*dup, vec!["g".to_string(), "h".to_string()]);
+        // A re-registered name moves to the newest end, so the cap drops
+        // names nobody re-sent before it.
+        let moved = shell_names_union(
+            &["a".to_string(), "b".to_string()],
+            &["a".to_string(), "c".to_string()],
+        );
+        assert_eq!(
+            *moved,
+            vec!["b".to_string(), "a".to_string(), "c".to_string()]
+        );
+        let mut old: Vec<String> = vec!["keep".to_string()];
+        old.extend((0..4095).map(|i| format!("fn{i}")));
+        let capped = shell_names_union(&old, &["keep".to_string(), "x".to_string()]);
+        assert!(
+            capped.iter().any(|n| n == "keep"),
+            "re-sent name must survive the cap"
+        );
+        assert!(!capped.iter().any(|n| n == "fn0"));
         // Nothing registered → nothing stored.
         assert!(shell_names_union(&[], &[]).is_empty());
     }
