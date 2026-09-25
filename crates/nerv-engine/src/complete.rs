@@ -2131,7 +2131,12 @@ fn emit_candidates_for_arg(
     // generators on one arg already run concurrently — no explicit
     // prewarm pass needed.
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
-        for g in &arg.generators {
+        let n_generators = arg.generators.len() as u32;
+        for (gi, g) in arg.generators.iter().enumerate() {
+            // Spec order is group order: `git checkout` lists branches, then
+            // tags. Each generator gets its own band so its rows can't tie
+            // with the next one's and be alpha-interleaved.
+            let band = GENERATOR_BAND.saturating_mul(n_generators - gi as u32);
             match g {
                 crate::spec_parser::Generator::Template { script } => {
                     if let Some(lines) = cached_template_generator(script, cwd) {
@@ -2153,7 +2158,7 @@ fn emit_candidates_for_arg(
                                     // descending priority defeats the alpha tie-
                                     // break in sort_by_priority_then_alpha, and
                                     // frecency still floats repeat picks on top.
-                                    priority: Some(1_000u32.saturating_sub(idx as u32)),
+                                    priority: Some(band - (idx as u32).min(GENERATOR_BAND - 1)),
                                     icon: None,
                                     source_ranked: false,
                                     replace: None,
@@ -2626,6 +2631,12 @@ const GENERATOR_CACHE_MAX: usize = 64;
 /// detach and land on a later keystroke, so no keystroke ever blocks
 /// noticeably. 50ms sits below the ~100ms human "instant" threshold.
 const GENERATOR_SYNC_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Priority span one generator's rows occupy in
+/// [`emit_candidates_for_arg`]. Wider than any real generator's output
+/// (rows past it share the band's floor), so every row of an earlier
+/// generator outranks every row of a later one.
+const GENERATOR_BAND: u32 = 10_000;
 
 /// Keys with a populator thread currently computing, so concurrent
 /// keystrokes don't spawn a second subprocess for the same generator.
@@ -5441,6 +5452,63 @@ region = us-east-1
             warm_elapsed.as_millis() < 800,
             "expected concurrent cold generators, took {warm_elapsed:?}"
         );
+    }
+
+    /// Emit `arg` once to start its cold generators, wait for every one to
+    /// land in the cache, then emit again and return the displays.
+    fn warm_arg_displays(arg: &Arg) -> Vec<String> {
+        let _ = emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[]);
+        for g in &arg.generators {
+            if let crate::spec_parser::Generator::Template { script } = g {
+                wait_for_generator_cache(
+                    &(script.clone(), None),
+                    std::time::Duration::from_secs(5),
+                );
+            }
+        }
+        emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[])
+            .into_iter()
+            .map(|s| s.display)
+            .collect()
+    }
+
+    fn sh_template(cmd: &str) -> crate::spec_parser::Generator {
+        crate::spec_parser::Generator::Template {
+            script: vec!["/bin/sh".into(), "-c".into(), cmd.into()],
+        }
+    }
+
+    #[test]
+    fn generators_list_in_spec_order_not_interleaved() {
+        // `git checkout` = [branches, tags]. Each generator used to rank its
+        // own rows 1000, 999, …, so rank-equal rows of the two tied and the
+        // alpha tie-break interleaved them: `1.0 | main | 0.9 | feat`.
+        let arg = Arg {
+            generators: vec![
+                sh_template("printf 'main\\nfeat\\n' # order-branches"),
+                sh_template("printf '1.0\\n0.9\\n' # order-tags"),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(warm_arg_displays(&arg), ["main", "feat", "1.0", "0.9"]);
+    }
+
+    #[test]
+    fn a_long_generator_stays_ahead_of_the_next_one() {
+        // More rows than one band holds must not spill past the next
+        // generator's first row.
+        let arg = Arg {
+            generators: vec![
+                sh_template("seq 1 10005 | sed 's/^/z/' # band-long"),
+                sh_template("echo a-next # band-next"),
+            ],
+            ..Default::default()
+        };
+        let out = warm_arg_displays(&arg);
+        // A timed-out long generator would leave only `a-next` and pass
+        // vacuously — require its rows first.
+        assert_eq!(out.len(), 10_006, "long generator did not land");
+        assert_eq!(out.last().map(String::as_str), Some("a-next"));
     }
 
     #[test]
