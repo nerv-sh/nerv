@@ -178,7 +178,7 @@ prompt> git c█           │ ← 사용자 입력 라인     │
 
 ### 6.1 보장 조건
 
-- tmux 3.2 이상.
+- tmux 3.2 이상 (문서 기준선, 미검증). 자동 e2e 로 확인한 버전은 3.7c (§6.3).
 - 보장 터미널 (iTerm2 / Terminal.app) *안에서* 실행.
 - `set -g default-terminal "tmux-256color"` 또는 `xterm-256color`.
 - copy-mode 가 아닌 일반 입력 모드.
@@ -193,22 +193,41 @@ prompt> git c█           │ ← 사용자 입력 라인     │
 
 ### 6.3 tmux 검증 e2e (M0-7)
 
-> v0.6 정합: 본 e2e 는 ZLE path (M0). M1 figterm opt-in 의 tmux 검증은 §6.4 별도.
+두 경로 모두 `scripts/e2e-tmux-popup.py` 가 자동 검증한다. 전용 소켓(`tmux -L`)과
+임시 `HOME`/`ZDOTDIR` 를 쓰므로 사용자 tmux·`~/.zshrc` 를 건드리지 않고, 화면은
+`capture-pane -p` 로 읽는다. 기본 feature 빌드(`cargo build -p nerv-cli -p nerv-pty`)
+뒤에 돌린다 — `--all-features` 빌드의 nerv-pty 는 `profiling_early_exit` 로 즉시 종료한다.
 
 ```
-GIVEN: tmux 3.2+ 안 iTerm2
-WHEN:
-  tmux new-session
-  zsh -i
-  eval "$(nerv init zsh)"
-  git c<Tab>
-THEN:
-  - 추천 팝업 표시
-  - 입력 라인 텍스트 손상 없음
-  - tmux 상태바 / pane border 손상 없음
-  - Ctrl-B + arrow 로 pane 전환 시 이전 pane 잔재 없음
-  - tmux detach + attach 후 다시 git c<Tab> 정상
+python3 scripts/e2e-tmux-popup.py --path zle   # ZLE widget (M0)
+python3 scripts/e2e-tmux-popup.py --path pty   # figterm opt-in (M1, §6.4)
 ```
+
+| 시나리오 | 확인 |
+|---|---|
+| render | `git c` 팝업 박스 전체, 하단 여유가 있으면 프롬프트가 스크롤되지 않음 |
+| split | 분할된 pane 중 활성 pane 에만 팝업, 다른 pane 에 박스 문자 없음 |
+| bottom · bottom-grow | 마지막 행 프롬프트에서도 박스 전체 — 팝업이 커질 때(`g` → `git `) 포함 |
+| detach-attach | 실제 클라이언트로 detach 후 재attach, 크기 변화 없이 팝업 정상 |
+| resize (zle) | 줌/언줌 후 팝업 상태가 닫혀 Down 이 보이지 않는 팝업을 조작하지 않음, 입력 줄 유지 |
+| resize (pty) | 크기 변경 후 다음 키에서 새 크기로 박스 다시 그림 |
+
+측정 환경: tmux 3.7c, zsh 5.9 (2026-09-27). 상태바·pane border 손상은 자동 검증 밖이다 —
+스크립트는 `status off` 로 돌고, pane border 는 `capture-pane` 에 잡히지 않는다.
+
+**리사이즈 동작 (ZLE).** 리사이즈하면 zsh 가 프롬프트를 다시 그리면서 팝업 행을
+지운다. 그래서 `TRAPWINCH` 가 팝업 상태를 닫는다. nerv 보다 **먼저** 설정된 WINCH 핸들러
+(`TRAPWINCH` 함수, `trap '…' WINCH` 리스트 트랩 둘 다)는 체이닝된다. nerv **다음에**
+로드된 플러그인이 `TRAPWINCH` 를 다시 정의하면 nerv 의 핸들러가 대체된다 — 그 경우
+리사이즈 뒤 첫 Down 이 보이지 않는 팝업을 조작하는 이전 동작으로 돌아간다(테스트 불가,
+로드 순서 문제).
+
+**렌더는 tmux 를 구분하지 않는다.** tmux 전용 분기·감지 코드는 없다(옛 figterm 의
+`SPECIAL_TERMINALS`·`NERV_TERM_TMUX` 는 호출부가 없어 제거). 팝업은 §2 화이트리스트만
+으로 그린다. ZLE 경로는 OSC/DCS 를 내보내지 않는다. PTY 경로는 셸이 찍는 OSC 697 마커와
+nerv-pty 의 OSC 0 타이틀을 바깥 터미널로 그대로 넘기지만 팝업 렌더는 이것들에 기대지
+않고, 두 경로 e2e 모두 `allow-passthrough` 기본값(off)에서 통과한다. 검증은 tmux 기본 옵션
+(`-f /dev/null`)에서만 했다 — `extended-keys on` 등 키 관련 옵션을 켠 환경은 미측정.
 
 ---
 
@@ -231,6 +250,7 @@ edit-buffer 인터셉트 방식이 ZLE widget → PTY 가로채기로 바뀐다.
 PTY path 의 자동 검증: `scripts/e2e-pty-ghost.py` (zsh) +
 `scripts/e2e-pty-bash.py` + `scripts/e2e-pty-fish.py` — 셋 다
 ghost / accept+frecency / popup 박스 / Tab 네비 / PreExec 5종 체크.
+tmux 안 PTY path 는 §6.3 의 `scripts/e2e-tmux-popup.py --path pty`.
 fish 4.x 는 startup 시 터미널 capability 쿼리 (XTGETTCAP / DA / OSC 11)
 응답을 기다리므로 bare-PTY harness 가 응답을 에뮬레이트한다 (실 터미널
 에서는 비문제).

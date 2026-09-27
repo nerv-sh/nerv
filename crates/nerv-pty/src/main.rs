@@ -532,9 +532,6 @@ fn build_shell_command(command: Option<&[String]>) -> Result<CommandBuilder> {
     };
 
     builder.env(NERV_TERM, env!("CARGO_PKG_VERSION"));
-    if env::var_os("TMUX").is_some() {
-        builder.env("NERV_TERM_TMUX", env!("CARGO_PKG_VERSION"));
-    }
 
     // Clean up environment and launch shell.
     builder.env_remove(NERV_SHELL);
