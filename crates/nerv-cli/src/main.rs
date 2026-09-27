@@ -15,7 +15,7 @@
 //! - `nerv _complete`    — IPC bridge for ZLE widget (M0-1 PoC)
 
 use clap::{Parser, Subcommand};
-use nerv_engine::{Generator, Response, SpecRegistry, Subcommand as SpecNode, Suggestion, paths};
+use nerv_engine::{Generator, Response, SpecRegistry, Subcommand as SpecNode, paths, wire};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,6 +67,10 @@ enum Command {
     /// Internal: IPC bridge for the ZLE widget. Not user-facing.
     #[command(name = "_complete", hide = true)]
     InternalComplete {
+        /// Report "no hand-written spec" as exit 5 (6 with a complete
+        /// token). Only a widget that knows the codes passes it.
+        #[arg(long)]
+        compsys: bool,
         /// The input line (LBUFFER from zsh).
         line: String,
         /// Cursor byte offset within line.
@@ -86,6 +90,26 @@ enum Command {
     /// names on stdin, one per line. Not user-facing.
     #[command(name = "_shell-names", hide = true)]
     InternalShellNames,
+    /// Internal: record one executed command for history-ranked
+    /// suggestions. The command, its alias-expanded form and the previous
+    /// command arrive on stdin, NUL-terminated (`print -rN`), so no
+    /// command text ever shows up in this process's argv (`ps`). Not
+    /// user-facing.
+    #[command(name = "_record-cmd", hide = true)]
+    InternalRecordCmd {
+        #[arg(long)]
+        cwd: String,
+        #[arg(long, allow_hyphen_values = true)]
+        exit: i32,
+    },
+    /// Internal: the command to offer on an empty prompt. Prints the
+    /// ghost row (`\x1fghost\t<command>`) when the daemon has one. The
+    /// previous command comes from `NERV_PREV`, not argv.
+    #[command(name = "_predict", hide = true)]
+    InternalPredict,
+    /// Internal: seed an empty command history from a zsh history file.
+    #[command(name = "_import-history", hide = true)]
+    InternalImportHistory { path: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -120,7 +144,12 @@ fn main() -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().collect();
         if args.len() == 4 && args[1] == "_complete" {
             if let Ok(cursor) = args[3].parse::<usize>() {
-                return cmd_internal_complete(&args[2], cursor);
+                return cmd_internal_complete(&args[2], cursor, false);
+            }
+        }
+        if args.len() == 5 && args[1] == "_complete" && args[2] == "--compsys" {
+            if let Ok(cursor) = args[4].parse::<usize>() {
+                return cmd_internal_complete(&args[3], cursor, true);
             }
         }
     }
@@ -140,8 +169,15 @@ fn main() -> anyhow::Result<()> {
             SpecCmd::List => cmd_spec_list(),
         },
         Command::Uninstall { keep_config, quiet } => cmd_uninstall(keep_config, quiet),
-        Command::InternalComplete { line, cursor } => cmd_internal_complete(&line, cursor),
+        Command::InternalComplete {
+            line,
+            cursor,
+            compsys,
+        } => cmd_internal_complete(&line, cursor, compsys),
         Command::InternalShellNames => cmd_internal_shell_names(),
+        Command::InternalRecordCmd { cwd, exit } => cmd_internal_record_cmd(cwd, exit),
+        Command::InternalImportHistory { path } => cmd_internal_import_history(&path),
+        Command::InternalPredict => cmd_internal_predict(),
         Command::InternalRecord { spec, insertion } => cmd_internal_record(&spec, &insertion),
     }
 }
@@ -174,7 +210,15 @@ fn cmd_init(shell: Shell, shell_script: bool) -> anyhow::Result<()> {
                 warn_widget_conflicts(); // E4 — non-blocking notices
 
                 let bin = std::env::current_exe()?.to_string_lossy().into_owned();
-                println!("export NERV_BIN={bin:?}");
+                println!("export NERV_BIN={}", zsh_quote(&bin));
+                // The rc block sources this copy on later shell starts
+                // instead of running us (nerv-shell `ZSH_INIT_CACHE`).
+                // Best-effort: without it the block keeps using this path.
+                if std::env::var_os("NERV_PTY").is_none() {
+                    if let Some(dir) = paths::cache_dir() {
+                        let _ = write_init_cache(&dir, &bin);
+                    }
+                }
                 // NERV_PTY=1 opts the user into the figterm-style PTY
                 // shim (PLAN §5.8). Emit the PTY bootstrap script
                 // INSTEAD OF the ZLE widget; the widget itself
@@ -411,24 +455,96 @@ fn detect_zsh_version_via_shell() -> Option<String> {
     text.split_whitespace().nth(1).map(|s| s.to_string())
 }
 
+/// Environment variables that betray another completion plugin, and its
+/// name for the E4 notice. Shared by the eval path and the cached script.
+const CONFLICT_ENV: &[(&str, &str)] = &[
+    ("ZSH_AUTOSUGGEST_USE_ASYNC", "zsh-autosuggestions"),
+    ("_FZF_COMPLETION_DIR", "fzf completion"),
+    ("FZF_DEFAULT_OPTS", "fzf (general)"),
+    ("STARSHIP_SHELL", "starship prompt (no conflict, info only)"),
+];
+
+fn conflict_notice(tool: &str) -> String {
+    format!(
+        "[nerv] detected {tool} — Nerv runs alongside but key bindings may conflict.\n\
+         See: https://nerv.sh/docs/conflicts"
+    )
+}
+
 /// E4 (error-states.md §3.4): scan env for known widget-conflict
 /// markers and emit one stderr line per detection. Non-blocking —
 /// the hook installs normally; user can decide to coexist.
 fn warn_widget_conflicts() {
-    let candidates: &[(&str, &str)] = &[
-        ("ZSH_AUTOSUGGEST_USE_ASYNC", "zsh-autosuggestions"),
-        ("_FZF_COMPLETION_DIR", "fzf completion"),
-        ("FZF_DEFAULT_OPTS", "fzf (general)"),
-        ("STARSHIP_SHELL", "starship prompt (no conflict, info only)"),
-    ];
-    for (env_var, tool) in candidates {
+    for (env_var, tool) in CONFLICT_ENV {
         if std::env::var_os(env_var).is_some() {
-            eprintln!(
-                "[nerv] detected {tool} — Nerv runs alongside but key bindings may conflict.\n\
-                 See: https://nerv.sh/docs/conflicts"
-            );
+            eprintln!("{}", conflict_notice(tool));
         }
     }
+}
+
+/// Identity of the nerv binary a cached init script was written for:
+/// `size-mtime-inode`, fields 8, 10 and 2 of zsh's `zstat -A` array (it
+/// takes one `+element` per call), read without a process.
+/// A reinstall or upgrade changes it, so a stale cache refuses to load.
+fn bin_stamp(bin: &str) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(bin).ok()?;
+    Some(format!("{}-{}-{}", m.len(), m.mtime(), m.ino()))
+}
+
+/// Write the cached widget script for `bin` into `cache_dir`. Returns
+/// whether the file changed. An rc block from before the cache runs the
+/// eval path on every shell start; rewriting (and fsyncing) an identical
+/// file each time would only slow that start down, so it is skipped.
+fn write_init_cache(cache_dir: &std::path::Path, bin: &str) -> std::io::Result<bool> {
+    let stamp = bin_stamp(bin).ok_or_else(|| std::io::Error::other("cannot stat nerv"))?;
+    let text = init_cache_text(bin, &stamp, init_snippet_for_zsh(false));
+    let path = cache_dir.join(paths::INIT_CACHE_NAME);
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) {
+        return Ok(false);
+    }
+    paths::write_atomic(&path, &text)?;
+    Ok(true)
+}
+
+/// Quote a string for a zsh single-quoted word.
+fn zsh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The cached widget script: a guard that returns 1 unless it can prove
+/// it was written for the running nerv binary, then what the eval path
+/// would have run — the E3 floor, the E4 notices, `NERV_BIN`, the widget.
+/// It is sourced at the top level of `.zshrc`, so the guard uses no
+/// function-local variables.
+fn init_cache_text(bin: &str, stamp: &str, widget: &str) -> String {
+    // Exported only, like the eval path's `std::env::var_os`: a plugin's
+    // plain shell parameter of the same name is not the plugin itself.
+    let mut notices = String::new();
+    for (env_var, tool) in CONFLICT_ENV {
+        notices.push_str(&format!(
+            "[[ ${{(t){env_var}}} == *export* ]] && print -ru2 -- {}\n",
+            zsh_quote(&conflict_notice(tool))
+        ));
+    }
+    let q_bin = zsh_quote(bin);
+    format!(
+        "# Nerv's zsh widget, cached by `nerv init zsh --shell-script` so a new\n\
+         # shell can source it instead of running nerv. Rewritten on every such\n\
+         # run; do not edit. `return 1` hands over to that command.\n\
+         [[ -z ${{NERV_PTY-}} ]] || return 1\n\
+         autoload -Uz is-at-least && is-at-least 5.8 || return 1\n\
+         zmodload -F zsh/stat b:zstat 2>/dev/null || return 1\n\
+         typeset -ga __nerv_init_stamp\n\
+         zstat -A __nerv_init_stamp -- {q_bin} 2>/dev/null || return 1\n\
+         if [[ ${{__nerv_init_stamp[8]}}-${{__nerv_init_stamp[10]}}-${{__nerv_init_stamp[2]}} != {q_stamp} ]]; then unset __nerv_init_stamp; return 1; fi\n\
+         unset __nerv_init_stamp\n\
+         {notices}\
+         export NERV_BIN={q_bin}\n\
+         {widget}\n\
+         true\n",
+        q_stamp = zsh_quote(stamp),
+    )
 }
 
 fn cmd_doctor() -> anyhow::Result<()> {
@@ -507,6 +623,7 @@ fn build_doctor_report() -> DoctorReport {
     check_daemon(&mut r);
     check_specs(&mut r);
     check_spec_misses(&mut r);
+    check_history(&mut r);
     check_schema_version(&mut r);
     check_pty_mode(&mut r);
     r
@@ -537,6 +654,46 @@ fn check_spec_misses_in(r: &mut DoctorReport, path: &std::path::Path) {
         .join(", ");
     let hint = paths::user_specs_dir().map(|d| format!("add a spec in {}", d.display()));
     r.push(DoctorLevel::Ok, "spec misses", detail, hint);
+}
+
+/// How many executed commands back the history-ranked ghost. Advisory:
+/// an empty history is a fresh install, not a fault.
+fn check_history(r: &mut DoctorReport) {
+    let Some(path) = paths::history_path() else {
+        return;
+    };
+    if path == std::path::Path::new("-") {
+        return;
+    }
+    check_history_in(r, &path);
+}
+
+fn check_history_in(r: &mut DoctorReport, path: &std::path::Path) {
+    // The widget records with its output discarded, so a history that
+    // stopped growing is only visible here.
+    if path.exists() {
+        if let Err(e) = std::fs::OpenOptions::new().append(true).open(path) {
+            r.push(
+                DoctorLevel::Warn,
+                "history",
+                format!("not writable: {e}"),
+                Some(format!("check permissions on {}", path.display())),
+            );
+            return;
+        }
+    }
+    let n = nerv_engine::HistoryStore::load(path).len();
+    let detail = if n == 0 {
+        "none recorded yet".to_string()
+    } else {
+        format!("{n} commands")
+    };
+    r.push(
+        DoctorLevel::Ok,
+        "history",
+        detail,
+        Some(format!("{}", path.display())),
+    );
 }
 
 /// E5: spec cache schema version vs the daemon's supported version
@@ -1609,7 +1766,7 @@ impl UninstallLog {
 
 // ---------- internal: _complete (M0-1 IPC bridge) ----------
 
-fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
+fn cmd_internal_complete(line: &str, cursor: usize, compsys: bool) -> anyhow::Result<()> {
     let req = nerv_engine::Request::Complete {
         line: line.to_string(),
         cursor,
@@ -1620,33 +1777,32 @@ fn cmd_internal_complete(line: &str, cursor: usize) -> anyhow::Result<()> {
         cwd: std::env::current_dir()
             .ok()
             .and_then(|p| p.to_str().map(|s| s.to_string())),
+        // The history ghost's inputs ride the environment, not argv: argv
+        // is visible to every user on the machine, the environment only to
+        // the same user and root.
+        prev: std::env::var("NERV_PREV").ok().filter(|s| !s.is_empty()),
+        typed: std::env::var("NERV_TYPED").ok().filter(|s| s != line),
     };
+    // Only a widget that sets NERV_TYPED knows the ghost row. A shell
+    // still running an older widget (after an upgrade, until it
+    // restarts) would list it as a popup row.
+    let wants_ghost = std::env::var_os("NERV_TYPED").is_some();
 
-    match nerv_engine::ipc_client::query_sync(&req)? {
-        Response::Suggestions {
-            items,
-            token_complete,
-        } => {
-            for s in &items {
-                print_suggestion(s);
-            }
-            // Exit 4 = rows printed, but the typed token already names a
-            // candidate. The widget keeps the rows and preselects "run
-            // the line" instead of the first (longer) name.
-            if token_complete {
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                std::process::exit(4);
-            }
-        }
-        // E5: a schema-mismatch reason exits 3 (distinct from the daemon-
-        // down failure) so the ZLE widget can show its one-line hint.
-        Response::Empty { reason: Some(r) } if r.starts_with("spec schema mismatch") => {
-            eprintln!("[nerv] {r}");
-            std::process::exit(3);
-        }
-        // Any other response → no output → no popup in zsh.
-        _ => {}
+    let resp = nerv_engine::ipc_client::query_sync(&req)?;
+    let out = wire::complete_output(resp, compsys, wants_ghost);
+    for line in &out.lines {
+        println!("{line}");
+    }
+    // E5: a schema-mismatch reason exits 3 (distinct from the daemon-
+    // down failure) so the ZLE widget can show its one-line hint.
+    if let Some(msg) = &out.stderr {
+        eprintln!("{msg}");
+    }
+    let code = out.code;
+    if code != 0 {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(code);
     }
     Ok(())
 }
@@ -1674,54 +1830,126 @@ fn cmd_internal_shell_names() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The popup footer shows a single clamped line, so shipping a full
-/// multi-hundred-char description (aws service blurbs run 500–2000 chars)
-/// is pure IPC + zsh-scan overhead — with ~600 aws subcommands it turned
-/// a `aws ` completion into a 376 KB response that the widget then
-/// re-scanned on every keystroke. Collapse tabs/newlines (they'd corrupt
-/// the tab-separated wire format) and cap the length; the widget clamps
-/// to the box width anyway.
-fn wire_desc(desc: &str) -> String {
-    const MAX: usize = 200;
-    let cleaned = wire_field(desc);
-    if cleaned.chars().count() <= MAX {
-        cleaned
-    } else {
-        let mut out: String = cleaned.chars().take(MAX).collect();
-        out.push('…');
-        out
+fn cmd_internal_record_cmd(cwd: String, exit: i32) -> anyhow::Result<()> {
+    use std::io::Read;
+    let mut raw = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut raw)?;
+    let Some(req) = record_request(&raw, cwd, exit) else {
+        return Ok(());
+    };
+    if daemon_accepted(&req) {
+        return Ok(());
     }
+    // No daemon, a daemon too old to know `RecordCommand` (it answers
+    // Error), or one whose write failed: append straight to the file. The
+    // daemon reads it at its next start, so the command is not lost. If
+    // this write fails too, `nerv doctor`'s history row says why.
+    let (
+        Some(path),
+        nerv_engine::Request::RecordCommand {
+            command,
+            expanded,
+            cwd,
+            exit,
+            prev,
+        },
+    ) = (paths::history_path(), req)
+    else {
+        return Ok(());
+    };
+    if path == std::path::Path::new("-") {
+        return Ok(());
+    }
+    let entry = nerv_engine::history::Entry {
+        ts: nerv_engine::history::now_unix(),
+        exit,
+        cwd,
+        prev: if nerv_engine::history::is_ignored(&prev) {
+            String::new()
+        } else {
+            prev
+        },
+        command,
+        expanded,
+    };
+    nerv_engine::history::append_row(&path, &entry)?;
+    Ok(())
 }
 
-/// Collapse tab/newline/CR to a space. The wire format is tab-separated
-/// with one suggestion per line, so a stray tab or newline in ANY field
-/// (a generator that echoes `git remote -v`'s `origin\t<url>`, a spec
-/// with a multi-line description, …) shifts every field after it and
-/// tears the popup box. Sanitising every field at the wire boundary makes
-/// the format robust no matter what a generator returns.
-fn wire_field(s: &str) -> String {
-    s.replace(['\t', '\n', '\r'], " ")
+/// The daemon took a fire-and-forget history request. Only `Empty` is
+/// success: an `Error` reply (an older daemon rejecting an unknown
+/// method, a failed write) means the caller must do the work itself.
+fn daemon_accepted(req: &nerv_engine::Request) -> bool {
+    matches!(
+        nerv_engine::ipc_client::query_sync(req),
+        Ok(Response::Empty { .. })
+    )
 }
 
-fn print_suggestion(s: &Suggestion) {
-    println!("{}", wire_line(s));
+/// Split the widget's stdin (`command\0expanded\0prev\0`) into a
+/// `RecordCommand`. `None` for a command zsh would not remember — the
+/// widget filters first; this is the second fence.
+fn record_request(raw: &[u8], cwd: String, exit: i32) -> Option<nerv_engine::Request> {
+    let text = String::from_utf8_lossy(raw);
+    let mut parts = text.split('\0');
+    let command = parts.next()?.to_string();
+    if nerv_engine::history::is_ignored(&command) {
+        return None;
+    }
+    let expanded = parts.next().unwrap_or_default().to_string();
+    let prev = parts.next().unwrap_or_default().to_string();
+    Some(nerv_engine::Request::RecordCommand {
+        expanded: if expanded == command {
+            String::new()
+        } else {
+            expanded
+        },
+        command,
+        cwd,
+        exit,
+        prev,
+    })
 }
 
-/// One `_complete` row: insertion \t display \t description \t icon \t
-/// replace. Icon is empty when None (the widget renders it as a prefix
-/// glyph). Replace is `start,end` — the character span of the line the
-/// row rewrites (a corrected command word) — and empty for the usual
-/// "replace the token under the cursor".
-fn wire_line(s: &Suggestion) -> String {
-    let insertion = wire_field(&s.insertion);
-    let display = wire_field(&s.display);
-    let desc = wire_desc(s.description.as_deref().unwrap_or(""));
-    let icon = wire_field(s.icon.as_deref().unwrap_or(""));
-    let replace = s
-        .replace
-        .map(|r| format!("{},{}", r.start, r.end))
-        .unwrap_or_default();
-    format!("{insertion}\t{display}\t{desc}\t{icon}\t{replace}")
+/// How long `nerv _predict` waits for the daemon. The daemon answers from
+/// memory in well under a millisecond; this only bounds a wedged one.
+const PREDICT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+
+fn cmd_internal_predict() -> anyhow::Result<()> {
+    let Some(prev) = std::env::var("NERV_PREV").ok().filter(|s| !s.is_empty()) else {
+        return Ok(());
+    };
+    let req = nerv_engine::Request::Predict {
+        prev,
+        cwd: std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .unwrap_or_default(),
+    };
+    // The widget waits on this before the prompt takes keys; a wedged
+    // daemon must cost a missing prediction, not the prompt.
+    let resp = nerv_engine::ipc_client::query_sync_within(&req, Some(PREDICT_TIMEOUT))?;
+    if let Response::Empty { ghost: Some(g), .. } = resp {
+        println!("{}", wire::ghost_line(&g));
+    }
+    Ok(())
+}
+
+fn cmd_internal_import_history(histfile: &str) -> anyhow::Result<()> {
+    let req = nerv_engine::Request::ImportHistory {
+        path: histfile.to_string(),
+    };
+    if daemon_accepted(&req) {
+        return Ok(());
+    }
+    let Some(path) = paths::history_path() else {
+        return Ok(());
+    };
+    if path == std::path::Path::new("-") {
+        return Ok(());
+    }
+    nerv_engine::HistoryStore::load(&path).import_zsh_history(std::path::Path::new(histfile))?;
+    Ok(())
 }
 
 fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
@@ -1737,29 +1965,6 @@ fn cmd_internal_record(spec: &str, insertion: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The widget splits rows on tabs, so the field order is a contract:
-    /// a plain row keeps its first four fields byte-for-byte and gains an
-    /// empty fifth; a correction row names its span.
-    #[test]
-    fn wire_line_carries_the_replace_span_as_a_fifth_field() {
-        let plain = Suggestion {
-            insertion: "checkout".into(),
-            display: "checkout".into(),
-            description: Some("Switch branches".into()),
-            ..Default::default()
-        };
-        assert_eq!(wire_line(&plain), "checkout\tcheckout\tSwitch branches\t\t");
-
-        let fix = Suggestion {
-            insertion: "zeph".into(),
-            display: "zeph".into(),
-            description: Some("did you mean".into()),
-            replace: Some(nerv_engine::ReplaceSpan { start: 5, end: 9 }),
-            ..Default::default()
-        };
-        assert_eq!(wire_line(&fix), "zeph\tzeph\tdid you mean\t\t5,9");
-    }
 
     #[test]
     fn apply_init_block_installs_then_noops_then_updates() {
@@ -2300,6 +2505,86 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// An unchanged cache is left alone; a new binary rewrites it.
+    #[test]
+    fn init_cache_is_rewritten_only_when_it_changes() {
+        let dir = std::env::temp_dir().join(format!("nerv-init-write-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("nerv");
+        std::fs::write(&bin, "a").unwrap();
+        let bin = bin.to_string_lossy().into_owned();
+        assert!(write_init_cache(&dir, &bin).unwrap(), "first write");
+        assert!(
+            !write_init_cache(&dir, &bin).unwrap(),
+            "same binary: untouched"
+        );
+        // Another binary (a different size is a different stamp).
+        std::fs::write(&bin, "a longer binary").unwrap();
+        assert!(
+            write_init_cache(&dir, &bin).unwrap(),
+            "stale stamp: rewritten"
+        );
+        let text = std::fs::read_to_string(dir.join(paths::INIT_CACHE_NAME)).unwrap();
+        assert!(text.contains(&bin_stamp(&bin).unwrap()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rc block names the cache file by a literal (nerv-shell has no
+    /// dependencies); it must be the file this crate writes.
+    #[test]
+    fn rc_block_and_cache_writer_agree_on_the_file() {
+        assert_eq!(
+            nerv_shell::ZSH_INIT_CACHE,
+            format!("$HOME/{}/{}", paths::CACHE_SUBDIR, paths::INIT_CACHE_NAME)
+        );
+    }
+
+    /// The cached script loads only for the binary it was written for:
+    /// run through a real zsh, a matching stamp defines the widget and a
+    /// stale one returns 1 before defining anything.
+    #[test]
+    fn init_cache_loads_only_for_its_own_binary() {
+        let dir = std::env::temp_dir().join(format!("nerv-init-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("nerv bin");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        let bin = bin.to_string_lossy().into_owned();
+        let stamp = bin_stamp(&bin).unwrap();
+        let widget = "typeset -g NERV_TEST_WIDGET=loaded";
+        let run = |text: &str| {
+            let f = dir.join("init.zsh");
+            std::fs::write(&f, text).unwrap();
+            std::process::Command::new("zsh")
+                .args([
+                    "-fc",
+                    &format!(
+                        "STARSHIP_SHELL=zsh; source {:?}; print -r -- \"rc=$? w=$NERV_TEST_WIDGET b=$NERV_BIN\"",
+                        f
+                    ),
+                ])
+                .env_remove("NERV_PTY")
+                .env_remove("NERV_BIN")
+                .env("FZF_DEFAULT_OPTS", "x")
+                .env_remove("STARSHIP_SHELL")
+                .output()
+                .unwrap()
+        };
+        let good = run(&init_cache_text(&bin, &stamp, widget));
+        let out = String::from_utf8_lossy(&good.stdout);
+        assert_eq!(out.trim(), format!("rc=0 w=loaded b={bin}"));
+        // The E4 notice still reaches stderr from the cache — for an
+        // exported variable only, as on the eval path.
+        assert!(String::from_utf8_lossy(&good.stderr).contains("detected fzf (general)"));
+        assert!(!String::from_utf8_lossy(&good.stderr).contains("starship"));
+        let stale = run(&init_cache_text(&bin, "1-2-3", widget));
+        assert_eq!(String::from_utf8_lossy(&stale.stdout).trim(), "rc=1 w= b=");
+        let gone = run(&init_cache_text("/nonexistent/nerv", &stamp, widget));
+        assert_eq!(String::from_utf8_lossy(&gone.stdout).trim(), "rc=1 w= b=");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `init_snippet_for_zsh(false)` returns the ZLE widget body —
     /// recognisable by its `__NERV_LOADED` re-entry guard. The PTY
     /// flavor's bootstrap uses `NERV_PTY_SESSION_ID` instead.
@@ -2420,6 +2705,71 @@ mod tests {
         );
         assert_eq!(r.entries[0].detail, "zeph 12, aic2 9");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn record_request_splits_stdin_and_drops_ignored_commands() {
+        let req = record_request(b"g st\0git status\0ls\0", "/r".into(), 1).unwrap();
+        match req {
+            nerv_engine::Request::RecordCommand {
+                command,
+                expanded,
+                cwd,
+                exit,
+                prev,
+            } => {
+                assert_eq!(command, "g st");
+                assert_eq!(expanded, "git status");
+                assert_eq!(cwd, "/r");
+                assert_eq!(exit, 1);
+                assert_eq!(prev, "ls");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Identical expansion is not sent twice.
+        match record_request(b"ls\0ls\0\0", "/".into(), 0).unwrap() {
+            nerv_engine::Request::RecordCommand { expanded, .. } => assert!(expanded.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        assert!(record_request(b" export T=1\0export T=1\0\0", "/".into(), 0).is_none());
+        assert!(record_request(b"", "/".into(), 0).is_none());
+    }
+
+    #[test]
+    fn doctor_history_row_counts_commands() {
+        let path =
+            std::env::temp_dir().join(format!("nerv-history-doc-{}.tsv", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut r = DoctorReport::default();
+        check_history_in(&mut r, &path);
+        assert_eq!(r.entries[0].detail, "none recorded yet");
+        let store = nerv_engine::HistoryStore::load(&path);
+        for c in ["ls", "pwd"] {
+            store
+                .record(nerv_engine::history::Entry {
+                    ts: 1,
+                    exit: 0,
+                    cwd: "/".into(),
+                    prev: String::new(),
+                    command: c.into(),
+                    expanded: String::new(),
+                })
+                .unwrap();
+        }
+        let mut r = DoctorReport::default();
+        check_history_in(&mut r, &path);
+        assert_eq!(r.entries[0].detail, "2 commands");
+
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let mut r = DoctorReport::default();
+        check_history_in(&mut r, &path);
+        assert!(matches!(r.entries[0].level, DoctorLevel::Warn));
+        assert!(r.entries[0].detail.starts_with("not writable"));
+        let _ = std::fs::remove_file(&path);
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let _ = std::fs::remove_file(lock);
     }
 
     /// No recorded misses → no row (a fresh install's doctor output is

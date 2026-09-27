@@ -73,6 +73,8 @@ async fn fuzzy_mode_recovers_checkout_from_chk() {
             line: "git chk".to_string(),
             cursor: 7,
             cwd: None,
+            prev: None,
+            typed: None,
         };
         let mut json = serde_json::to_string(&req).unwrap();
         json.push('\n');
@@ -152,6 +154,8 @@ async fn default_prefix_mode_rejects_fuzzy_query() {
             line: "git chk".to_string(),
             cursor: 7,
             cwd: None,
+            prev: None,
+            typed: None,
         };
         let mut json = serde_json::to_string(&req).unwrap();
         json.push('\n');

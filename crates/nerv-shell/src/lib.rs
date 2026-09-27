@@ -19,6 +19,12 @@ pub const MARKER_START: &str = "# >>> nerv >>>";
 /// Marker that closes a Nerv-managed block in `~/.zshrc`.
 pub const MARKER_END: &str = "# <<< nerv <<<";
 
+/// The zsh widget script cached by `nerv init zsh --shell-script`, as the
+/// rc block names it. Mirrors `nerv_engine::paths::INIT_CACHE_NAME` under
+/// the cache dir; this crate stays dependency-free, so the path is spelled
+/// out here.
+pub const ZSH_INIT_CACHE: &str = "$HOME/Library/Caches/nerv/init.zsh";
+
 /// Generate the rc-file block that `nerv init <shell> >> ~/.<shell>rc`
 /// produces.
 ///
@@ -40,10 +46,18 @@ pub fn init_block(
 ) -> String {
     // fish is not POSIX: it sources command output via `| source`, not
     // the POSIX `eval "$(...)"`. zsh/bash use the POSIX form.
-    let eval_line = if shell == "fish" {
-        format!("{bin_path} init fish --shell-script | source")
-    } else {
-        format!("eval \"$({bin_path} init {shell} --shell-script)\"")
+    //
+    // zsh first sources the cached widget script: `eval "$(nerv …)"` costs a
+    // process and a 50 KB parse on every shell start. The cache returns 1
+    // when it was written for another nerv binary (or cannot tell), and the
+    // eval runs instead — which also rewrites the cache.
+    let eval_line = match shell {
+        "fish" => format!("{bin_path} init fish --shell-script | source"),
+        "zsh" => format!(
+            "if [[ -r \"{ZSH_INIT_CACHE}\" ]] && source \"{ZSH_INIT_CACHE}\"; then :; \
+             else eval \"$({bin_path} init zsh --shell-script)\"; fi"
+        ),
+        _ => format!("eval \"$({bin_path} init {shell} --shell-script)\""),
     };
     format!(
         "{start}\n\
@@ -198,6 +212,41 @@ mod tests {
         assert!(b.contains("Version: 1.0.0"));
         assert!(b.contains("eval \"$(/opt/homebrew/bin/nerv init zsh --shell-script)\""));
         assert!(b.trim_end().ends_with(MARKER_END));
+    }
+
+    /// A block from before the cache (same version, same binary, the
+    /// bare eval line) is replaced: the eval line is part of the identity.
+    #[test]
+    fn a_pre_cache_block_at_the_same_version_is_replaced() {
+        let old = format!(
+            "{MARKER_START}\n# Managed by `nerv init zsh`. Do not edit between markers.\n\
+             # Version: 1.0.0\n# Installed: ts\n\
+             eval \"$(/opt/homebrew/bin/nerv init zsh --shell-script)\"\n{MARKER_END}\n"
+        );
+        let new = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "zsh");
+        let up = upsert_block(&old, &new);
+        assert!(
+            matches!(up.action, UpsertAction::Updated { .. }),
+            "{:?}",
+            up.action
+        );
+        assert!(up.content.contains(ZSH_INIT_CACHE));
+    }
+
+    #[test]
+    fn zsh_block_sources_the_cache_before_falling_back_to_eval() {
+        let b = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "zsh");
+        let line = b
+            .lines()
+            .find(|l| l.contains("--shell-script"))
+            .expect("eval line");
+        let cache = line.find("source").expect("sources the cache");
+        let eval = line.find("eval").expect("falls back to eval");
+        assert!(cache < eval, "{line}");
+        assert!(line.contains(ZSH_INIT_CACHE));
+        // bash has no cache.
+        let bash = init_block("/opt/homebrew/bin/nerv", "1.0.0", "ts", "bash");
+        assert!(!bash.contains("init.zsh"));
     }
 
     #[test]

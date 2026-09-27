@@ -58,21 +58,28 @@ cloud attached is now a local daemon and a zsh widget.
   namespaces and resources, AWS profiles and resource IDs, SSH hosts, make
   targets, man pages, zoxide history. Recovered natively in Rust; no Node, no
   JS runtime on the hot path.
-- **Inline ghost text** — your most recent matching history command (like
-  zsh-autosuggestions), falling back to the top spec suggestion. Right-arrow
-  accepts.
-- **Frecency ranking** — things you actually pick float to the top.
+- **Inline ghost text** — the history command you most likely mean, ranked
+  by how often and how recently you ran it, in which folder, and what you
+  ran just before (`git add .` → `git commit …`). It falls back to the top spec
+  suggestion. On an empty prompt it predicts the command you usually run next
+  (`NERV_PREDICT=0` turns that off). Right-arrow accepts. The ranking follows
+  [deja](https://github.com/Giammarco-Ferranti/deja).
+- **Frecency ranking** — rows you pick, or type by hand, float to the top,
+  more so in the folder where you use them.
 - **Understands your shell** — completes through `alias g=git`, behind
   `sudo` / `env` / `watch`, and on the last segment of compound lines
   (`git pull && git ch<Tab>`). Flags you already typed aren't offered twice.
-- **Never stalls your typing** — the engine answers in well under a
-  millisecond against a 25 ms per-keystroke budget, and a slow live completion
+- **Never stalls your typing** — zsh talks to the daemon over its socket
+  directly (no process per keystroke, about 0.25 ms round trip), the engine answers
+  in well under a millisecond against a 25 ms per-keystroke budget, and a slow live completion
   (a `brew` or `docker` shell-out) runs in the background instead of freezing
   the prompt — its result lands on the next keystroke. Lazy-loaded specs,
   bounded memory.
 - **Commands without a spec still complete** — if nothing in the bundle or
-  your overlay covers a command, Nerv derives a spec from its `--help` output
-  once, in the background, and caches it. Typos in the command word
+  your overlay covers a command, the zsh popup asks the completion function
+  the tool installed for itself (`_uv`, `_rg`, …) — branches, PIDs and
+  per-subcommand options included. Without one, Nerv derives a spec from its
+  `--help` output once, in the background, and caches it. Typos in the command word
   (`zpeh` → `zeph`) get a one-line *did you mean* correction.
 - **Leaves no trace** — `nerv uninstall` removes every file it ever wrote.
   We treat *trace zero* as a release-blocking acceptance criterion.
@@ -168,13 +175,21 @@ enabled = false    # default: true
 
 Prefix matching is the default and the contract: `git co` matches `commit`,
 not `checkout` (checkout starts with c-h-e). Fuzzy matching is a deliberate
-opt-in and only kicks in from 3 typed characters.
+opt-in and only kicks in from 3 typed characters. It lets at most 4 characters
+fall between two typed letters, so `chk` finds `checkout` but a query does not
+match letters scattered across a long name.
 
 `[derived]` controls the `--help` fallback: when a command has no spec in
 any layer, Nerv runs `<command> --help` once (no shell, 1 s timeout, output
 capped, cached under `~/Library/Caches/nerv/derived/`) and builds a spec from
 it. Set `enabled = false` and nothing is ever spawned. Either setting is read
 once at daemon start, so restart after editing (`nerv stop && nerv start`).
+
+In zsh, a command with no spec in the bundle or your overlay first gets the
+candidates of its own zsh completion function, the ones Tab would show. The
+function runs once per word; a command whose completion takes over 300 ms
+(1 s for its first run) is not asked again in that shell. `export
+NERV_COMPSYS=0` turns this off.
 
 ### Add your own specs
 
@@ -222,8 +237,8 @@ runtime beyond a native binary. The closest projects, and how they differ:
 | **Amazon Q Developer CLI** (`aws/amazon-q-developer-cli`) | Fig's successor: autocomplete plus agentic AI chat; requires an AWS Builder ID login | Nerv keeps only the autocomplete half — no login, no AI, no telemetry, a few MB instead of hundreds |
 | **inshellisense** (`microsoft/inshellisense`) | Node.js/TypeScript tool that also consumes Fig specs; cross-platform, runs the shell inside a PTY | Nerv is Rust with no Node on the hot path, and the default zsh path is a plain ZLE widget, not a PTY wrapper |
 | **carapace** (`carapace-sh/carapace-bin`) | Go multi-shell completion binary with its own spec format, hooked into each shell's native completion system | Nerv is an inline popup with descriptions and live values on every keystroke, not a Tab-triggered completer |
-| **zsh-autosuggestions** | History-based grey ghost text | Nerv shows the same history ghost text *and* spec-driven suggestions with descriptions; they coexist |
-| **fzf-tab** | Fuzzy picker over zsh's native `compsys` completions on Tab | Nerv does not use `compsys`; it completes as you type from the Fig spec corpus |
+| **zsh-autosuggestions** | History-based grey ghost text | Nerv ranks its history ghost by folder and the previous command, and adds the spec popup; with the plugin loaded, nerv leaves the ghost to it and keeps the popup |
+| **fzf-tab** | Fuzzy picker over zsh's native `compsys` completions on Tab | Nerv completes as you type from the Fig spec corpus, and falls back to `compsys` only for commands no spec covers, shown in the same popup |
 
 Nerv is a good fit if you want Fig back on macOS + zsh with zero cloud. It is
 not the right tool if you need Linux or Windows today (see roadmap) or want a
@@ -251,7 +266,8 @@ This is a documented non-goal, not a missing feature.
 715 commands as of v0.1.15 — git, docker, kubectl, helm, aws, gcloud, npm,
 yarn, pnpm, cargo, gh, brew, terraform, make, ssh and the rest of the
 `withfig/autocomplete` corpus. `nerv spec list` prints the installed set.
-Commands outside it get a spec derived from `--help`, and you can add or
+Commands outside it use their own zsh completion function (in zsh) or a spec
+derived from `--help`, and you can add or
 override any spec with one JSON file in `~/.config/nerv/specs/`.
 
 **Does Nerv work on Linux or Windows?**
@@ -260,8 +276,26 @@ Windows later.
 
 **Does Nerv work with oh-my-zsh, powerlevel10k, tmux, and zsh-autosuggestions?**
 Yes. The widget rebinds its keys after other frameworks load, aligns the
-popup under a full-width powerlevel10k prompt, is tested inside tmux, and
-shows history ghost text the way zsh-autosuggestions does.
+popup under a full-width powerlevel10k prompt, and is tested inside tmux.
+With zsh-autosuggestions loaded, the plugin keeps the inline ghost text and
+Nerv shows only its popup; the shell says so once at start-up
+([docs/history-suggestions.md](docs/history-suggestions.md) §7).
+
+**What does Nerv record about the commands I run?**
+Each command you run, with its folder, exit status and the command before it,
+goes into `~/Library/Caches/nerv/history.tsv` (readable only by you). That file
+ranks the ghost text. Nothing leaves your machine. Nerv skips what zsh itself
+would not keep: a command with a leading space, or one matching
+`HISTORY_IGNORE`. To clear it, delete the file and run `nerv stop && nerv start`.
+Details: [docs/history-suggestions.md](docs/history-suggestions.md).
+
+**Does it slow down opening a shell?**
+Barely. `nerv init zsh --shell-script` also writes the widget script it prints to
+`~/Library/Caches/nerv/init.zsh`, and the `.zshrc` block sources that file rather
+than starting `nerv`. The file carries the size, mtime and inode of the binary
+that wrote it. After an upgrade it refuses to load, and the block falls back to
+running `nerv` once, which rewrites it. An rc block written before this change
+keeps the old `eval`; run `nerv init zsh` once to get the new block.
 
 **How fast is it?**
 The engine answers in about 0.05 ms at p95 and the whole keystroke path is

@@ -36,3 +36,4 @@ specs-prebuilt/manifest.json
 /docs/first-5-min.md
 /.github/PR_BODY.md
 .claude/
+__pycache__/

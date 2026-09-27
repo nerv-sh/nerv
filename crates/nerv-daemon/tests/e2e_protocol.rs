@@ -66,6 +66,8 @@ impl DaemonHandle {
             .env("NERV_SPECS_DIR", &specs)
             .env("NERV_FRECENCY_FILE", &frecency)
             .env("NERV_MISSES_FILE", &misses)
+            // Never load the developer's real command history either.
+            .env("NERV_HISTORY_FILE", tmp.path().join("history.tsv"))
             // Never scan the developer\'s real PATH: command-name rows would
             // vary by machine.
             .env("NERV_PATH_SCAN", "0")
@@ -147,6 +149,142 @@ async fn round_trip(stream: &mut UnixStream, req: &Request) -> Response {
 }
 
 #[tokio::test]
+async fn record_command_persists_and_drops_ignored_commands() {
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let history = daemon._tmp.path().join("history.tsv");
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        let record = |command: &str, prev: &str| Request::RecordCommand {
+            command: command.into(),
+            expanded: String::new(),
+            cwd: "/work".into(),
+            exit: 0,
+            prev: prev.into(),
+        };
+        for req in [
+            record("make test", ""),
+            record(" export TOKEN=abc", "make test"),
+            record("make build", " export TOKEN=abc"),
+        ] {
+            let ack = round_trip(&mut stream, &req).await;
+            assert!(matches!(ack, Response::Empty { .. }), "{ack:?}");
+        }
+    })
+    .await;
+    assert!(run.is_ok(), "record round-trips timed out");
+    let text = std::fs::read_to_string(&history).expect("history written");
+    let rows: Vec<Vec<&str>> = text.lines().map(|l| l.split('\t').collect()).collect();
+    assert_eq!(rows.len(), 2, "{text}");
+    assert_eq!(rows[0][4], "make test");
+    assert_eq!(rows[1][4], "make build");
+    // The ignored predecessor is not stored as `prev`.
+    assert_eq!(rows[1][3], "");
+    assert!(!text.contains("TOKEN"));
+    daemon.shutdown().await;
+}
+
+/// Send raw text request lines and read reply lines until an end line
+/// (`\x1fend\t…`) for each request that expects one.
+async fn text_exchange(stream: &mut UnixStream, send: &str, ends: usize) -> Vec<String> {
+    let (read_half, mut write_half) = stream.split();
+    write_half.write_all(send.as_bytes()).await.expect("write");
+    write_half.flush().await.expect("flush");
+    let mut reader = BufReader::new(read_half);
+    let mut lines = Vec::new();
+    let mut seen = 0;
+    while seen < ends {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read");
+        let line = line.trim_end_matches('\n').to_string();
+        if line.starts_with("\x1fend\t") {
+            seen += 1;
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+#[tokio::test]
+async fn text_protocol_completes_records_and_predicts_on_one_connection() {
+    use nerv_engine::wire::escape_field;
+    let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
+    let history = daemon._tmp.path().join("history.tsv");
+    let req = |fields: &[&str]| {
+        let mut l = fields
+            .iter()
+            .map(|f| escape_field(f))
+            .collect::<Vec<_>>()
+            .join("\x1f");
+        l.push('\n');
+        l
+    };
+    let run = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut stream = daemon.connect().await;
+        // Three records (no reply), then a completion that must see them.
+        let mut send = String::new();
+        for _ in 0..2 {
+            send.push_str(&req(&["record", "git status", "", "/w", "0", "git add ."]));
+        }
+        send.push_str(&req(&["record", "multi\nline", "", "/w", "0", ""]));
+        send.push_str(&req(&[
+            "complete",
+            "9",
+            "git st",
+            "6",
+            "/w",
+            "git add .",
+            "git st",
+            "c",
+        ]));
+        let lines = text_exchange(&mut stream, &send, 1).await;
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("\x1fghost\tgit status")
+        );
+        assert!(lines.iter().any(|l| l.starts_with("status\t")), "{lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("\x1fend\t9\t0"));
+
+        let lines =
+            text_exchange(&mut stream, &req(&["predict", "10", "git add .", "/w"]), 1).await;
+        assert_eq!(lines, ["\x1fghost\tgit status", "\x1fend\t10\t0"]);
+
+        // A malformed text request still ends — with its seq, so the widget
+        // stops waiting — and a malformed record answers nothing: the next
+        // reply on the connection is the next request's.
+        let mut send = req(&["record", "ls", "", "/w", "not-a-number", ""]);
+        send.push_str(&req(&["complete", "11", "ls", "not-a-number"]));
+        let lines = text_exchange(&mut stream, &send, 1).await;
+        assert_eq!(lines, ["\x1fend\t11\t1"]);
+        // An oversized text request is answered in the text protocol too.
+        let huge = "x".repeat(300 * 1024);
+        let lines = text_exchange(&mut stream, &req(&["complete", "12", &huge, "1"]), 1).await;
+        assert_eq!(lines, ["\x1fend\t12\t1"]);
+        // A record keeps a trailing space in its last field.
+        let _ = text_exchange(
+            &mut stream,
+            &req(&["record", "pwd", "", "/w", "0", "git status "]),
+            0,
+        )
+        .await;
+        let resp = round_trip(&mut stream, &Request::Ping).await;
+        assert!(matches!(resp, Response::Pong { .. }), "{resp:?}");
+    })
+    .await;
+    assert!(run.is_ok(), "text protocol timed out");
+    let text = std::fs::read_to_string(&history).expect("history written");
+    assert_eq!(text.lines().count(), 4, "{text}");
+    assert!(
+        text.contains("git status \tpwd\t"),
+        "trailing space kept: {text}"
+    );
+    assert!(
+        text.contains("multi\\nline"),
+        "multi-line command kept as one row: {text}"
+    );
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn invalid_json_returns_error_response() {
     let daemon = DaemonHandle::spawn(FrecencyMode::Disabled).await;
     let run = tokio::time::timeout(Duration::from_secs(5), async {
@@ -183,7 +321,7 @@ async fn doctor_autorun_returns_empty_stub() {
         let mut stream = daemon.connect().await;
         let resp = round_trip(&mut stream, &Request::DoctorAutorun).await;
         match resp {
-            Response::Empty { reason } => {
+            Response::Empty { reason, .. } => {
                 assert_eq!(reason.as_deref(), Some("doctor-autorun-stub"));
             }
             other => panic!("expected Empty, got {other:?}"),
@@ -205,15 +343,21 @@ async fn unknown_binary_returns_empty_with_reason() {
                 line: "nosuchbin foo".into(),
                 cursor: 13,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
         match resp {
-            Response::Empty { reason } => {
+            Response::Empty {
+                reason, unspecced, ..
+            } => {
                 assert!(
                     reason.is_some(),
                     "expected non-empty reason for unknown binary"
                 );
+                // No layer has a file for it: the widget may ask the shell.
+                assert!(unspecced, "no spec at all must be unspecced");
             }
             other => panic!("expected Empty, got {other:?}"),
         }
@@ -243,6 +387,8 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
                     line: line[..cursor].to_string(),
                     cursor,
                     cwd: None,
+                    prev: None,
+                    typed: None,
                 },
             )
             .await;
@@ -254,6 +400,8 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
                 line: "git ".into(),
                 cursor: 4,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -317,6 +465,8 @@ async fn register_shell_names_serve_as_candidates_memory_only() {
                 line: "p1".into(),
                 cursor: 2,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -337,6 +487,8 @@ async fn register_shell_names_serve_as_candidates_memory_only() {
                 line: "p10k".into(),
                 cursor: 4,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -385,6 +537,8 @@ async fn shell_names_cap_drops_oldest_across_sessions() {
                 line: "fn".into(),
                 cursor: 2,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -408,6 +562,8 @@ async fn shell_names_cap_drops_oldest_across_sessions() {
                 line: "new".into(),
                 cursor: 3,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -455,6 +611,8 @@ async fn register_shell_names_split_mid_character_decodes_intact() {
             line: "h".into(),
             cursor: 1,
             cwd: None,
+            prev: None,
+            typed: None,
         })
         .unwrap()
             + "\n";
@@ -548,6 +706,8 @@ async fn pruning_after_registration_drops_shell_name_row_keeps_others() {
                         line: word.into(),
                         cursor,
                         cwd: None,
+                        prev: None,
+                        typed: None,
                     },
                 )
                 .await;
@@ -621,6 +781,8 @@ async fn corrected_command_word_is_offered_and_not_tallied() {
                     line: line[..cursor].to_string(),
                     cursor,
                     cwd: None,
+                    prev: None,
+                    typed: None,
                 },
             )
             .await;
@@ -641,6 +803,8 @@ async fn corrected_command_word_is_offered_and_not_tallied() {
                 line: "nosuchbin ".into(),
                 cursor: 10,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -677,6 +841,8 @@ async fn first_token_offers_command_names_without_a_miss_tally() {
                 line: "gi".into(),
                 cursor: 2,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -696,6 +862,8 @@ async fn first_token_offers_command_names_without_a_miss_tally() {
                 line: "git".into(),
                 cursor: 3,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -711,6 +879,8 @@ async fn first_token_offers_command_names_without_a_miss_tally() {
                 line: "zpeh".into(),
                 cursor: 4,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -741,6 +911,8 @@ async fn pipelined_requests_share_one_connection() {
                 line: "git ".into(),
                 cursor: 4,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
             Request::Ping,
         ] {
@@ -785,16 +957,21 @@ async fn record_accept_boosts_subsequent_complete() {
                 line: "git ".into(),
                 cursor: 4,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
         match &baseline {
-            Response::Suggestions { items, .. } => {
+            Response::Suggestions {
+                items, unspecced, ..
+            } => {
                 assert_eq!(
                     items.first().map(|s| s.insertion.as_str()),
                     Some("checkout"),
                     "baseline first should be alpha-sorted"
                 );
+                assert!(!unspecced, "a bundled spec is written, not unspecced");
             }
             other => panic!("expected Suggestions, got {other:?}"),
         }
@@ -811,7 +988,7 @@ async fn record_accept_boosts_subsequent_complete() {
             )
             .await;
             match resp {
-                Response::Empty { reason } => {
+                Response::Empty { reason, .. } => {
                     assert_eq!(reason.as_deref(), Some("recorded"));
                 }
                 other => panic!("expected Empty(recorded), got {other:?}"),
@@ -824,6 +1001,8 @@ async fn record_accept_boosts_subsequent_complete() {
                 line: "git ".into(),
                 cursor: 4,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
@@ -890,11 +1069,13 @@ async fn schema_mismatch_disables_completion() {
                 line: "git co".into(),
                 cursor: 6,
                 cwd: None,
+                prev: None,
+                typed: None,
             },
         )
         .await;
         match resp {
-            Response::Empty { reason } => {
+            Response::Empty { reason, .. } => {
                 let reason = reason.expect("mismatch reason present");
                 assert!(
                     reason.starts_with("spec schema mismatch"),

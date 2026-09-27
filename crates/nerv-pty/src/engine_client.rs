@@ -51,6 +51,8 @@ pub async fn complete(line: &str, cursor: usize, cwd: Option<String>) -> Vec<Sug
         line: line.to_string(),
         cursor,
         cwd,
+        prev: None,
+        typed: None,
     };
     match tokio::time::timeout(QUERY_TIMEOUT, ipc_client::query(&req)).await {
         Ok(Ok(Response::Suggestions { items, .. })) => items,

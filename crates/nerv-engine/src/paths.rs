@@ -22,6 +22,9 @@ pub const DAEMON_LOG_NAME: &str = "nervd.log";
 pub const SPECS_SUBDIR: &str = "specs";
 pub const FRECENCY_NAME: &str = "frecency.tsv";
 pub const MISSES_NAME: &str = "misses.tsv";
+pub const HISTORY_NAME: &str = "history.tsv";
+/// The zsh widget script cached by `nerv init zsh --shell-script`.
+pub const INIT_CACHE_NAME: &str = "init.zsh";
 pub const DERIVED_SUBDIR: &str = "derived";
 
 /// Write `content` to `path` through a sibling temp file and a rename.
@@ -113,6 +116,17 @@ pub fn daemon_log_path() -> Option<PathBuf> {
 /// it with the rest of the cache dir (`docs/uninstall-spec.md` §2).
 pub fn misses_path() -> Option<PathBuf> {
     cache_dir().map(|c| c.join(MISSES_NAME))
+}
+
+/// `~/Library/Caches/nerv/history.tsv` — executed commands behind the
+/// history-ranked ghost (`crate::history`). `NERV_HISTORY_FILE`
+/// overrides it (tests); `-` means "no file". Swept with the cache dir
+/// by `nerv uninstall` (`docs/uninstall-spec.md` §2).
+pub fn history_path() -> Option<PathBuf> {
+    match std::env::var_os("NERV_HISTORY_FILE") {
+        Some(p) => Some(PathBuf::from(p)),
+        None => cache_dir().map(|c| c.join(HISTORY_NAME)),
+    }
 }
 
 /// `~/Library/Caches/nerv/derived/` — specs derived from a command's

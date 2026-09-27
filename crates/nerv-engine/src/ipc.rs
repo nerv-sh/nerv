@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Request from ZLE widget to daemon.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum Request {
     /// Ask for completion suggestions at the given cursor position.
@@ -21,6 +21,15 @@ pub enum Request {
         /// absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// The command run before this one in the same shell — the
+        /// sequence signal of the history ghost.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prev: Option<String>,
+        /// `line` as the user typed it, when the widget sent an
+        /// alias-expanded `line`. History holds typed lines, so the ghost
+        /// matches against this.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        typed: Option<String>,
     },
     /// Health check (used by `nerv doctor`).
     Ping,
@@ -45,6 +54,33 @@ pub enum Request {
         /// filtered out by the sender).
         names: Vec<String>,
     },
+    /// Record one command the user ran (zsh `preexec` → `precmd`), for
+    /// history-ranked suggestions. The widget has already dropped what
+    /// zsh itself would not remember (`hist_ignore_space`,
+    /// `HISTORY_IGNORE`). Fire-and-forget; the reply is `Empty`.
+    RecordCommand {
+        /// The line as typed — what a ghost offers back.
+        command: String,
+        /// zsh's alias-expanded form; empty when identical.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        expanded: String,
+        cwd: String,
+        exit: i32,
+        /// The command run before this one in the same shell; empty for
+        /// the first, or when the one before was ignored.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        prev: String,
+    },
+    /// Seed an empty command history from a zsh history file (`$HISTFILE`).
+    /// A no-op once the history holds anything.
+    ImportHistory { path: String },
+    /// The command to offer on an empty prompt, from what usually follows
+    /// `prev`. Replies `Empty`; `ghost` is absent when there is no prediction.
+    Predict {
+        prev: String,
+        #[serde(default)]
+        cwd: String,
+    },
 }
 
 /// Response from daemon to ZLE widget.
@@ -59,6 +95,18 @@ pub enum Response {
         /// older daemon (no field) decodable as "not complete".
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         token_complete: bool,
+        /// No hand-written spec covers the command (see
+        /// `CompleteResult::unspecced`). Absent from an older daemon's
+        /// reply, which decodes as "a written spec answered".
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unspecced: bool,
+        /// The history command to offer as the inline ghost — the whole
+        /// command, not the remainder. `Some("")` = the history was
+        /// consulted and has nothing; `None` = no history to consult (an
+        /// older daemon, or an empty history), so the widget falls back
+        /// to zsh's own `$history`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ghost: Option<String>,
     },
     /// Daemon is alive (Ping reply). `pid` is the daemon's process id, so a
     /// client (`nerv stop` / `uninstall`) can signal it even when the PID
@@ -70,10 +118,31 @@ pub enum Response {
         pid: u32,
     },
     /// Empty result — typically because the spec is disabled (E2).
-    Empty { reason: Option<String> },
+    Empty {
+        reason: Option<String>,
+        /// Same as on `Suggestions`: an empty reply for a command with no
+        /// written spec still lets the widget ask the shell.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unspecced: bool,
+        /// Same as on `Suggestions`: no rows, but maybe a history ghost.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ghost: Option<String>,
+    },
     /// An error condition the widget should surface (rare; usually
     /// daemon stays silent and just returns Empty).
     Error { message: String },
+}
+
+impl Response {
+    /// `Empty` with a reason and nothing else — the acknowledgement of
+    /// every fire-and-forget request.
+    pub fn empty(reason: impl Into<String>) -> Self {
+        Response::Empty {
+            reason: Some(reason.into()),
+            unspecced: false,
+            ghost: None,
+        }
+    }
 }
 
 /// A single completion suggestion.
@@ -135,6 +204,17 @@ pub enum SuggestionKind {
 mod tests {
     use super::*;
 
+    /// The `unspecced` flag of a completion reply; false for any other
+    /// variant.
+    fn unspecced(resp: &Response) -> bool {
+        match resp {
+            Response::Suggestions { unspecced, .. } | Response::Empty { unspecced, .. } => {
+                *unspecced
+            }
+            _ => false,
+        }
+    }
+
     /// `RegisterShellNames` (plan slice 02): one zsh session's
     /// function·alias names ride a single request. The wire tag follows
     /// the enum's snake_case convention.
@@ -155,6 +235,138 @@ mod tests {
         }
     }
 
+    /// `ghost` keeps three states apart on the wire: absent (no history —
+    /// the widget uses `$history`), `""` (ranked, no match), a command.
+    #[test]
+    fn ghost_distinguishes_absent_from_empty() {
+        let cases: [(Option<&str>, Option<&str>); 3] = [
+            (None, None),
+            (Some(""), Some(r#""ghost":"""#)),
+            (Some("git status"), Some(r#""ghost":"git status""#)),
+        ];
+        for (ghost, wire) in cases {
+            let resp = Response::Empty {
+                reason: None,
+                unspecced: false,
+                ghost: ghost.map(String::from),
+            };
+            let json = serde_json::to_string(&resp).unwrap();
+            match wire {
+                Some(w) => assert!(json.contains(w), "{json}"),
+                None => assert!(!json.contains("ghost"), "{json}"),
+            }
+            match serde_json::from_str::<Response>(&json).unwrap() {
+                Response::Empty { ghost: back, .. } => assert_eq!(back.as_deref(), ghost),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// `Predict` decodes without a cwd (it defaults to empty).
+    #[test]
+    fn predict_request_decodes_with_and_without_cwd() {
+        for (json, cwd) in [
+            (
+                r#"{"method":"predict","prev":"git add .","cwd":"/r"}"#,
+                "/r",
+            ),
+            (r#"{"method":"predict","prev":"git add ."}"#, ""),
+        ] {
+            match serde_json::from_str::<Request>(json).unwrap() {
+                Request::Predict { prev, cwd: got } => {
+                    assert_eq!(prev, "git add .");
+                    assert_eq!(got, cwd);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// History requests: the optional fields default when absent, so a
+    /// widget that omits them (first command, no alias) still decodes.
+    #[test]
+    fn history_requests_decode_with_and_without_optional_fields() {
+        let full = r#"{"method":"record_command","command":"g st","expanded":"git status","cwd":"/r","exit":1,"prev":"ls"}"#;
+        match serde_json::from_str::<Request>(full).unwrap() {
+            Request::RecordCommand {
+                command,
+                expanded,
+                cwd,
+                exit,
+                prev,
+            } => {
+                assert_eq!(
+                    (
+                        command.as_str(),
+                        expanded.as_str(),
+                        cwd.as_str(),
+                        exit,
+                        prev.as_str()
+                    ),
+                    ("g st", "git status", "/r", 1, "ls")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let bare = r#"{"method":"record_command","command":"ls","cwd":"/","exit":0}"#;
+        match serde_json::from_str::<Request>(bare).unwrap() {
+            Request::RecordCommand { expanded, prev, .. } => {
+                assert!(expanded.is_empty() && prev.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+        // Empty optionals are not put on the wire.
+        let json = serde_json::to_string(&Request::RecordCommand {
+            command: "ls".into(),
+            expanded: String::new(),
+            cwd: "/".into(),
+            exit: 0,
+            prev: String::new(),
+        })
+        .unwrap();
+        assert!(
+            !json.contains("expanded") && !json.contains("prev"),
+            "{json}"
+        );
+        let import = r#"{"method":"import_history","path":"/h"}"#;
+        assert!(matches!(
+            serde_json::from_str::<Request>(import).unwrap(),
+            Request::ImportHistory { path } if path == "/h"
+        ));
+    }
+
+    /// A daemon from before `unspecced` sends no such key; both variants
+    /// must still decode, as "a written spec answered".
+    #[test]
+    fn responses_without_unspecced_still_decode() {
+        for old in [
+            r#"{"kind":"suggestions","items":[]}"#,
+            r#"{"kind":"empty","reason":null}"#,
+        ] {
+            let resp: Response = serde_json::from_str(old).unwrap();
+            assert!(!unspecced(&resp), "{old}");
+        }
+        for resp in [
+            Response::Suggestions {
+                items: vec![],
+                token_complete: false,
+                unspecced: true,
+                ghost: None,
+            },
+            Response::Empty {
+                reason: None,
+                unspecced: true,
+                ghost: None,
+            },
+        ] {
+            let json = serde_json::to_string(&resp).unwrap();
+            assert!(
+                unspecced(&serde_json::from_str::<Response>(&json).unwrap()),
+                "{json}"
+            );
+        }
+    }
+
     /// A daemon from before `token_complete` sends no such key; the new
     /// client must still read its rows.
     #[test]
@@ -171,6 +383,8 @@ mod tests {
         let done = Response::Suggestions {
             items: vec![],
             token_complete: true,
+            unspecced: false,
+            ghost: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(matches!(
@@ -236,6 +450,8 @@ mod tests {
             line: "git ".into(),
             cursor: 4,
             cwd: Some("/tmp".into()),
+            prev: None,
+            typed: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         assert!(j.contains("\"method\":\"complete\""));
@@ -256,6 +472,8 @@ mod tests {
             line: "git ".into(),
             cursor: 4,
             cwd: None,
+            prev: None,
+            typed: None,
         };
         let j = serde_json::to_string(&r).unwrap();
         assert!(!j.contains("cwd"), "cwd should be omitted when None: {j}");

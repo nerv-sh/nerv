@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fixture command for scripts/e2e-zle-compsys.py: it only has to exist on
+# PATH. Its completion lives in ../_nervfx.
+exit 0
