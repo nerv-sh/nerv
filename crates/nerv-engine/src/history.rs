@@ -818,9 +818,6 @@ pub fn parse_row(line: &str) -> Option<Entry> {
     })
 }
 
-/// zsh writes history "metafied": a byte in 0x83..=0x9f and a few others
-/// is stored as 0x83 (Meta) followed by the byte XOR 0x20. Reading the
-/// file as-is turns a Korean command into mojibake.
 /// The last `max` bytes of a file, from the first line that starts inside
 /// them: a line cut in half is not a command that was run.
 fn read_tail(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
@@ -843,6 +840,9 @@ fn read_tail(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// zsh writes history "metafied": a byte in 0x83..=0x9f and a few others
+/// is stored as 0x83 (Meta) followed by the byte XOR 0x20. Reading the
+/// file as-is turns a Korean command into mojibake.
 pub fn unmetafy(bytes: &[u8]) -> String {
     const META: u8 = 0x83;
     let mut out = Vec::with_capacity(bytes.len());

@@ -174,10 +174,14 @@ for example a branch no generator listed after `git checkout`, or a host typed a
 - at most 5, best frecency first;
 - only words that extend what is being typed;
 - never a word the spec already offers, and never one holding a quote, a backtick, `$`, a control operator or a redirection (`;|&<>()`); the history index splits on whitespace, so such a word is a piece of something larger;
+- a relative path (`src/x.rs`: a `/`, not starting at `/` or `~`) only where it was typed or where it exists, since it names a file in the directory it was typed in;
 - each reads `history` and is ranked with the rest.
 
 There are no history rows next to a command-word correction, which the widget
-recognises by its being the only row. There are none for a command no spec
+recognises by its being the only row, or next to rows the source ranked itself
+(zoxide, command names). After `z`, a history word is a partial query
+(`z nerv`) that zoxide's full-path rows never match; picking it would re-run
+zoxide's fuzzy jump. There are none for a command no spec
 covers either: that reply stays empty, so the spec-miss tally still counts it,
 and the widget asks zsh's own completion (spec-conversion-policy §6.4). When zsh
 supplies rows, they replace the reply.

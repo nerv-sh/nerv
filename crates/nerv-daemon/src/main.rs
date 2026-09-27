@@ -858,7 +858,7 @@ fn engine_complete(
         .as_deref()
         .filter(|_| wants_history_rows(&result.items, result.reason.as_deref()))
     {
-        let extra = history_rows(sig, &result.items, partial_word(before));
+        let extra = history_rows(sig, &result.items, partial_word(before), cwd_path);
         result.items.extend(extra);
     }
     if result.items.is_empty() {
@@ -925,14 +925,19 @@ fn partial_word(before_cursor: &str) -> &str {
     word.rsplit([';', '|', '&']).next().unwrap_or(word)
 }
 
-/// Whether history rows may join this reply. Two replies are contracts
+/// Whether history rows may join this reply. Three replies are contracts
 /// that extra rows would break:
 /// - a command-word correction comes back as the only row, and the
 ///   widget recognises it by that (`(( ${#rlines} == 1 ))` in _nerv.zsh);
 /// - "no spec for X" is what the miss tally counts and what sends the
-///   widget to zsh's own completion.
+///   widget to zsh's own completion;
+/// - rows the source ranked itself (zoxide, command names) keep that
+///   order. A history row would score above them, and after `z` it is a
+///   partial query (`z nerv`) that zoxide's rows, full paths, never match:
+///   picking it re-runs the fuzzy jump the full paths are there to avoid.
 fn wants_history_rows(items: &[Suggestion], reason: Option<&str>) -> bool {
-    !items.iter().any(|s| s.replace.is_some()) && reason.is_none_or(|r| no_spec_binary(r).is_none())
+    !items.iter().any(|s| s.replace.is_some() || s.source_ranked)
+        && reason.is_none_or(|r| no_spec_binary(r).is_none())
 }
 
 /// How many words the history may add as rows of their own.
@@ -943,10 +948,15 @@ const HISTORY_ROWS: usize = 5;
 /// ran, a host typed after `ssh` that `~/.ssh/config` does not list. Only words that extend what is being typed,
 /// best frecency first, at most [`HISTORY_ROWS`]. Their rows read
 /// `history` and are ranked with the rest.
+///
+/// A relative path (`src/x.rs`) names a file in the directory it was
+/// typed in: it is offered only where it was typed or where it exists,
+/// or it would outrank the files that are really here.
 fn history_rows(
     signals: &nerv_engine::history::TokenSignals,
     items: &[Suggestion],
     partial: &str,
+    cwd: Option<&std::path::Path>,
 ) -> Vec<Suggestion> {
     use nerv_engine::history::token_key;
     let have: std::collections::HashSet<&str> =
@@ -963,6 +973,7 @@ fn history_rows(
                 // the index splits on whitespace only, so these are pieces
                 // of a larger word (`'quoted`, `&&`, `>`, `main;make`).
                 && !t.word.contains(['\'', '"', '`', '$', ';', '|', '&', '<', '>', '(', ')'])
+                && (t.here > 0 || !is_relative_path(&t.word) || cwd.is_some_and(|d| d.join(&t.word).exists()))
         })
         .map(|(_, t)| {
             (
@@ -983,6 +994,12 @@ fn history_rows(
             ..Suggestion::default()
         })
         .collect()
+}
+
+/// A word that names a path relative to the directory it was typed in:
+/// it has a `/`, and does not start at `/` or `~`.
+fn is_relative_path(word: &str) -> bool {
+    word.contains('/') && !word.starts_with(['/', '~'])
 }
 
 /// The finished words of the command being completed: `["git"]` for
@@ -1492,12 +1509,12 @@ mod tests {
             run(&history, &format!("git checkout {w}"), "/");
         }
         let sig = history.token_signals(&completed_words("git checkout f"), "/", "");
-        let rows = history_rows(&sig, &[sugg("main")], partial_word("git checkout f"));
+        let rows = history_rows(&sig, &[sugg("main")], partial_word("git checkout f"), None);
         let words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
         // Extends `f`, best first; `main` is already a spec row.
         assert_eq!(words, ["feature-x", "fix-y"]);
         assert_eq!(rows[0].description.as_deref(), Some("history"));
-        let all = history_rows(&sig, &[], "");
+        let all = history_rows(&sig, &[], "", None);
         // Quoted words, operators and redirections are never offered back.
         let bad = |w: &str| w.contains(['\'', ';', '&', '>', '|']);
         assert!(all.iter().all(|s| !bad(&s.insertion)), "{all:?}");
@@ -1515,6 +1532,36 @@ mod tests {
         assert!(!wants_history_rows(&[], Some(&no_spec)));
         assert!(wants_history_rows(&[sugg("main")], None));
         assert!(wants_history_rows(&[], None));
+        // zoxide's rows (and command names) keep the source's order.
+        let zoxide = Suggestion {
+            source_ranked: true,
+            ..sugg("/Users/me/nerv-sh")
+        };
+        assert!(!wants_history_rows(&[zoxide], None));
+    }
+
+    /// A relative path typed in another directory is not offered where it
+    /// does not exist; typed here, existing here, or absolute, it is.
+    #[test]
+    fn history_rows_offer_relative_paths_only_where_they_apply() {
+        let dir = std::env::temp_dir().join(format!("nerv-hist-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("here")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/real.rs"), "").unwrap();
+        let other = dir.join("other").to_string_lossy().into_owned();
+        let here = dir.to_string_lossy().into_owned();
+        let history = HistoryStore::empty();
+        run(&history, "vim src/elsewhere.rs", &other);
+        run(&history, "vim src/real.rs", &other);
+        run(&history, "vim src/typed-here.rs", &here);
+        run(&history, "vim /etc/hosts", &other);
+        let sig = history.token_signals(&["vim"], &here, "");
+        let rows = history_rows(&sig, &[], "", Some(&dir));
+        let mut words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
+        words.sort_unstable();
+        assert_eq!(words, ["/etc/hosts", "src/real.rs", "src/typed-here.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
