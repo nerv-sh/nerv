@@ -15,8 +15,10 @@ leaves it working · (zle) a resize closes the popup and chains to the
 user's own WINCH handler, in both the function and the `trap` form.
 
 Run from the repo root:  python3 scripts/e2e-tmux-popup.py --path zle
-Requires: cargo-built debug binaries, tmux and zsh on PATH (measured on
-tmux 3.7c).
+Requires: `cargo build -p nerv-cli -p nerv-pty` first, and tmux and zsh on
+PATH (measured on tmux 3.7c). Not an `--all-features` build: its
+`profiling_early_exit` makes nerv-pty quit at the shell's first output,
+which reads here as a pane that dies at once.
 Nothing touches the user's tmux server or $HOME: the server lives on its
 own socket and every shell gets a temporary HOME/ZDOTDIR.
 """
@@ -48,9 +50,8 @@ SESSION = "e2e"
 COLS, ROWS = 100, 20
 
 TYPED = "git c"                # fixture git spec: checkout, commit
-ITEMS = 2
-BOX_ROWS = ITEMS + 4           # top border, items, separator, footer, bottom
-FOOTER = re.compile(r"\[\d+/\d+\]")
+ITEMS = 2                      # box rows = items + 4: borders, separator, footer
+FOOTER = re.compile(r"\[\d+(/\d+)?\]")    # [i/n], or [n] while the sentinel row is selected
 BOX = set("╭╮╰╯│├┤")
 
 
@@ -74,9 +75,21 @@ def box_rows(lines):
 
 
 def popup_up(lines):
-    """The whole box is on screen: every row, and the [i/n] footer."""
+    """The whole `git c` box is on screen: every row, and the [i/n] footer."""
     rows = box_rows(lines)
-    return len(rows) == BOX_ROWS and any(FOOTER.search(l) for l in rows)
+    return len(rows) == ITEMS + 4 and any(FOOTER.search(l) for l in rows)
+
+
+def box_whole(lines, min_items):
+    """A complete box of at least `min_items` rows: contiguous, top and
+    bottom borders, separator and footer. Row counts differ by path (ZLE
+    adds an "↩ Immediately execute" row after a trailing space)."""
+    idx = [i for i, l in enumerate(lines) if any(ch in BOX for ch in l)]
+    if not idx or idx != list(range(idx[0], idx[-1] + 1)):
+        return False
+    rows = [lines[i] for i in idx]
+    return ("╭" in rows[0] and "╰" in rows[-1] and any("├" in r for r in rows)
+            and any(FOOTER.search(r) for r in rows) and len(rows) - 4 >= min_items)
 
 
 def wait_for(pane, pred, timeout=6.0):
@@ -191,14 +204,24 @@ class Harness:
         tmux("send-keys", "-t", pane, *keys)
 
 
+def cursor_y(pane):
+    return int(tmux("display", "-p", "-t", pane, "#{cursor_y}").strip())
+
+
 def check_render(h):
+    """Away from the bottom the popup draws in place: the prompt stays on
+    row 0 while the popup grows (g → git → git c), no spurious scroll."""
     pane = h.window()
+    h.key(pane, "C-l")
+    wait_for(pane, lambda ls: ls and ls[0].startswith(h.prompt.rstrip()))
     h.type(pane, TYPED)
     ok, lines = wait_for(pane, popup_up)
-    prompt_ok = any(l.startswith(h.prompt + TYPED) for l in lines)
-    if not (ok and prompt_ok):
+    prompt_ok = bool(lines) and lines[0].startswith(h.prompt + TYPED)
+    row0 = cursor_y(pane) == 0
+    if not (ok and prompt_ok and row0):
+        log(f"  cursor_y={cursor_y(pane)}")
         dump(lines)
-    return ok and prompt_ok
+    return ok and prompt_ok and row0
 
 
 def check_split(h):
@@ -221,14 +244,41 @@ def check_split(h):
     return ok and clean
 
 
-def check_bottom(h):
-    pane = h.window()
+def fill_to_bottom(h, pane):
+    """Scroll the prompt onto the last row; False if it never gets there."""
     tmux("send-keys", "-t", pane, "-l", "for i in {1..40}; do echo line$i; done")
     h.key(pane, "Enter")
-    scrolled, lines = wait_for(pane, lambda ls: "line40" in ls and ls[-1].startswith(h.prompt.rstrip()))
-    if not scrolled:
+    ok, lines = wait_for(pane, lambda ls: "line40" in ls and ls[-1].startswith(h.prompt.rstrip()))
+    if not ok:
         log("  prompt never reached the last row")
         dump(lines)
+    return ok
+
+
+def check_bottom_grow(h):
+    """On the last row, a popup that grows (`g`: gh, git → `git `: 4
+    subcommands) must scroll for the extra rows, not clamp at the bottom."""
+    pane = h.window()
+    if not fill_to_bottom(h, pane):
+        return False
+    h.type(pane, "g")
+    ok, lines = wait_for(pane, popup_up)
+    if not ok:
+        log("  `g` popup never opened")
+        dump(lines)
+        return False
+    h.type(pane, "it ")
+    ok, lines = wait_for(pane, lambda ls: box_whole(ls, 4))
+    cy = cursor_y(pane)
+    kept = cy < len(lines) and lines[cy].startswith(h.prompt + "git")
+    if not (ok and kept):
+        dump(lines)
+    return ok and kept
+
+
+def check_bottom(h):
+    pane = h.window()
+    if not fill_to_bottom(h, pane):
         return False
     h.type(pane, TYPED)
     ok, lines = wait_for(pane, popup_up)
@@ -275,7 +325,7 @@ def check_resize(h, env=""):
     hidden = not box_rows(lines)
     # The cursor's row, not any row: an aborted line stays on screen with
     # a fresh prompt drawn under it.
-    cy = int(tmux("display", "-p", "-t", pane, "#{cursor_y}").strip())
+    cy = cursor_y(pane)
     kept = cy < len(lines) and lines[cy].startswith(h.prompt + TYPED)
     if not kept:
         log("  the resize dropped the typed line")
@@ -294,6 +344,45 @@ def check_resize(h, env=""):
         log("  typing after the resize did not reopen the popup")
         dump(lines)
     return hidden and chained and reopened
+
+
+def check_resize_pty(h):
+    """nerv-pty tracks the new size itself (SIGWINCH → shadow terminal), so
+    after a resize the next key redraws a whole box at the new width, with
+    the typed line intact under the cursor."""
+    pane = h.window()
+    h.split(pane)
+    tmux("select-pane", "-t", pane)
+    h.type(pane, TYPED)
+    ok, lines = wait_for(pane, popup_up)
+    if not ok:
+        log("  popup never opened")
+        dump(lines)
+        return False
+    def at(sel):
+        # The footer moving to [sel/2] proves a paint after the resize,
+        # not the box left over from before it.
+        return lambda ls: box_whole(ls, ITEMS) and any(f"[{sel}/{ITEMS}]" in l for l in ls)
+
+    tmux("resize-pane", "-Z", "-t", pane)             # grow
+    h.key(pane, "Down")
+    grown, lines = wait_for(pane, at(2))
+    if not grown:
+        log("  no redraw after growing the pane")
+        dump(lines)
+        return False
+    tmux("resize-pane", "-Z", "-t", pane)             # shrink back
+    h.key(pane, "Up")
+    ok, lines = wait_for(pane, at(1))
+    # capture-pane clips at the pane edge, so a box drawn for the old,
+    # wider pane shows up as rows that lost their right border.
+    fits = all(l.rstrip()[-1:] in "╮│┤╯" for l in box_rows(lines))
+    cy = cursor_y(pane)
+    kept = cy < len(lines) and lines[cy].startswith(h.prompt + "git c")
+    if not (ok and fits and kept):
+        log(f"  after shrink: redrawn={ok} fits={fits} kept={kept}")
+        dump(lines)
+    return ok and fits and kept
 
 
 def attach_client():
@@ -361,13 +450,14 @@ SCENARIOS = [
     ("render", check_render),
     ("split", check_split),
     ("bottom", check_bottom),
+    ("bottom-grow", check_bottom_grow),
     ("detach-attach", check_detach_attach),
 ]
-# Per-path: how each render path answers a resize differs (03 adds pty).
+# Per-path: ZLE closes the popup on a resize; nerv-pty redraws it.
 PATH_SCENARIOS = {
     "zle": [("resize", check_resize),
             ("resize-list-trap", lambda h: check_resize(h, "E2E_LIST_TRAP=1 "))],
-    "pty": [],
+    "pty": [("resize", check_resize_pty)],
 }
 
 
