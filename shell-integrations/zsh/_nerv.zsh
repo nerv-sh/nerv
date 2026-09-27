@@ -115,12 +115,17 @@ if [[ "${functions[TRAPWINCH]-}" != *__nerv_clear_state_vars* ]]; then
     # `trap` prints the list trap as `trap -- '<cmd>' WINCH`; eval the
     # quoted word back into the plain command string. Not `$(trap)`: a
     # command substitution is a subshell, where zsh has already reset traps.
+    # Builtins only (sysopen, zf_rm, `$(<f)`): this runs at every shell
+    # start, and forking mktemp/rm cost ~3.9 ms against ~0.3 ms (measured).
     () {
-      local tmp line
-      tmp=$(mktemp "${TMPDIR:-/tmp}/nerv-trap.XXXXXX" 2>/dev/null) || return 0
-      trap >| "$tmp" 2>/dev/null
+      zmodload -F zsh/system b:sysopen 2>/dev/null || return 0
+      zmodload -F zsh/files b:zf_rm 2>/dev/null || return 0
+      local tmp="${TMPDIR:-/tmp}/nerv-trap.$$.$RANDOM" fd line
+      sysopen -w -o excl,creat -m 600 -u fd "$tmp" 2>/dev/null || return 0
+      trap >&$fd
+      exec {fd}>&-
       line=${(M)${(f)"$(<$tmp)"}:#trap -- * WINCH}
-      rm -f "$tmp"
+      zf_rm -f "$tmp"
       [[ -n "$line" ]] && eval "__NERV_PREV_WINCH_LIST=${${line#trap -- }% WINCH}"
     }
   fi
