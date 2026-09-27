@@ -46,9 +46,19 @@ pub async fn query(req: &Request) -> Result<Response> {
 /// Same framing, same socket, same one-line contract — only the IO layer
 /// differs, so the wire format still has a single home in this module.
 pub fn query_sync(req: &Request) -> Result<Response> {
+    query_sync_within(req, None)
+}
+
+/// [`query_sync`] with a bound on each read and write. For a caller that
+/// blocks the prompt itself — the empty-prompt prediction runs before the
+/// user can type — a daemon that accepts but never answers must cost a
+/// missing ghost, not a shell that never shows its prompt.
+pub fn query_sync_within(req: &Request, timeout: Option<std::time::Duration>) -> Result<Response> {
     use std::io::{BufRead, Write};
     let sock_path = paths::socket_path().ok_or_else(|| anyhow!("HOME unset; no socket path"))?;
     let mut stream = std::os::unix::net::UnixStream::connect(&sock_path)?;
+    stream.set_read_timeout(timeout)?;
+    stream.set_write_timeout(timeout)?;
 
     let mut json = serde_json::to_string(req)?;
     json.push('\n');

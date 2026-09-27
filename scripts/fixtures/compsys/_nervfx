@@ -1,0 +1,30 @@
+#compdef nervfx
+# Fixture completion function for scripts/e2e-zle-compsys.py. `nervfx` has
+# no nerv spec, so the ZLE widget asks this function instead.
+#
+# Every call appends a line to $HOME/calls, so the harness can count how
+# often the widget ran it. NERVFX_SLOW=1 makes every call take 0.4 s.
+# NERVFX_ERR=1 makes it add one match and then
+# fail with a shell error, the way a broken vendor function would.
+print -r -- x >> "$HOME/calls"
+[[ -n "${NERVFX_SLOW-}" ]] && sleep 0.4
+if [[ -n "${NERVFX_ERR-}" ]]; then
+  # One match first, so an error that skipped the widget's reset would
+  # leave zsh free to insert it.
+  compadd -- alpha
+  : "${NERVFX_UNSET:?nervfx fixture error}"
+fi
+local -a subs=(
+  'alpha:first fixture command'
+  'bravo:second fixture command'
+  'charlie'
+)
+_arguments \
+  '--mode=[pick a mode]:mode:(fast slow)' \
+  '1:command:->cmd' \
+  '*::arg:_files' && return 0
+if [[ "$state" == cmd ]]; then
+  _describe 'command' subs
+  # A candidate with a tab in it: the wire format is tab-separated.
+  compadd -- $'odd\tname'
+fi

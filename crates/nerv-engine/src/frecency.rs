@@ -13,10 +13,10 @@
 //! suggestion; the store batches changes and flushes opportunistically
 //! ([`FrecencyStore::flush_if_dirty`]).
 //!
-//! Score model: `count / (1 + age_days)`. Simple monotone in usage
-//! and decays with time so abandoned picks naturally fall out of the
-//! top spots. Not a Mozilla-style frecency proper — but small and
-//! good enough for a ranking nudge.
+//! Score model: `ln(1 + count) · exp(-age / 1 week)` — deja's frecency
+//! ([`crate::history::frecency`]), shared with the history ranking.
+//! A single accept counts; the log keeps a hundred picks from burying
+//! everything else, and the decay lets an abandoned pick fall back.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -80,12 +80,9 @@ impl FrecencyStore {
         }
     }
 
-    /// Return the score for one suggestion. `0.0` when not seen
-    /// *or* seen exactly once — a single accidental pick should not
-    /// be enough to override the alpha order. Multi-pick entries
-    /// score `(count - 1) / (1 + age_days)`: monotone in count, with
-    /// linear decay so a long-unused entry naturally drops back into
-    /// the no-boost band.
+    /// The score for one suggestion: [`crate::history::frecency`] of the
+    /// pair, `ln(1 + count) · exp(-age / 1 week)`. Zero only when never
+    /// accepted — a single pick counts.
     pub fn score(&self, spec: &str, insertion: &str) -> f64 {
         let table = match self.table.lock() {
             Ok(t) => t,
@@ -95,21 +92,13 @@ impl FrecencyStore {
         let Some(entry) = table.get(&key) else {
             return 0.0;
         };
-        if entry.count < 2 {
-            return 0.0;
-        }
-        let now = now_unix();
-        let age_days = (now.saturating_sub(entry.last_unix)) as f64 / 86_400.0;
-        ((entry.count - 1) as f64) / (1.0 + age_days)
+        crate::history::frecency(entry.count, entry.last_unix, now_unix())
     }
 
     /// Command names the user has accepted a suggestion for, most-used
     /// first. Keys are `(spec, insertion)` pairs, so a name's weight is
-    /// the sum over its rows of `count / (1 + age_days)` — the same
-    /// recency decay [`Self::score`] uses, without the single-pick
-    /// deadband: having run a command once still says more about it
-    /// than alphabetical order does. Ties break alphabetically so the
-    /// list is stable across calls.
+    /// the sum over its rows of [`Self::score`]'s frecency. Ties break
+    /// alphabetically so the list is stable across calls.
     pub fn spec_names(&self) -> Vec<String> {
         let Ok(table) = self.table.lock() else {
             return vec![];
@@ -117,8 +106,8 @@ impl FrecencyStore {
         let now = now_unix();
         let mut weight: HashMap<&str, f64> = HashMap::new();
         for ((spec, _), entry) in table.iter() {
-            let age_days = (now.saturating_sub(entry.last_unix)) as f64 / 86_400.0;
-            *weight.entry(spec.as_str()).or_insert(0.0) += (entry.count as f64) / (1.0 + age_days);
+            *weight.entry(spec.as_str()).or_insert(0.0) +=
+                crate::history::frecency(entry.count, entry.last_unix, now);
         }
         let mut names: Vec<(&str, f64)> = weight.into_iter().collect();
         names.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
@@ -202,7 +191,7 @@ fn parse_row(line: &str) -> Option<((String, String), Entry)> {
 }
 
 /// Seconds since the epoch — the timestamp both TSV tallies stamp.
-pub(crate) fn now_unix() -> u64 {
+pub fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -219,8 +208,7 @@ mod tests {
     }
 
     /// Command-name ranking sums a name's rows: `git` (two accepts on
-    /// one insertion + one on another) outweighs `brew` (one), and a
-    /// single accept still counts — unlike `score`, which deadbands it.
+    /// one insertion + one on another) outweighs `brew` (one).
     #[test]
     fn spec_names_ranks_by_total_accepts() {
         let s = FrecencyStore::empty();
@@ -260,7 +248,7 @@ mod tests {
         if let Ok(mut table) = s.table.lock() {
             let key = ("stale".to_string(), "x".to_string());
             let e = table.get_mut(&key).expect("recorded above");
-            // 9 days back → weight 1/10 against the fresh entry's 1/1.
+            // 9 days back → weight e^(-9/7) ≈ 0.28 of the fresh entry's.
             e.last_unix = now_unix() - 9 * 86_400;
         }
         assert_eq!(s.spec_names(), vec!["fresh", "stale"]);
@@ -273,25 +261,34 @@ mod tests {
     }
 
     #[test]
-    fn single_pick_returns_zero() {
-        // Threshold: single pick is treated as accidental and gets
-        // no boost — only multi-picks earn a non-zero score.
+    fn single_pick_counts() {
+        // One accept is a signal too (the old model deadbanded it to 0).
         let s = FrecencyStore::empty();
         s.record("git", "checkout");
-        assert_eq!(s.score("git", "checkout"), 0.0);
+        let sc = s.score("git", "checkout");
+        assert!((sc - 2f64.ln()).abs() < 0.01, "ln 2 after 1 hit, got {sc}");
     }
 
     #[test]
-    fn two_picks_gives_score_one() {
+    fn two_picks_score_ln_three() {
         let s = FrecencyStore::empty();
         s.record("git", "checkout");
         s.record("git", "checkout");
         let sc = s.score("git", "checkout");
-        // (count - 1) / (1 + age=0) = 1.
-        assert!(
-            (0.99..=1.01).contains(&sc),
-            "expected ~1.0 after 2 hits, got {sc}"
-        );
+        assert!((sc - 3f64.ln()).abs() < 0.01, "ln 3 after 2 hits, got {sc}");
+    }
+
+    #[test]
+    fn a_week_old_pick_decays_by_e() {
+        let s = FrecencyStore::empty();
+        s.record("git", "checkout");
+        if let Ok(mut table) = s.table.lock() {
+            for e in table.values_mut() {
+                e.last_unix = now_unix() - 7 * 86_400;
+            }
+        }
+        let sc = s.score("git", "checkout");
+        assert!((sc - 2f64.ln() / std::f64::consts::E).abs() < 0.01, "{sc}");
     }
 
     #[test]

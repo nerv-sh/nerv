@@ -406,3 +406,56 @@ Usage: painted <command>
     let subs: Vec<&str> = spec.subcommands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(subs, ["build", "clean"], "escape bytes leaked into names");
 }
+
+/// `unspecced` tells the ZLE widget the shell's own completion may answer
+/// instead: true for a spec scraped from `--help` and for no spec at all,
+/// false for a hand-written one (overlay or bundled). It is decided by
+/// which layer holds the file, not by the result — a written spec that is
+/// still cold-loading returns no rows on its first keystroke, and handing
+/// `git ` to the shell then would hide the spec that lands a key later.
+#[test]
+fn unspecced_marks_derived_and_missing_specs_only() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let overlay = tmp.path().join("overlay");
+    let bundled = tmp.path().join("specs");
+    let derived = tmp.path().join("derived");
+    for d in [&overlay, &bundled, &derived] {
+        std::fs::create_dir_all(d).expect("mkdir");
+    }
+    let spec = |name: &str| format!(r#"{{"name":"{name}","subcommands":[{{"name":"build"}}]}}"#);
+    std::fs::write(overlay.join("mine.json"), spec("mine")).expect("write");
+    std::fs::write(bundled.join("git.json"), spec("git")).expect("write");
+    // Already derived: read back like any layer, nothing is spawned.
+    std::fs::write(derived.join("scraped.json"), spec("scraped")).expect("write");
+
+    let registry = SpecRegistry::for_layers(&nerv_engine::paths::SpecLayers {
+        overlay: Some(overlay),
+        primary: bundled,
+        derived: Some(derived),
+    });
+
+    // Cold first keystroke: the bundled file may not be parsed yet.
+    assert!(!nerv_engine::complete("git ", 4, &registry).unspecced);
+
+    for (line, want) in [("git ", false), ("mine ", false), ("scraped ", true)] {
+        let r = complete_until_rows(&registry, line);
+        assert!(!r.items.is_empty(), "{line:?} never produced rows");
+        assert_eq!(r.unspecced, want, "{line:?}");
+    }
+    let none = nerv_engine::complete("nosuchtool-xyz ", 15, &registry);
+    assert!(none.items.is_empty());
+    assert!(none.unspecced, "no spec at all is unspecced");
+    // Still typing the command word: command names, never the shell.
+    assert!(!nerv_engine::complete("gi", 2, &registry).unspecced);
+}
+
+fn complete_until_rows(registry: &SpecRegistry, line: &str) -> nerv_engine::CompleteResult {
+    for _ in 0..40 {
+        let r = nerv_engine::complete(line, line.len(), registry);
+        if !r.items.is_empty() {
+            return r;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    nerv_engine::complete(line, line.len(), registry)
+}

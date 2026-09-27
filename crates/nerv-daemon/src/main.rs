@@ -15,8 +15,8 @@ use anyhow::Context;
 use nerv_engine::complete::CommandNames;
 use nerv_engine::misses::MissCounter;
 use nerv_engine::{
-    Config, FrecencyStore, MatchMode, Request, Response, SpecRegistry, Suggestion, complete_in,
-    manifest, no_spec_binary, paths,
+    Config, FrecencyStore, HistoryStore, MatchMode, Request, Response, SpecRegistry, Suggestion,
+    complete_in, manifest, no_spec_binary, paths, wire,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -113,6 +113,21 @@ async fn main() -> anyhow::Result<()> {
         "spec-miss counter loaded"
     );
 
+    // Executed-command history behind history-ranked suggestions. Same
+    // `-` sentinel as frecency; `paths::history_path` honours
+    // NERV_HISTORY_FILE so the CLI and the daemon agree on the file.
+    let history_path = paths::history_path().expect("HOME present (just checked)");
+    let history = if history_path == std::path::PathBuf::from("-") {
+        Arc::new(HistoryStore::empty())
+    } else {
+        Arc::new(HistoryStore::load(&history_path))
+    };
+    info!(
+        path = %history_path.display(),
+        rows = history.len(),
+        "command history loaded"
+    );
+
     // Best-effort cleanup of any stale socket from a previous run.
     let _ = tokio::fs::remove_file(&sock_path).await;
 
@@ -140,6 +155,16 @@ async fn main() -> anyhow::Result<()> {
     let names = Arc::new(NameCache::from_env());
     names.prewarm();
 
+    let shared = Shared {
+        registry,
+        frecency,
+        misses: misses.clone(),
+        names,
+        history,
+        mode: config.matching.mode,
+        schema_block,
+    };
+
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
@@ -148,20 +173,7 @@ async fn main() -> anyhow::Result<()> {
             res = listener.accept() => {
                 match res {
                     Ok((stream, _addr)) => {
-                        let registry = registry.clone();
-                        let frecency = frecency.clone();
-                        let misses = misses.clone();
-                        let names = names.clone();
-                        let schema_block = schema_block.clone();
-                        tokio::spawn(handle_connection(
-                            stream,
-                            registry,
-                            frecency,
-                            misses,
-                            names,
-                            config.matching.mode,
-                            schema_block,
-                        ));
+                        tokio::spawn(handle_connection(stream, shared.clone()));
                     }
                     Err(e) => warn!(?e, "accept error"),
                 }
@@ -183,15 +195,20 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn handle_connection(
-    stream: tokio::net::UnixStream,
+/// Daemon state every connection reads. Cloning is a handful of `Arc`
+/// bumps.
+#[derive(Clone)]
+struct Shared {
     registry: Arc<SpecRegistry>,
     frecency: Arc<FrecencyStore>,
     misses: Arc<MissCounter>,
     names: Arc<NameCache>,
+    history: Arc<HistoryStore>,
     mode: MatchMode,
     schema_block: Arc<Option<String>>,
-) {
+}
+
+async fn handle_connection(stream: tokio::net::UnixStream, shared: Shared) {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     loop {
@@ -220,6 +237,7 @@ async fn handle_connection(
                 if !oversized {
                     if line.len() + pos > MAX_REQUEST_LINE {
                         oversized = true;
+                        keep_head(&mut line, &available[..pos]);
                     } else {
                         line.extend_from_slice(&available[..pos]);
                     }
@@ -230,7 +248,7 @@ async fn handle_connection(
             if !oversized {
                 if line.len() + available.len() > MAX_REQUEST_LINE {
                     oversized = true;
-                    line = Vec::new();
+                    keep_head(&mut line, available);
                 } else {
                     line.extend_from_slice(available);
                 }
@@ -252,122 +270,62 @@ async fn handle_connection(
         if !oversized && trimmed.is_empty() {
             continue;
         }
-        debug!(req = trimmed, "received");
+        // An oversized text request (a huge pasted command) keeps only its
+        // head; that is enough to answer it in its own protocol. A JSON
+        // error here would read to the widget as "old daemon" and switch
+        // its socket off for good.
+        if oversized && wire::is_text_request(&line) {
+            warn!("text request exceeds {MAX_REQUEST_LINE} bytes");
+            if write_lines(&mut write_half, wire::text_error_reply(&line))
+                .await
+                .is_err()
+            {
+                break;
+            }
+            continue;
+        }
+        // A line opening with a text verb comes from zsh's socket path
+        // (`nerv_engine::wire`); everything else is JSON, or garbage that
+        // the JSON path answers with an Error.
+        // Only the line break goes: the last field (a record's `prev`)
+        // may end in a space the fork path keeps too.
+        let raw = line.trim_end_matches(['\r', '\n']);
+        if !oversized && wire::is_text_request(raw) {
+            let text = wire::parse_text_request(raw);
+            // Never log a record line: it is command text.
+            debug!(
+                verb = raw.split(wire::US).next().unwrap_or(""),
+                "received text"
+            );
+            let lines = match text {
+                Ok(text) => {
+                    let request = match &text {
+                        wire::TextRequest::Complete { request, .. }
+                        | wire::TextRequest::Predict { request, .. }
+                        | wire::TextRequest::Record(request) => request.clone(),
+                    };
+                    let resp = dispatch(Ok(request), &shared).await;
+                    wire::text_reply(&text, resp)
+                }
+                Err(e) => {
+                    warn!(%e, "bad text request");
+                    wire::text_error_reply(raw)
+                }
+            };
+            if write_lines(&mut write_half, lines).await.is_err() {
+                break;
+            }
+            continue;
+        }
+        // The line itself stays out of the log: a record carries the command
+        // run, a complete the line being typed.
+        debug!(bytes = trimmed.len(), "received");
         let request = if oversized {
             Err(format!("request line exceeds {MAX_REQUEST_LINE} bytes"))
         } else {
             serde_json::from_str::<Request>(trimmed).map_err(|e| format!("invalid request: {e}"))
         };
-        let resp = match request {
-            Ok(Request::Ping) => Response::Pong {
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                pid: std::process::id(),
-            },
-            Ok(Request::Complete { line, cursor, cwd }) => match schema_block.as_ref() {
-                // E5: schema mismatch disables all completion; the reason
-                // string is what the CLI bridge sniffs for the ZLE hint.
-                Some(reason) => Response::Empty {
-                    reason: Some(reason.clone()),
-                },
-                // complete_in is synchronous and can block for hundreds of
-                // ms (cold spec parse, generator subprocess). Run it on the
-                // blocking pool so one slow completion doesn't stall every
-                // other connection on the 2-thread runtime.
-                None => {
-                    let registry = registry.clone();
-                    let frecency = frecency.clone();
-                    let misses = misses.clone();
-                    let names = names.clone();
-                    tokio::task::spawn_blocking(move || {
-                        // Building the name list means stat-ing every
-                        // spec layer, cloning ~700 stems and folding the
-                        // frecency table. The engine calls this only for
-                        // the first token or a command word with no spec
-                        // — a small minority of keystrokes.
-                        let cmd_names = || names.names(&registry, &frecency);
-                        let resp = engine_complete(
-                            &registry,
-                            &frecency,
-                            Some(&cmd_names),
-                            &line,
-                            cursor,
-                            cwd.as_deref(),
-                            mode,
-                        );
-                        // A "no spec for X" empty is the only response the
-                        // tally cares about — and only once it is settled.
-                        // The first keystroke on a cold stem returns empty
-                        // while the spec is still parsing or being derived
-                        // from `--help`; counting that would list commands
-                        // that complete fine one key later. The flush is
-                        // throttled inside the counter.
-                        if let Response::Empty { reason: Some(r) } = &resp {
-                            if let Some(binary) = no_spec_binary(r) {
-                                if !registry.is_loading(binary) {
-                                    misses.record(binary);
-                                    misses.flush_if_dirty();
-                                }
-                            }
-                        }
-                        resp
-                    })
-                    .await
-                    .unwrap_or_else(|e| Response::Error {
-                        message: format!("completion task failed: {e}"),
-                    })
-                }
-            },
-            Ok(Request::DoctorAutorun) => Response::Empty {
-                reason: Some("doctor-autorun-stub".to_string()),
-            },
-            Ok(Request::RecordAccept { spec, insertion }) => {
-                // flush_if_dirty rewrites the TSV on disk — keep the file
-                // IO off the async workers alongside the in-memory record.
-                let frecency = frecency.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    frecency.record(&spec, &insertion);
-                    frecency.flush_if_dirty();
-                })
-                .await;
-                Response::Empty {
-                    reason: Some("recorded".to_string()),
-                }
-            }
-            Ok(Request::RegisterShellNames { names: incoming }) => {
-                // Memory-only by contract: the names are dotfile content
-                // (docs/error-states.md §3.6.3 — local only, no
-                // telemetry), so registration itself touches no file. The
-                // prune below rewrites the MISS tally, which is ordinary
-                // daemon-owned state — the names never reach it.
-                if !incoming.is_empty() {
-                    let shell_snapshot = {
-                        let mut shell = shell_lock(&names.shell);
-                        *shell = shell_names_union(&shell, &incoming);
-                        shell.clone()
-                    };
-                    // A function·alias the shell completes itself must
-                    // not keep a miss row: doctor would advise an overlay
-                    // spec for it, which is always wrong advice. This is
-                    // the only place the tally can be pruned — the names
-                    // exist nowhere else, and they arrive here. File IO
-                    // stays off the async workers, like every tally write.
-                    let misses = misses.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let set: std::collections::HashSet<String> =
-                            shell_snapshot.iter().cloned().collect();
-                        let dropped = misses.prune(&set);
-                        if dropped > 0 {
-                            info!(dropped, "pruned shell-name rows from the miss tally");
-                        }
-                    })
-                    .await;
-                }
-                Response::Empty {
-                    reason: Some("registered".to_string()),
-                }
-            }
-            Err(message) => Response::Error { message },
-        };
+        let resp = dispatch(request, &shared).await;
         if let Ok(s) = serde_json::to_string(&resp) {
             if write_half.write_all(s.as_bytes()).await.is_err()
                 || write_half.write_all(b"\n").await.is_err()
@@ -376,6 +334,228 @@ async fn handle_connection(
                 break;
             }
         }
+    }
+}
+
+/// How much of an oversized line is kept: enough for a text request's
+/// verb and seq.
+const OVERSIZED_HEAD: usize = 64;
+
+/// Keep the head of an oversized line, drop the rest.
+fn keep_head(line: &mut Vec<u8>, more: &[u8]) {
+    let room = OVERSIZED_HEAD.saturating_sub(line.len());
+    line.extend_from_slice(&more[..room.min(more.len())]);
+    line.truncate(OVERSIZED_HEAD);
+}
+
+/// Write text-protocol reply lines in one go; nothing for an empty list.
+async fn write_lines(
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    lines: Vec<String>,
+) -> std::io::Result<()> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let mut out = String::new();
+    for l in lines {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    write_half.write_all(out.as_bytes()).await?;
+    write_half.flush().await
+}
+
+/// Answer one decoded request — the same for JSON and text requests.
+async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response {
+    let Shared {
+        registry,
+        frecency,
+        misses,
+        names,
+        history,
+        mode,
+        schema_block,
+    } = shared.clone();
+    match request {
+        Ok(Request::Ping) => Response::Pong {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            pid: std::process::id(),
+        },
+        Ok(Request::Complete {
+            line,
+            cursor,
+            cwd,
+            prev,
+            typed,
+        }) => match schema_block.as_ref() {
+            // E5: schema mismatch disables all completion; the reason
+            // string is what the CLI bridge sniffs for the ZLE hint.
+            Some(reason) => Response::empty(reason.clone()),
+            // complete_in is synchronous and can block for hundreds of
+            // ms (cold spec parse, generator subprocess). Run it on the
+            // blocking pool so one slow completion doesn't stall every
+            // other connection on the 2-thread runtime.
+            None => {
+                let registry = registry.clone();
+                let frecency = frecency.clone();
+                let misses = misses.clone();
+                let names = names.clone();
+                let history = history.clone();
+                tokio::task::spawn_blocking(move || {
+                    // Building the name list means stat-ing every
+                    // spec layer, cloning ~700 stems and folding the
+                    // frecency table. The engine calls this only for
+                    // the first token or a command word with no spec
+                    // — a small minority of keystrokes.
+                    let cmd_names = || names.names(&registry, &frecency);
+                    let mut resp = engine_complete(
+                        &registry,
+                        Ranking {
+                            frecency: &frecency,
+                            history: Some(&history),
+                            prev: prev.as_deref().unwrap_or(""),
+                        },
+                        Some(&cmd_names),
+                        &line,
+                        cursor,
+                        cwd.as_deref(),
+                        mode,
+                    );
+                    attach_ghost(
+                        &mut resp,
+                        &history,
+                        typed.as_deref().unwrap_or(&line),
+                        cwd.as_deref().unwrap_or(""),
+                        prev.as_deref().unwrap_or(""),
+                    );
+                    // A "no spec for X" empty is the only response the
+                    // tally cares about — and only once it is settled.
+                    // The first keystroke on a cold stem returns empty
+                    // while the spec is still parsing or being derived
+                    // from `--help`; counting that would list commands
+                    // that complete fine one key later. The flush is
+                    // throttled inside the counter.
+                    if let Response::Empty {
+                        reason: Some(r), ..
+                    } = &resp
+                    {
+                        if let Some(binary) = no_spec_binary(r) {
+                            if !registry.is_loading(binary) {
+                                misses.record(binary);
+                                misses.flush_if_dirty();
+                            }
+                        }
+                    }
+                    resp
+                })
+                .await
+                .unwrap_or_else(|e| Response::Error {
+                    message: format!("completion task failed: {e}"),
+                })
+            }
+        },
+        Ok(Request::DoctorAutorun) => Response::empty("doctor-autorun-stub".to_string()),
+        Ok(Request::RecordAccept { spec, insertion }) => {
+            // flush_if_dirty rewrites the TSV on disk — keep the file
+            // IO off the async workers alongside the in-memory record.
+            let frecency = frecency.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                frecency.record(&spec, &insertion);
+                frecency.flush_if_dirty();
+            })
+            .await;
+            Response::empty("recorded".to_string())
+        }
+        Ok(Request::RegisterShellNames { names: incoming }) => {
+            // Memory-only by contract: the names are dotfile content
+            // (docs/error-states.md §3.6.3 — local only, no
+            // telemetry), so registration itself touches no file. The
+            // prune below rewrites the MISS tally, which is ordinary
+            // daemon-owned state — the names never reach it.
+            if !incoming.is_empty() {
+                let shell_snapshot = {
+                    let mut shell = shell_lock(&names.shell);
+                    *shell = shell_names_union(&shell, &incoming);
+                    shell.clone()
+                };
+                // A function·alias the shell completes itself must
+                // not keep a miss row: doctor would advise an overlay
+                // spec for it, which is always wrong advice. This is
+                // the only place the tally can be pruned — the names
+                // exist nowhere else, and they arrive here. File IO
+                // stays off the async workers, like every tally write.
+                let misses = misses.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let set: std::collections::HashSet<String> =
+                        shell_snapshot.iter().cloned().collect();
+                    let dropped = misses.prune(&set);
+                    if dropped > 0 {
+                        info!(dropped, "pruned shell-name rows from the miss tally");
+                    }
+                })
+                .await;
+            }
+            Response::empty("registered".to_string())
+        }
+        Ok(Request::RecordCommand {
+            command,
+            expanded,
+            cwd,
+            exit,
+            prev,
+        }) => {
+            // The append is file IO — off the async workers, like
+            // every other cache write.
+            let history = history.clone();
+            let entry = nerv_engine::history::Entry {
+                ts: nerv_engine::history::now_unix(),
+                exit,
+                cwd,
+                prev,
+                command,
+                expanded,
+            };
+            let res = tokio::task::spawn_blocking(move || history.record(entry)).await;
+            match res {
+                Ok(Ok(_)) => Response::empty("recorded".to_string()),
+                Ok(Err(e)) => {
+                    warn!(%e, "history write failed");
+                    Response::Error {
+                        message: format!("history write failed: {e}"),
+                    }
+                }
+                Err(e) => Response::Error {
+                    message: format!("history task failed: {e}"),
+                },
+            }
+        }
+        // No `$history` fallback exists for a prediction, so "none" is
+        // simply an absent ghost.
+        Ok(Request::Predict { prev, cwd }) => Response::Empty {
+            reason: None,
+            unspecced: false,
+            ghost: history.predict(&prev, &cwd),
+        },
+        Ok(Request::ImportHistory { path }) => {
+            let history = history.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                history.import_zsh_history(std::path::Path::new(&path))
+            })
+            .await;
+            match res {
+                Ok(Ok(n)) => {
+                    info!(imported = n, "zsh history imported");
+                    Response::empty(format!("imported {n}"))
+                }
+                Ok(Err(e)) => Response::Error {
+                    message: format!("history import failed: {e}"),
+                },
+                Err(e) => Response::Error {
+                    message: format!("history task failed: {e}"),
+                },
+            }
+        }
+        Err(message) => Response::Error { message },
     }
 }
 
@@ -646,12 +826,22 @@ impl Drop for ScanGuard<'_> {
 /// result sets (e.g. `brew install a` = 442) with no truncation at all.
 const MAX_SUGGESTIONS: usize = 500;
 
+/// What orders a completion reply: popup picks, and the command history
+/// when there is one.
+#[derive(Clone, Copy)]
+struct Ranking<'a> {
+    frecency: &'a FrecencyStore,
+    history: Option<&'a HistoryStore>,
+    /// The command run before this one — the sequence signal.
+    prev: &'a str,
+}
+
 /// Dispatch a Complete request through the real engine pipeline.
-/// After the engine returns, apply a frecency boost so suggestions
-/// the user has accepted before float to the top of the list.
+/// After the engine returns, rank the rows by what the user picks and
+/// runs ([`rank_by_frecency`]).
 fn engine_complete(
     registry: &SpecRegistry,
-    frecency: &FrecencyStore,
+    ranking: Ranking<'_>,
     names: Option<&dyn Fn() -> CommandNames>,
     line: &str,
     cursor: usize,
@@ -660,9 +850,22 @@ fn engine_complete(
 ) -> Response {
     let cwd_path = cwd.map(std::path::Path::new);
     let mut result = complete_in(line, cursor, registry, cwd_path, mode, names);
+    let before = before_cursor(line, cursor);
+    let signals = ranking
+        .history
+        .map(|h| h.token_signals(&completed_words(before), cwd.unwrap_or(""), ranking.prev));
+    if let Some(sig) = signals
+        .as_deref()
+        .filter(|_| wants_history_rows(&result.items, result.reason.as_deref()))
+    {
+        let extra = history_rows(sig, &result.items, partial_word(before), cwd_path);
+        result.items.extend(extra);
+    }
     if result.items.is_empty() {
         return Response::Empty {
             reason: result.reason,
+            unspecced: result.unspecced,
+            ghost: None,
         };
     }
     // Extract the binary name once — frecency keys are per-spec.
@@ -670,7 +873,8 @@ fn engine_complete(
         result.items = rank_by_frecency(
             std::mem::take(&mut result.items),
             spec_name,
-            frecency,
+            ranking.frecency,
+            signals.as_deref(),
             MAX_SUGGESTIONS,
         );
     }
@@ -679,28 +883,211 @@ fn engine_complete(
     Response::Suggestions {
         items: result.items,
         token_complete: result.token_complete,
+        unspecced: result.unspecced,
+        ghost: None,
     }
 }
 
-/// Score each item with the user's frecency for `spec_name`, then order
-/// them for display via [`rank_completions`]. Source-ranked rows (zoxide)
-/// score zero so the stable sort keeps the engine's order for them. The
-/// list is truncated to `cap` after sorting (dropping the least-relevant
-/// tail) so the re-collect below never materializes rows that get dropped.
+/// Put the history ghost for `typed` on a completion reply. An empty
+/// history leaves `ghost` unset, so the widget keeps zsh's `$history`
+/// fallback — a fresh install, or one still importing, is not left with
+/// no ghost at all. Otherwise the field is always set, `""` for "no
+/// match": the widget must not paint `$history` over a ranked "nothing".
+fn attach_ghost(resp: &mut Response, history: &HistoryStore, typed: &str, cwd: &str, prev: &str) {
+    if history.is_empty() {
+        return;
+    }
+    let found = history.ghost(typed, cwd, prev).unwrap_or_default();
+    if let Response::Suggestions { ghost, .. } | Response::Empty { ghost, .. } = resp {
+        *ghost = Some(found);
+    }
+}
+
+/// `line` up to `cursor`. The widget counts the cursor in characters
+/// (`${#send_line}`), so a byte slice would split `ls 한글` mid-character
+/// and panic; past the end it is the whole line.
+fn before_cursor(line: &str, cursor: usize) -> &str {
+    line.char_indices()
+        .nth(cursor)
+        .map_or(line, |(byte, _)| &line[..byte])
+}
+
+/// The word being typed at the cursor: `ch` of `git ch`, empty right
+/// after a space or a separator.
+fn partial_word(before_cursor: &str) -> &str {
+    if before_cursor.ends_with(char::is_whitespace) {
+        return "";
+    }
+    let word = before_cursor
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or("");
+    word.rsplit([';', '|', '&']).next().unwrap_or(word)
+}
+
+/// Whether history rows may join this reply. Three replies are contracts
+/// that extra rows would break:
+/// - a command-word correction comes back as the only row, and the
+///   widget recognises it by that (`(( ${#rlines} == 1 ))` in _nerv.zsh);
+/// - "no spec for X" is what the miss tally counts and what sends the
+///   widget to zsh's own completion;
+/// - rows the source ranked itself (zoxide, command names) keep that
+///   order. A history row would score above them, and after `z` it is a
+///   partial query (`z nerv`) that zoxide's rows, full paths, never match:
+///   picking it re-runs the fuzzy jump the full paths are there to avoid.
+fn wants_history_rows(items: &[Suggestion], reason: Option<&str>) -> bool {
+    !items.iter().any(|s| s.replace.is_some() || s.source_ranked)
+        && reason.is_none_or(|r| no_spec_binary(r).is_none())
+}
+
+/// How many words the history may add as rows of their own.
+const HISTORY_ROWS: usize = 5;
+
+/// Words that followed this line in the history but that the spec does
+/// not offer — `feature-x` after `git checkout` when no branch generator
+/// ran, a host typed after `ssh` that `~/.ssh/config` does not list. Only words that extend what is being typed,
+/// best frecency first, at most [`HISTORY_ROWS`]. Their rows read
+/// `history` and are ranked with the rest.
+///
+/// A relative path (`src/x.rs`) names a file in the directory it was
+/// typed in: it is offered only where it was typed or where it exists,
+/// or it would outrank the files that are really here.
+fn history_rows(
+    signals: &nerv_engine::history::TokenSignals,
+    items: &[Suggestion],
+    partial: &str,
+    cwd: Option<&std::path::Path>,
+) -> Vec<Suggestion> {
+    use nerv_engine::history::token_key;
+    let have: std::collections::HashSet<&str> =
+        items.iter().map(|s| token_key(&s.insertion)).collect();
+    let now = nerv_engine::history::now_unix();
+    let mut words: Vec<(f64, &str)> = signals
+        .tokens
+        .iter()
+        .filter(|(key, t)| {
+            !have.contains(key.as_str())
+                && t.word.starts_with(partial)
+                && t.word != partial
+                // Quoting, expansions, control operators and redirections:
+                // the index splits on whitespace only, so these are pieces
+                // of a larger word (`'quoted`, `&&`, `>`, `main;make`).
+                && !t.word.contains(['\'', '"', '`', '$', ';', '|', '&', '<', '>', '(', ')'])
+                && (t.here > 0 || !is_relative_path(&t.word) || cwd.is_some_and(|d| d.join(&t.word).exists()))
+        })
+        .map(|(_, t)| {
+            (
+                nerv_engine::history::frecency(t.count, t.last, now),
+                t.word.as_str(),
+            )
+        })
+        .collect();
+    words.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(b.1)));
+    words
+        .into_iter()
+        .take(HISTORY_ROWS)
+        .map(|(_, w)| Suggestion {
+            insertion: w.to_string(),
+            display: w.to_string(),
+            description: Some("history".to_string()),
+            kind: nerv_engine::SuggestionKind::Argument,
+            ..Suggestion::default()
+        })
+        .collect()
+}
+
+/// A word that names a path relative to the directory it was typed in:
+/// it has a `/`, and does not start at `/` or `~`.
+fn is_relative_path(word: &str) -> bool {
+    word.contains('/') && !word.starts_with(['/', '~'])
+}
+
+/// The finished words of the command being completed: `["git"]` for
+/// `git ch`, `["git", "checkout"]` for `git checkout `. Only the last
+/// segment of a compound line counts — after `&&`, `||`, `;` or `|`,
+/// spaced or not (`cd x; git ch` → `["git"]`) — the part the engine
+/// completes. Words split on whitespace, like the history index they are
+/// looked up in; a separator inside quotes also splits, which at worst
+/// loses the history signal for that line.
+fn completed_words(before_cursor: &str) -> Vec<&str> {
+    let segment = before_cursor
+        .rfind([';', '|', '&'])
+        .map_or(before_cursor, |i| &before_cursor[i + 1..]);
+    let mut words: Vec<&str> = segment.split_whitespace().collect();
+    if !segment.ends_with(char::is_whitespace) {
+        words.pop();
+    }
+    words
+}
+
+/// Score each item for display, then order them via [`rank_completions`]
+/// (docs/history-suggestions.md §5):
+///
+/// score = 0.4 · frecency + 0.3 · directory + 0.5 · sequence + 0.25 · head sequence
+///
+/// frecency is the item's popup accepts ([`FrecencyStore::score`]) plus
+/// the runs of recorded commands that had this word here — typing
+/// `git status` by hand counts as much as picking it — normalised by the
+/// best in the list. directory is the share of those runs made in the
+/// current directory. sequence is how often those runs directly followed
+/// the previous command (head sequence: its first two words), divided by
+/// the best in the list. Source-ranked rows (zoxide) score zero so the
+/// stable sort keeps the engine's order for them. The list is truncated
+/// to `cap` after sorting (dropping the least-relevant tail).
 fn rank_by_frecency(
     items: Vec<Suggestion>,
     spec_name: &str,
     frecency: &FrecencyStore,
+    signals: Option<&nerv_engine::history::TokenSignals>,
     cap: usize,
 ) -> Vec<Suggestion> {
-    let mut scored: Vec<(f64, Suggestion)> = items
-        .into_iter()
+    use nerv_engine::history::{W_DIR, W_FRECENCY, W_SEQ, W_SEQ_HEAD};
+    let now = nerv_engine::history::now_unix();
+    // A sequence seen once is not a habit — the same floor the empty-prompt
+    // prediction uses; one `git add` → `git stash` must not top the popup.
+    let habit = |n: u32| {
+        if n >= nerv_engine::history::PREDICT_MIN {
+            n as f64
+        } else {
+            0.0
+        }
+    };
+    // (frecency, directory share, after prev, after head) per row.
+    let raw: Vec<(f64, f64, f64, f64)> = items
+        .iter()
         .map(|s| {
-            let score = if s.source_ranked {
+            if s.source_ranked {
+                return (0.0, 0.0, 0.0, 0.0);
+            }
+            let accepts = frecency.score(spec_name, &s.insertion);
+            let Some(t) = signals.and_then(|sig| sig.get(&s.insertion)) else {
+                return (accepts, 0.0, 0.0, 0.0);
+            };
+            let typed = nerv_engine::history::frecency(t.count, t.last, now);
+            let dir = if t.in_dirs == 0 {
                 0.0
             } else {
-                frecency.score(spec_name, &s.insertion)
+                t.here as f64 / t.in_dirs as f64
             };
+            (
+                accepts + typed,
+                dir,
+                habit(t.after_prev),
+                habit(t.after_head),
+            )
+        })
+        .collect();
+    let max = |f: fn(&(f64, f64, f64, f64)) -> f64| raw.iter().map(f).fold(0.0, f64::max);
+    let (frec_max, prev_max, head_max) = (max(|r| r.0), max(|r| r.2), max(|r| r.3));
+    let norm = |v: f64, m: f64| if m > 0.0 { v / m } else { 0.0 };
+    let mut scored: Vec<(f64, Suggestion)> = items
+        .into_iter()
+        .zip(raw)
+        .map(|(s, (frec, dir, after_prev, after_head))| {
+            let score = W_FRECENCY * norm(frec, frec_max)
+                + W_DIR * dir
+                + W_SEQ * norm(after_prev, prev_max)
+                + W_SEQ_HEAD * norm(after_head, head_max);
             (score, s)
         })
         .collect();
@@ -1000,12 +1387,280 @@ mod tests {
         for _ in 0..2 {
             frecency.record("brew", "zzz-frecency-boosted");
         }
-        let items = rank_by_frecency(items, "brew", &frecency, MAX_SUGGESTIONS);
+        let items = rank_by_frecency(items, "brew", &frecency, None, MAX_SUGGESTIONS);
         assert_eq!(items.len(), MAX_SUGGESTIONS, "list capped for transport");
         assert_eq!(
             items[0].display, "zzz-frecency-boosted",
             "frecency survivor kept at head despite late alpha order"
         );
+    }
+
+    fn run(history: &HistoryStore, command: &str, cwd: &str) {
+        history
+            .record(nerv_engine::history::Entry {
+                ts: nerv_engine::history::now_unix(),
+                exit: 0,
+                cwd: cwd.into(),
+                prev: String::new(),
+                command: command.into(),
+                expanded: String::new(),
+            })
+            .unwrap();
+    }
+
+    fn order(items: &[Suggestion]) -> Vec<&str> {
+        items.iter().map(|s| s.display.as_str()).collect()
+    }
+
+    #[test]
+    fn typed_commands_raise_popup_rows_without_any_accept() {
+        let history = HistoryStore::empty();
+        run(&history, "git status", "/r");
+        let items = vec![sugg("checkout"), sugg("commit"), sugg("status")];
+        let signals = history.token_signals(&completed_words("git "), "/r", "");
+        let ranked = rank_by_frecency(
+            items,
+            "git",
+            &FrecencyStore::empty(),
+            Some(&*signals),
+            MAX_SUGGESTIONS,
+        );
+        assert_eq!(order(&ranked), ["status", "checkout", "commit"]);
+    }
+
+    #[test]
+    fn directory_affinity_flips_popup_order() {
+        let history = HistoryStore::empty();
+        for _ in 0..3 {
+            run(&history, "npm run dev", "/a");
+            run(&history, "npm run build", "/b");
+        }
+        let items = || vec![sugg("build"), sugg("dev"), sugg("test")];
+        let words = completed_words("npm run ");
+        let in_a = rank_by_frecency(
+            items(),
+            "npm",
+            &FrecencyStore::empty(),
+            Some(&*history.token_signals(&words, "/a", "")),
+            MAX_SUGGESTIONS,
+        );
+        let in_b = rank_by_frecency(
+            items(),
+            "npm",
+            &FrecencyStore::empty(),
+            Some(&*history.token_signals(&words, "/b", "")),
+            MAX_SUGGESTIONS,
+        );
+        assert_eq!(order(&in_a)[0], "dev");
+        assert_eq!(order(&in_b)[0], "build");
+    }
+
+    fn run_after(history: &HistoryStore, command: &str, prev: &str) {
+        history
+            .record(nerv_engine::history::Entry {
+                ts: nerv_engine::history::now_unix(),
+                exit: 0,
+                cwd: "/".into(),
+                prev: prev.into(),
+                command: command.into(),
+                expanded: String::new(),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn what_followed_the_previous_command_tops_the_popup() {
+        let history = HistoryStore::empty();
+        for _ in 0..4 {
+            run(&history, "git push", "/");
+        }
+        for _ in 0..2 {
+            run_after(&history, "git commit -m wip", "git add .");
+        }
+        let items = || vec![sugg("commit"), sugg("push"), sugg("status")];
+        let words = completed_words("git ");
+        let rank = |prev: &str| {
+            rank_by_frecency(
+                items(),
+                "git",
+                &FrecencyStore::empty(),
+                Some(&*history.token_signals(&words, "/", prev)),
+                MAX_SUGGESTIONS,
+            )
+        };
+        assert_eq!(order(&rank(""))[0], "push");
+        assert_eq!(order(&rank("git add ."))[0], "commit");
+        assert_eq!(order(&rank("git add src/x.rs"))[0], "commit");
+    }
+
+    #[test]
+    fn history_rows_fill_in_words_the_spec_lacks() {
+        let history = HistoryStore::empty();
+        for w in [
+            "feature-x",
+            "feature-x",
+            "fix-y",
+            "main",
+            "'quoted arg'",
+            "f && make",
+            "fix;make",
+            "f > out.patch",
+        ] {
+            run(&history, &format!("git checkout {w}"), "/");
+        }
+        let sig = history.token_signals(&completed_words("git checkout f"), "/", "");
+        let rows = history_rows(&sig, &[sugg("main")], partial_word("git checkout f"), None);
+        let words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
+        // Extends `f`, best first; `main` is already a spec row.
+        assert_eq!(words, ["feature-x", "fix-y"]);
+        assert_eq!(rows[0].description.as_deref(), Some("history"));
+        let all = history_rows(&sig, &[], "", None);
+        // Quoted words, operators and redirections are never offered back.
+        let bad = |w: &str| w.contains(['\'', ';', '&', '>', '|']);
+        assert!(all.iter().all(|s| !bad(&s.insertion)), "{all:?}");
+        assert!(all.len() <= HISTORY_ROWS);
+    }
+
+    #[test]
+    fn history_rows_leave_corrections_and_no_spec_replies_alone() {
+        let fix = Suggestion {
+            replace: Some(nerv_engine::ReplaceSpan { start: 0, end: 4 }),
+            ..sugg("expo")
+        };
+        assert!(!wants_history_rows(&[fix], None));
+        let no_spec = format!("{}nosuchbin", nerv_engine::complete::NO_SPEC_REASON_PREFIX);
+        assert!(!wants_history_rows(&[], Some(&no_spec)));
+        assert!(wants_history_rows(&[sugg("main")], None));
+        assert!(wants_history_rows(&[], None));
+        // zoxide's rows (and command names) keep the source's order.
+        let zoxide = Suggestion {
+            source_ranked: true,
+            ..sugg("/Users/me/nerv-sh")
+        };
+        assert!(!wants_history_rows(&[zoxide], None));
+    }
+
+    /// A relative path typed in another directory is not offered where it
+    /// does not exist; typed here, existing here, or absolute, it is.
+    #[test]
+    fn history_rows_offer_relative_paths_only_where_they_apply() {
+        let dir = std::env::temp_dir().join(format!("nerv-hist-rows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("here")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/real.rs"), "").unwrap();
+        let other = dir.join("other").to_string_lossy().into_owned();
+        let here = dir.to_string_lossy().into_owned();
+        let history = HistoryStore::empty();
+        run(&history, "vim src/elsewhere.rs", &other);
+        run(&history, "vim src/real.rs", &other);
+        run(&history, "vim src/typed-here.rs", &here);
+        run(&history, "vim /etc/hosts", &other);
+        let sig = history.token_signals(&["vim"], &here, "");
+        let rows = history_rows(&sig, &[], "", Some(&dir));
+        let mut words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
+        words.sort_unstable();
+        assert_eq!(words, ["/etc/hosts", "src/real.rs", "src/typed-here.rs"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_no_spec_reply_stays_empty_for_the_miss_tally() {
+        let history = HistoryStore::empty();
+        run(&history, "nosuchbin foo", "/");
+        let resp = engine_complete(
+            &SpecRegistry::default(),
+            Ranking {
+                frecency: &FrecencyStore::empty(),
+                history: Some(&history),
+                prev: "",
+            },
+            None,
+            "nosuchbin ",
+            10,
+            Some("/"),
+            MatchMode::default(),
+        );
+        match resp {
+            Response::Empty {
+                reason: Some(r), ..
+            } => assert!(no_spec_binary(&r).is_some(), "{r}"),
+            other => panic!("history rows turned a no-spec reply into {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_sequence_seen_once_does_not_reorder_the_popup() {
+        let history = HistoryStore::empty();
+        for _ in 0..3 {
+            run(&history, "git push", "/");
+        }
+        run_after(&history, "git stash", "git add .");
+        let ranked = rank_by_frecency(
+            vec![sugg("push"), sugg("stash")],
+            "git",
+            &FrecencyStore::empty(),
+            Some(&*history.token_signals(&completed_words("git "), "/", "git add .")),
+            MAX_SUGGESTIONS,
+        );
+        assert_eq!(order(&ranked)[0], "push");
+    }
+
+    #[test]
+    fn partial_word_is_the_token_at_the_cursor() {
+        assert_eq!(partial_word("git ch"), "ch");
+        assert_eq!(partial_word("git "), "");
+        assert_eq!(partial_word("cd x;git"), "git");
+        assert_eq!(partial_word("ls 한"), "한");
+    }
+
+    #[test]
+    fn completed_words_takes_the_last_segment() {
+        assert_eq!(completed_words("git ch"), ["git"]);
+        assert_eq!(completed_words("git checkout "), ["git", "checkout"]);
+        assert_eq!(completed_words("make && git ch"), ["git"]);
+        assert_eq!(completed_words("cd x; git ch"), ["git"]);
+        assert_eq!(completed_words("cat f|grep "), ["grep"]);
+        assert_eq!(completed_words("make&&git "), ["git"]);
+        assert!(completed_words("gi").is_empty());
+    }
+
+    #[test]
+    fn a_character_cursor_on_a_non_ascii_line_does_not_panic() {
+        // `ls 한글` is 5 characters and 9 bytes; the widget sends 5.
+        assert_eq!(before_cursor("ls 한글", 5), "ls 한글");
+        assert_eq!(before_cursor("ls 한글", 4), "ls 한");
+        assert_eq!(before_cursor("ls 한글 ", 99), "ls 한글 ");
+        // The byte slice this replaced: `&"ls 한글"[..5]` splits `한`.
+        assert!(!"ls 한글".is_char_boundary(5));
+        assert_eq!(
+            completed_words(before_cursor("ls 한글 ", 6)),
+            ["ls", "한글"]
+        );
+    }
+
+    #[test]
+    fn accepts_and_runs_add_up_before_normalising() {
+        // `log` was picked three times; `status` picked once and run twice.
+        // Summed, status (1+2) beats log (3) on recency-free ln(1+n) sums:
+        // ln2 + ln3 > ln4. Either signal alone would not.
+        let history = HistoryStore::empty();
+        run(&history, "git status", "/r");
+        run(&history, "git status", "/r");
+        let frecency = FrecencyStore::empty();
+        frecency.record("git", "log");
+        frecency.record("git", "log");
+        frecency.record("git", "status");
+        frecency.record("git", "log");
+        let signals = history.token_signals(&completed_words("git "), "/elsewhere", "");
+        let ranked = rank_by_frecency(
+            vec![sugg("commit"), sugg("log"), sugg("status")],
+            "git",
+            &frecency,
+            Some(&*signals),
+            MAX_SUGGESTIONS,
+        );
+        assert_eq!(order(&ranked), ["status", "log", "commit"]);
     }
 
     #[test]
@@ -1040,7 +1695,26 @@ mod tests {
             frecency.record("z", "claude-code");
         }
         let items = vec![zoxide("tak-bro"), zoxide("claude-code")];
-        let ranked = rank_by_frecency(items, "z", &frecency, MAX_SUGGESTIONS);
+        let ranked = rank_by_frecency(items, "z", &frecency, None, MAX_SUGGESTIONS);
+        let order: Vec<&str> = ranked.iter().map(|s| s.display.as_str()).collect();
+        assert_eq!(order, ["tak-bro", "claude-code"]);
+        // History signals leave source-ranked rows alone too.
+        let history = HistoryStore::empty();
+        for _ in 0..3 {
+            history
+                .record(nerv_engine::history::Entry {
+                    ts: nerv_engine::history::now_unix(),
+                    exit: 0,
+                    cwd: "/".into(),
+                    prev: String::new(),
+                    command: "z claude-code".into(),
+                    expanded: String::new(),
+                })
+                .unwrap();
+        }
+        let items = vec![zoxide("tak-bro"), zoxide("claude-code")];
+        let signals = history.token_signals(&["z"], "/", "");
+        let ranked = rank_by_frecency(items, "z", &frecency, Some(&*signals), MAX_SUGGESTIONS);
         let order: Vec<&str> = ranked.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(order, ["tak-bro", "claude-code"]);
     }

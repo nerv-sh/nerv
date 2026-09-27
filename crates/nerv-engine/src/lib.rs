@@ -26,9 +26,11 @@ pub mod shell_parser;
 pub mod spec;
 pub mod spec_loader;
 pub mod spec_parser;
+pub mod wire;
 
 pub mod derived;
 pub mod frecency;
+pub mod history;
 pub mod misses;
 
 #[cfg(feature = "quickjs")]
@@ -37,6 +39,7 @@ pub mod tier_c;
 pub use complete::{CompleteResult, SpecRegistry, complete, complete_in, no_spec_binary};
 pub use config::{Config, DerivedConfig, MatchMode, MatchingConfig};
 pub use frecency::FrecencyStore;
+pub use history::HistoryStore;
 pub use ipc::{ReplaceSpan, Request, Response, Suggestion, SuggestionKind};
 pub use shell_parser::{Node, NodeKind, NodeOperator, Operator};
 pub use spec_loader::{

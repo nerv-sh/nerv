@@ -29,7 +29,7 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 | 2 | 데몬 프로세스 | `nervd` (PID 추적: `~/Library/Caches/nerv/nervd.pid`) | `nerv start` 또는 자동 기동 | **종료** |
 | 3 | 데몬 소켓 | `~/Library/Caches/nerv/nervd.sock` | nervd | 삭제 |
 | 4 | 데몬 로그 | `~/Library/Logs/nerv/nervd.log` (+ 회전 파일) | nervd | 삭제 |
-| 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 — `specs/`, `frecency.tsv`, **`misses.tsv`** (spec 없는 명령 로컬 집계, `nerv doctor` 의 `spec misses` 행 출처), **`derived/`** (명령의 `--help` 에서 자동 추출한 spec — spec-conversion-policy §6.2) 포함 | 다양 | 삭제 |
+| 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 — `specs/`, `frecency.tsv`, **`misses.tsv`** (spec 없는 명령 로컬 집계, `nerv doctor` 의 `spec misses` 행 출처), **`derived/`** (명령의 `--help` 에서 자동 추출한 spec — spec-conversion-policy §6.2), **`history.tsv`**·`history.tsv.lock` (실행한 명령 기록, 0600 — history-suggestions.md §2), **`init.zsh`** (`nerv init zsh --shell-script` 가 쓰는 위젯 스크립트 캐시 — rc 블록이 source) 포함 | 다양 | 삭제 |
 | 6 | 설정 디렉터리 | `~/.config/nerv/` (XDG_CONFIG_HOME 존중) — `nerv.toml` + **`specs/` 사용자 overlay spec** (spec-conversion-policy §6.1) 포함 | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존 — overlay spec 도 `--keep-config` 로만 살아남는다) |
 | 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, 동봉 spec (`…/share/nerv/specs/`), formula 메타 | `brew install` | brew 가 처리 |
 
@@ -50,7 +50,7 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 # Managed by `nerv init zsh`. Do not edit between markers.
 # Version: 1.0.0
 # Installed: 2026-04-29T15:30:00Z
-eval "$(/opt/homebrew/bin/nerv init zsh --shell-script)"
+if [[ -r "$HOME/Library/Caches/nerv/init.zsh" ]] && source "$HOME/Library/Caches/nerv/init.zsh"; then :; else eval "$(/opt/homebrew/bin/nerv init zsh --shell-script)"; fi
 # <<< nerv <<<
 ```
 
@@ -315,3 +315,5 @@ opt-in 사용자만 §11 추가분도 검증 대상.
 *v1.3 — PLAN.md v0.6 정합. v1.1 → v1.3 변경: §2 / §3 / §10 에 v0.6 구현 매핑 행 추가 (nerv-shell + nerv-integrations + nerv-log 흡수 정합), §11 신설 (M1 figterm opt-in 시 인벤토리 추가분 + uninstall 절차 단계 2.5). 본문 인수 기준 자체는 변경 없음 (PRD §5.4 그대로). 변경 트리거: figterm M1 도입 commit, LaunchAgent 자동 기동 도입.*
 *v1.4 — 브랜드 strip 정합. §11 에 runtime 소켓 디렉터리 (`$XDG_RUNTIME_DIR/nervrun/`, 이전 `cwrun`) 와 data 디렉터리 (`~/Library/Application Support/nerv/`, 이전 `amazon-q`) 행 추가 + figterm path env vars / settings keys 잔존 정책 절 신설. 인수 기준 / 절차 자체는 무변경 — Q→NERV 리네이밍 결과를 인벤토리에 반영한 정합 갱신. 변경 트리거: figterm runtime 정합 dogfooding 결과로 추가 인벤토리 발견 시.*
 *v1.5 — 캐시 인벤토리 정합 (2026-09-05). v1.4 → v1.5 변경: §2 행 5 에 `misses.tsv` (spec-miss 로컬 집계) 와 `derived/` (`--help` 파생 spec 캐시) 명시. 둘 다 `~/Library/Caches/nerv/` 아래라 §4 step 4 의 `rm -rf` 가 이미 덮는다 — 절차 무변경, 인벤토리 문서화만. 구현 측: rc 파일 재작성이 공용 `paths::write_atomic` 으로 통일돼 퍼미션 보존 + 실패 시 temp 파일 unlink (흔적 0 계약이 실패 경로까지 적용). 변경 트리거: 캐시 디렉터리 밖에 새 산출물이 생길 때.*
+
+*v1.6 — 명령 기록·init 캐시 (2026-09-27). §2 행 5 에 `history.tsv`·`history.tsv.lock`·`init.zsh` 명시, §3 zsh 블록이 캐시를 먼저 source 하고 없거나 낡으면(다른 nerv 바이너리 — 크기·mtime·inode 스탬프) eval. 캐시 디렉터리 아래라 §4 step 4 가 이미 덮는다 — 절차 무변경.*

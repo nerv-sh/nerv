@@ -98,6 +98,9 @@ pub struct SpecRegistry {
     /// entirely — nothing is ever spawned. Always the last entry of
     /// `dirs` when set, so a derived file is read back like any other.
     derive_into: Option<PathBuf>,
+    /// `dirs` without `derive_into`: the layers holding hand-written specs,
+    /// probed on every keystroke by [`has_written_spec`](Self::has_written_spec).
+    written_dirs: Vec<PathBuf>,
     /// The last root spliced with one of its external subtrees, kept so
     /// the splice is not redone on every keystroke of the same command.
     /// One slot: a prompt is one command line at a time.
@@ -124,6 +127,7 @@ impl Default for SpecRegistry {
             pending_invalidations: None,
             _watcher: None,
             derive_into: None,
+            written_dirs: Vec::new(),
             spliced: Arc::new(RwLock::new(None)),
         }
     }
@@ -207,6 +211,11 @@ impl SpecRegistry {
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: Some(pending),
             _watcher: watcher,
+            written_dirs: dirs
+                .iter()
+                .filter(|d| Some(*d) != derive_into.as_ref())
+                .cloned()
+                .collect(),
             derive_into,
             spliced: Arc::new(RwLock::new(None)),
         }
@@ -490,6 +499,19 @@ impl SpecRegistry {
     /// its mtime. `None` if the file doesn't exist or stat fails.
     fn disk_mtime(&self, name: &str) -> Option<std::time::SystemTime> {
         Self::resolve_spec_file(&self.dirs, name).and_then(|(_, meta)| meta.modified().ok())
+    }
+
+    /// True when a layer above the derived one — overlay or bundled — has
+    /// a file for `name`, parsed yet or not — a file that fails to parse
+    /// still counts, so its command never falls back to the shell. Costs
+    /// up to two extra `metadata()` calls per written layer on every
+    /// keystroke past the command word. An in-code registry (no layers)
+    /// counts what it holds as written.
+    pub fn has_written_spec(&self, name: &str) -> bool {
+        if self.dirs.is_empty() {
+            return self.cache.read().is_ok_and(|c| c.contains_key(name));
+        }
+        Self::resolve_spec_file(&self.written_dirs, name).is_some()
     }
 
     /// First on-disk file backing `name` across the layers, with the stat
@@ -1148,6 +1170,11 @@ pub struct CompleteResult {
     /// names that extend it, so the widget should not preselect one:
     /// Enter means "run what I typed".
     pub token_complete: bool,
+    /// No hand-written spec covers the command: it came from `--help`
+    /// (the derived layer) or there is none. The ZLE widget may then ask
+    /// the shell's own completion instead (docs/spec-conversion-policy.md
+    /// §6.4). Decided by where the file lives, never by empty rows.
+    pub unspecced: bool,
 }
 
 /// Run the full pipeline against `line` + `cursor` byte offset.
@@ -1182,6 +1209,7 @@ pub fn complete_in(
     if cursor_in_open_quote(&line[..cursor]) {
         return CompleteResult {
             token_complete: false,
+            unspecced: false,
             items: vec![],
             reason: Some("inside quoted string".into()),
         };
@@ -1202,6 +1230,7 @@ pub fn complete_in(
     if tokens.is_empty() {
         return CompleteResult {
             token_complete: false,
+            unspecced: false,
             items: vec![],
             reason: Some("empty input".into()),
         };
@@ -1237,6 +1266,7 @@ pub fn complete_in(
         if !items.is_empty() {
             return CompleteResult {
                 token_complete: false,
+                unspecced: false,
                 items,
                 reason: None,
             };
@@ -1244,6 +1274,7 @@ pub fn complete_in(
         let done = names.is_some_and(|n| n.is_complete_name(&prefix));
         return CompleteResult {
             token_complete: false,
+            unspecced: false,
             items: vec![],
             reason: Some(if done {
                 "command name complete".into()
@@ -1252,6 +1283,8 @@ pub fn complete_in(
             }),
         };
     }
+
+    let unspecced = !registry.has_written_spec(binary);
 
     let Some(spec) = registry.lookup(binary) else {
         // A command word we have never heard of is far more often a typo
@@ -1272,12 +1305,14 @@ pub fn complete_in(
         }) {
             return CompleteResult {
                 token_complete: false,
+                unspecced,
                 items: vec![row],
                 reason: None,
             };
         }
         return CompleteResult {
             token_complete: false,
+            unspecced,
             items: vec![],
             reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
         };
@@ -1337,6 +1372,7 @@ pub fn complete_in(
                 let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens);
                 return CompleteResult {
                     token_complete: false,
+                    unspecced,
                     items,
                     reason: None,
                 };
@@ -1375,6 +1411,7 @@ pub fn complete_in(
                     }
                     return CompleteResult {
                         token_complete: false,
+                        unspecced,
                         items,
                         reason: None,
                     };
@@ -1446,6 +1483,7 @@ pub fn complete_in(
         items,
         reason: None,
         token_complete,
+        unspecced,
     }
 }
 
@@ -1737,7 +1775,7 @@ fn matches_name(name: &str, prefix: &str, mode: MatchMode) -> bool {
 fn mode_match(name: &str, query: &str, mode: MatchMode) -> bool {
     match mode {
         MatchMode::Fuzzy if !is_dot_literal(query) && query.chars().count() >= 3 => {
-            fuzzy_subsequence_match(name, query)
+            fuzzy_match_within(name, query, FUZZY_MAX_GAP)
         }
         _ => name.starts_with(query),
     }
@@ -1749,6 +1787,51 @@ fn mode_match(name: &str, query: &str, mode: MatchMode) -> bool {
 /// query always falls back to prefix semantics.
 fn is_dot_literal(query: &str) -> bool {
     !query.is_empty() && query.chars().all(|c| c == '.')
+}
+
+/// Most characters a fuzzy query may skip between two of its letters.
+/// With no bound `gco` matched `git remote add upstream co` as readily
+/// as `git checkout`; 4 is deja's default ("smart") preset: `gco` → `git
+/// checkout` has a gap of 4, `chk` → `checkout` of 2.
+const FUZZY_MAX_GAP: usize = 4;
+
+/// [`fuzzy_subsequence_match`] with at most `max_gap` characters skipped
+/// between consecutive query letters. Searches every alignment, not just
+/// the earliest: taking the first `a` of `aXXXXXab` for `ab` would see a
+/// gap of 6 where the last `a` gives 0. `ok[i]` = some alignment of the
+/// query so far ends at name position `i`; a query letter may follow any
+/// such position within the next `max_gap + 1`. O(len(name) · len(query)).
+fn fuzzy_match_within(name: &str, query: &str, max_gap: usize) -> bool {
+    // Most candidates are not even a subsequence; that check allocates
+    // nothing, so the search below runs only for the ones that are.
+    if !fuzzy_subsequence_match(name, query) {
+        return false;
+    }
+    let name: Vec<char> = name.chars().collect();
+    let mut q = query.chars();
+    let Some(first) = q.next() else {
+        return true;
+    };
+    let mut ok: Vec<bool> = name
+        .iter()
+        .map(|c| c.eq_ignore_ascii_case(&first))
+        .collect();
+    for qc in q {
+        let mut next = vec![false; name.len()];
+        // Distance back to the nearest `ok` position, if within reach.
+        let mut since: Option<usize> = None;
+        for (i, c) in name.iter().enumerate() {
+            if since.is_some_and(|d| d <= max_gap) && c.eq_ignore_ascii_case(&qc) {
+                next[i] = true;
+            }
+            since = if ok[i] { Some(0) } else { since.map(|d| d + 1) };
+        }
+        ok = next;
+        if !ok.contains(&true) {
+            return false;
+        }
+    }
+    ok.contains(&true)
 }
 
 /// Case-insensitive subsequence match — every char of `query` appears
@@ -7124,6 +7207,45 @@ region = us-east-1
         // Fuzzy "chk" (3+ chars) hits the canonical name via subsequence.
         let fuzzy = emit_subcommands(&node, "chk", MatchMode::Fuzzy);
         assert_eq!(fuzzy.len(), 1);
+    }
+
+    #[test]
+    fn fuzzy_match_caps_the_gap_between_letters() {
+        // gap = characters skipped between two matched letters.
+        assert!(fuzzy_match_within("git checkout", "gco", 4));
+        assert!(fuzzy_match_within("checkout", "chk", 4));
+        assert!(fuzzy_match_within("commit", "cmt", 4));
+        // The only `c` is 21 characters past the only `g`.
+        assert!(!fuzzy_match_within("git remote add upstream co", "gco", 4));
+        assert!(fuzzy_match_within("abcdefab", "ab", 0));
+        // Exactly the bound passes, one more fails.
+        assert!(fuzzy_match_within("a1234b", "ab", 4));
+        assert!(!fuzzy_match_within("a12345b", "ab", 4));
+        // The earliest alignment is not the only one: the first `a`
+        // is 6 away from `b`, the second is adjacent.
+        assert!(fuzzy_match_within("aXXXXXab", "ab", 4));
+        assert!(fuzzy_match_within("Checkout", "CHK", 4));
+        assert!(fuzzy_match_within("anything", "", 4));
+        assert!(!fuzzy_match_within("ab", "abc", 4));
+    }
+
+    #[test]
+    fn fuzzy_mode_rejects_sprawling_matches_zoxide_keeps_them() {
+        assert!(mode_match("checkout", "chk", MatchMode::Fuzzy));
+        assert!(!mode_match(
+            "git-remote-add-upstream-co",
+            "gco",
+            MatchMode::Fuzzy
+        ));
+        // zoxide stays fuzzy-by-design with no gap bound: through its real
+        // ranking path, a 3-letter query still finds the sprawling name.
+        let rows = vec![(
+            "git-remote-add-upstream-co".to_string(),
+            "/w/git-remote-add-upstream-co".to_string(),
+            10.0,
+        )];
+        let hits = rank_zoxide_matches(rows, "gco", MatchMode::Fuzzy);
+        assert_eq!(hits.len(), 1);
     }
 
     #[test]

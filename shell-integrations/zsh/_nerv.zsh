@@ -43,6 +43,17 @@ typeset -gi __NERV_RESERVED=0
 # wide icon), measured once per item set by __nerv_measure_items so
 # show_popup doesn't re-scan all N items on every navigation keystroke.
 typeset -gi __NERV_MAXDISP=0 __NERV_MAXDESC=0 __NERV_HASWIDE=0
+# Wire rows captured from zsh's own completion by __nerv_compsys_capture,
+# for a command no hand-written spec covers.
+typeset -ga __NERV_COMPSYS_ROWS=()
+# The last capture, reused while the user types on inside the same word
+# (__nerv_compsys_rows): where it was taken, the word it was taken for,
+# and every row it returned.
+typeset -g __NERV_COMPSYS_KEY="" __NERV_COMPSYS_WORD="" __NERV_COMPSYS_SHAPE=""
+typeset -ga __NERV_COMPSYS_CACHE=()
+# Commands captured once already, and commands too slow to capture on a
+# keystroke (both for this shell's lifetime).
+typeset -gA __NERV_COMPSYS_SEEN=() __NERV_COMPSYS_SLOW=()
 
 # Tighten KEYTIMEOUT so single-press Esc dismisses the popup
 # without zsh's default 0.4s wait for longer escape sequences.
@@ -58,6 +69,8 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 # lives in zsh/parameter; interactive shells usually have it, but load
 # explicitly so a minimal rc doesn't leave the table missing.
 zmodload -F zsh/parameter p:aliases 2>/dev/null
+# $EPOCHREALTIME times each compsys capture (__nerv_compsys_rows).
+zmodload -F zsh/datetime p:EPOCHREALTIME 2>/dev/null
 
 # Autostart nervd in the background so a fresh install (or a reboot)
 # needs no manual `nerv start`. `nerv start` is idempotent — it probes
@@ -641,8 +654,283 @@ __nerv_expand_alias_line() {
 }
 
 # ---------------------------------------------------------------------------
+# Shell completion fallback (docs/spec-conversion-policy.md §6.4)
+# ---------------------------------------------------------------------------
+# A command with no hand-written spec (`_complete` rc 5/6) may still have a
+# zsh completion function the CLI installed itself (`_uv`, `_rg`, …). Run
+# it the way Tab would, but record what it offers instead of showing it:
+# `compadd` is swapped for __nerv_compsys_compadd for the one call, the
+# pattern fzf-tab uses. Sets __NERV_COMPSYS_ROWS to wire rows.
+__nerv_compsys_capture() {
+  __NERV_COMPSYS_ROWS=()
+  # No compinit, no completion system: nothing to ask.
+  (( ${+functions[_main_complete]} )) || return 1
+  local cmd="$1"
+  # Only a function written for this command. The generic fallbacks
+  # would answer every command with the same file list.
+  local fn="${_comps[$cmd]-}"
+  [[ -z "$fn" || "$fn" == (_default|_files|_normal) ]] && return 1
+  # stderr off: a completion function that errors must not print over the
+  # popup. The error is still visible under NERV_DEBUG.
+  zle __nerv_compsys 2>/dev/null
+  local rc=$?
+  if [[ -n "${NERV_DEBUG:-}" ]]; then
+    print -r -- "  compsys: $fn rc=$rc rows=${#__NERV_COMPSYS_ROWS}" >> /tmp/nerv-debug.log
+  fi
+  (( ${#__NERV_COMPSYS_ROWS} ))
+}
+
+# `compadd` for the duration of a capture. Filter-only calls (-O/-A/-D)
+# add nothing and pass straight through — recording them would list each
+# candidate twice. The rest are re-issued unchanged afterwards so the
+# completion function sees the return status it expects. Locals carry a
+# `__` prefix: `-d desc` names an array in the caller's scope (`_du`), and
+# a plain `desc` here would shadow it.
+__nerv_compsys_compadd() {
+  local -a __hits __dscr
+  local __P="" __p="" __S="" __W="" __d="" __isfile=0 __filter=0
+  local __a __c __v __k=1 __j
+  # zparseopts can't read clusters (`_path_files` passes `-Qf`, others
+  # `-qS/`), so walk the options the way compadd does: a letter that
+  # takes a value ends its cluster, with the value attached or next.
+  while (( __k <= $# )); do
+    __a="${@[__k]}"
+    [[ "$__a" == -- || "$__a" != -?* ]] && break
+    for (( __j = 2; __j <= ${#__a}; __j++ )); do
+      __c="${__a[__j]}"
+      if [[ "$__c" == [PSpsiIWdJVXxrRMFEDOA] ]]; then
+        if (( __j < ${#__a} )); then
+          __v="${__a[__j+1,-1]}"
+        else
+          (( __k++ ))
+          __v="${@[__k]}"
+        fi
+        case "$__c" in
+          P) __P="$__v" ;; p) __p="$__v" ;; S) __S="$__v" ;; W) __W="$__v" ;;
+          d) __d="$__v" ;; O|A|D) __filter=1 ;;
+        esac
+        break
+      fi
+      # `-o` takes an optional order word as the next argument.
+      if [[ "$__c" == o && __j -eq ${#__a} \
+            && "${@[__k+1]-}" == (match|nosort|numeric|reverse)(,*|) ]]; then
+        (( __k++ ))
+        break
+      fi
+      [[ "$__c" == f ]] && __isfile=1
+    done
+    (( __k++ ))
+  done
+  if (( __filter )); then
+    builtin compadd "$@"
+    return
+  fi
+  [[ -n "$__d" ]] && __dscr=("${(@P)__d}")
+  # No status check: -A collects without adding, and then returns
+  # non-zero even with hits in hand (`_path_files`, measured).
+  builtin compadd -A __hits -D __dscr "$@"
+  # nerv replaces the whole token under the cursor, so a candidate zsh
+  # splits (`--mode=` + `fast`, `src/` + `main.rs`) is put back together.
+  # The widget quotes the insertion itself, so every piece goes in as its
+  # plain value: IPREFIX, -P and -p are buffer text, already quoted, and
+  # -A hands hits back quoted as they would be inserted — whether zsh
+  # quoted them (`odd$'\t'name`) or the caller did and passed -Q
+  # (`_path_files`, `My\ File`).
+  local __pre="${(Q)IPREFIX}${(Q)__P}${(Q)__p}" __hit __desc __i __suf
+  # What zsh itself would append on insert: an explicit -S suffix (not a
+  # plain space — the widget adds that), or `/` after a directory when the
+  # caller marked the hits as files (-f).
+  # -s (a hidden suffix) is left out: it is text already after the cursor
+  # in the word, and the popup only opens with the cursor at the end.
+  local __s="$__S"
+  [[ "$__s" == ' ' ]] && __s=""
+  for (( __i = 1; __i <= ${#__hits} && ${#__NERV_COMPSYS_ROWS} < 500; __i++ )); do
+    __hit="${(Q)__hits[__i]}"
+    __suf="$__s"
+    # -W names the directory the hits live in, path typed so far included
+    # (`_path_files` passes `subdir/` as both -W and -p); without it they
+    # sit under the -p prefix.
+    if (( __isfile )) && [[ -z "$__suf" \
+          && -d "${${__W:+${(Q)__W%/}/}:-${(Q)__p}}${__hit}" ]]; then
+      __suf=/
+    fi
+    __hit="${__hit//[$'\t\n']/ }"
+    # `_describe` pads a display string as `name   -- description`.
+    __desc="${__dscr[__i]-}"
+    [[ "$__desc" == *' -- '* ]] && __desc="${__desc#* -- }" || __desc=""
+    __desc="${__desc//[$'\t\n']/ }"
+    __NERV_COMPSYS_ROWS+=("${__pre}${__hit}${__suf}"$'\t'"${__hit}"$'\t'"${__desc}"$'\t\t')
+  done
+  builtin compadd "$@"
+}
+
+# Rows for the line being typed (`1`, alias-expanded), from the cache or a
+# fresh capture. The function runs once per word, not once per key: while
+# the word under the cursor still starts with the one the last capture was
+# taken for, in the same directory, line context and prompt, its rows are
+# filtered here instead. A word that changes shape re-captures — a new
+# `/` moves into another directory, a new `=` starts an option's value, a
+# leading `-` asks for options — and so does a capture cut off at the
+# 500-row cap, whose missing tail a filter cannot see (`brew install `).
+# A word nothing matches stays empty rather than asking again on every key,
+# unless a matcher-list makes zsh match beyond a plain prefix.
+# A capture over 300 ms (1000 ms for a command's first, which pays
+# autoload and cold caches — `gh pr ` measured 480 ms cold against 60 ms
+# warm) marks the command slow, and a slow command is not captured again
+# in this shell. Sets __NERV_COMPSYS_ROWS.
+__nerv_compsys_rows() {
+  __NERV_COMPSYS_ROWS=()
+  local word=""
+  if [[ "$LBUFFER" != *[[:space:]] ]]; then
+    local -a lw=("${(z)LBUFFER}")
+    word="${lw[-1]}"
+  fi
+  local plain="${(Q)word}"
+  local key="$PWD"$'\0'"${LBUFFER[1,${#LBUFFER}-${#word}]}"
+  # The word's shape: its `/` and `=` count, and whether it is an option.
+  # A capture is reused only for a word of the same shape.
+  local shape="${plain//[^\/=]/}${${plain[1]}/[^-]/}"
+  if [[ "$key" == "$__NERV_COMPSYS_KEY" && "$plain" == "$__NERV_COMPSYS_WORD"* \
+        && "$shape" == "$__NERV_COMPSYS_SHAPE" ]] \
+     && (( ${#__NERV_COMPSYS_CACHE} < 500 )); then
+    __NERV_COMPSYS_ROWS=("${(@M)__NERV_COMPSYS_CACHE:#${(b)plain}*}")
+    (( ${#__NERV_COMPSYS_ROWS} )) && return 0
+    # A plain prefix is how zsh matches unless the user set a
+    # matcher-list (oh-my-zsh sets case-insensitive): then a word the
+    # saved rows miss may still match, and only zsh can say.
+    # Asked once per word: a capture that came back empty stays empty
+    # until the word changes shape.
+    local -a matchers
+    zstyle -a ':completion:' matcher-list matchers
+    (( ${#matchers} && ${#__NERV_COMPSYS_CACHE} )) || return 1
+  fi
+  # An array first: `${${(z)1}[1]}` on a one-word line is a scalar, and
+  # [1] would then take its first character.
+  local -a words=("${(z)1}")
+  local cmd="${words[1]}"
+  (( ${+__NERV_COMPSYS_SLOW[$cmd]} )) && return 1
+  local t0=$EPOCHREALTIME
+  __nerv_compsys_capture "$cmd"
+  local rc=$? ms=$(( (EPOCHREALTIME - t0) * 1000 ))
+  if (( ms > (${+__NERV_COMPSYS_SEEN[$cmd]} ? 300 : 1000) )); then
+    __NERV_COMPSYS_SLOW[$cmd]=1
+  fi
+  __NERV_COMPSYS_SEEN[$cmd]=1
+  __NERV_COMPSYS_KEY="$key" __NERV_COMPSYS_WORD="$plain" __NERV_COMPSYS_SHAPE="$shape"
+  __NERV_COMPSYS_CACHE=("${__NERV_COMPSYS_ROWS[@]}")
+  return rc
+}
+
+# The completion widget behind __nerv_compsys_capture. Nothing is inserted
+# or listed: the popup draws the rows. The restore and both resets sit in
+# `always`: an error inside the completion function aborts everything
+# after the block, and a `compadd` left defined would hijack the user's
+# own Tab.
+__nerv_compsys_widget() {
+  local saved="${functions[compadd]-}" rc=0
+  {
+    functions[compadd]="${functions[__nerv_compsys_compadd]}"
+    _main_complete
+    rc=$?
+  } always {
+    if [[ -n "$saved" ]]; then
+      functions[compadd]="$saved"
+    else
+      unfunction compadd 2>/dev/null
+    fi
+    compstate[insert]=''
+    compstate[list]=''
+  }
+  return rc
+}
+zle -C __nerv_compsys complete-word __nerv_compsys_widget
+
+# ---------------------------------------------------------------------------
 # Core widget
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Socket transport (docs/history-suggestions.md §6). Each request used to
+# fork `nerv` — 12–14 ms a keystroke, 5 of them the fork alone. zsh can
+# speak to the daemon itself: zsh/net/socket opens the UDS, one line of
+# `\x1f`-separated fields goes out, rows come back ended by
+# `\x1fend\t<seq>\t<code>` (nerv_engine::wire). The connection stays open
+# for the shell's life; a failure closes it and that request takes the
+# fork path, and the next one reconnects. NERV_SOCKET=0 forces the fork
+# path. Command text never reaches any argv this way.
+# ---------------------------------------------------------------------------
+typeset -gi __NERV_SOCK_FD=0 __NERV_SEQ=0 __NERV_SOCK_OK=0
+typeset -ga __NERV_SOCK_LINES=()
+zmodload zsh/net/socket 2>/dev/null && __NERV_SOCK_OK=1
+
+__nerv_sock_close() {
+  # The brace group matters: a bare `exec {fd}<&- 2>/dev/null` has no
+  # command, so zsh applies `2>/dev/null` to the shell itself — for good.
+  (( __NERV_SOCK_FD )) && { exec {__NERV_SOCK_FD}<&- } 2>/dev/null
+  __NERV_SOCK_FD=0
+}
+
+# Send one request line built from "$@" (verb first). Returns 1 when the
+# socket path is off or broken.
+__nerv_sock_send() {
+  (( __NERV_SOCK_OK )) && [[ ${NERV_SOCKET:-1} != 0 ]] || return 1
+  if (( ! __NERV_SOCK_FD )); then
+    zsocket "$HOME/Library/Caches/nerv/nervd.sock" 2>/dev/null || return 1
+    __NERV_SOCK_FD=$REPLY
+  fi
+  local -a fields
+  local f
+  for f in "$@"; do
+    f=${f//\\/\\\\}
+    f=${f//$'\n'/\\n}
+    fields+=("${f//$'\x1f'/\\u}")
+  done
+  print -r -u $__NERV_SOCK_FD -- "${(pj:\x1f:)fields}" 2>/dev/null && return 0
+  __nerv_sock_close
+  return 1
+}
+
+# Read one reply into __NERV_SOCK_LINES, its exit code into REPLY. $1 is
+# the seq to wait for — the end line of a reply the widget already gave up
+# on is skipped with its rows. $2 bounds each read, in seconds. A JSON
+# line means a daemon from before the text protocol: the socket path is
+# turned off for this shell.
+__nerv_sock_read() {
+  local seq=$1 line rest
+  __NERV_SOCK_LINES=()
+  while :; do
+    if ! IFS= read -r -t $2 -u $__NERV_SOCK_FD line; then
+      __nerv_sock_close
+      return 1
+    fi
+    case $line in
+      $'\x1f'end$'\t'*)
+        rest=${line#*$'\t'}
+        if [[ ${rest%%$'\t'*} == "$seq" ]]; then
+          REPLY=${rest##*$'\t'}
+          return 0
+        fi
+        __NERV_SOCK_LINES=() ;;
+      '{"kind":'*)
+        # A JSON reply: only a daemon from before the text protocol sends
+        # one to a text request. No completion row starts this way.
+        __nerv_sock_close
+        __NERV_SOCK_OK=0
+        return 1 ;;
+      *) __NERV_SOCK_LINES+=("$line") ;;
+    esac
+  done
+}
+
+# One request and its reply: "$1" = read bound, the rest = fields after
+# the verb's seq. Sets __NERV_SOCK_LINES and REPLY (the exit code).
+__nerv_sock_call() {
+  local bound=$1 verb=$2
+  shift 2
+  (( ++__NERV_SEQ ))
+  __nerv_sock_send "$verb" $__NERV_SEQ "$@" || return 1
+  __nerv_sock_read $__NERV_SEQ $bound
+}
+
 __nerv_complete() {
   if [[ -n "${NERV_DEBUG:-}" ]]; then
     print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS} CURSOR=$CURSOR" >> /tmp/nerv-debug.log
@@ -661,12 +949,20 @@ __nerv_complete() {
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=0
 
-  [[ -z "${LBUFFER// /}" ]] && { __nerv_hide_popup; return; }
+  if [[ -z "${LBUFFER// /}" ]]; then
+    __nerv_hide_popup
+    # Back to an empty line: the prompt's prediction returns.
+    [[ -z $BUFFER ]] && __nerv_ghost "$__NERV_PREDICTED"
+    return
+  fi
 
   # History inline suggestion (autosuggestions / Fig) applies whether or
-  # not the spec engine has anything, so compute it once up front.
-  local REPLY; __nerv_history_ghost
-  local hist_ghost="$REPLY"
+  # not the spec engine has anything. The daemon's ranked history answers
+  # it; zsh's own `$history` only where no ranking came back — a bare
+  # command word, a failed request, a reply without a ghost row
+  # (docs/history-suggestions.md §3). That scan walks the whole history,
+  # so it runs only there.
+  local REPLY hist_ghost=""
 
   # A bare command name (no space yet) goes through the same request:
   # the engine answers it from its command-name list — `doc` → `docker`
@@ -685,7 +981,8 @@ __nerv_complete() {
   if [[ "$bare" != *[[:space:]]* ]] \
      && __nerv_shell_word "$bare"; then
     __nerv_hide_popup
-    POSTDISPLAY="$hist_ghost"
+    __nerv_history_ghost
+    __nerv_ghost "$REPLY"
     return
   fi
 
@@ -697,17 +994,39 @@ __nerv_complete() {
   local send_line="$REPLY"
 
   local resp
-  resp=$("$__NERV_BIN" _complete "$send_line" ${#send_line} 2>/dev/null)
-  local rc=$?
-  # rc 4 is a success: rows follow, but the typed token already names one
-  # of the candidates (see the default selection below).
-  local token_complete=0
-  (( rc == 4 )) && { token_complete=1; rc=0; }
+  # NERV_COMPSYS=0 turns the shell-completion fallback off: no flag, so
+  # the exit codes stay the pre-fallback ones.
+  local -a compsys_flag=(--compsys)
+  [[ "${NERV_COMPSYS:-1}" == 0 ]] && compsys_flag=()
+  local rc
+  # The socket first; a cold spec parse can take a while, so its read
+  # bound is generous. The fork path answers the same rows.
+  if __nerv_sock_call 2 complete "$send_line" ${#send_line} "${PWD:A}" \
+       "$__NERV_PREV_CMD" "$LBUFFER" "${compsys_flag:+c}"; then
+    resp=${(pj:\n:)__NERV_SOCK_LINES}
+    rc=$REPLY
+  else
+    # NERV_PREV / NERV_TYPED feed the ranked ghost and stay out of argv.
+    # NERV_TYPED is also this widget's "I read the ghost row" flag.
+    resp=$(NERV_PREV="$__NERV_PREV_CMD" NERV_TYPED="$LBUFFER" \
+           "$__NERV_BIN" _complete $compsys_flag "$send_line" ${#send_line} 2>/dev/null)
+    rc=$?
+  fi
+  # rc 4-6 are successes (`complete_exit_code` in nerv-cli): 4 = the typed
+  # token already names one of the candidates (see the default selection
+  # below), 5 = no hand-written spec covers the command, 6 = both.
+  local token_complete=0 unspecced=0
+  case $rc in
+    4) token_complete=1; rc=0 ;;
+    5) unspecced=1; rc=0 ;;
+    6) token_complete=1; unspecced=1; rc=0 ;;
+  esac
   if (( rc != 0 )); then
     # The history ghost never needed the engine, so a dead or
     # mismatched daemon must not cost the user that too. Assigning
     # unconditionally also clears the previous keystroke's ghost.
-    POSTDISPLAY="$hist_ghost"
+    __nerv_history_ghost
+    __nerv_ghost "$REPLY"
     if [[ -n "${NERV_DEBUG:-}" ]]; then
       print -r -- "  complete: BIN call FAILED rc=$rc" >> /tmp/nerv-debug.log
     fi
@@ -733,6 +1052,20 @@ __nerv_complete() {
   local -a rlines=("${(@f)resp}")
   rlines=("${(@)rlines:#}")
 
+  # First row `\x1fghost\t<command>`: the daemon ranked the history. Its
+  # answer wins over `$history`, "nothing" included — an absent row means
+  # it had no history to rank, and the `$history` ghost stands.
+  if [[ "${rlines[1]}" == $'\x1f'ghost$'\t'* ]]; then
+    local ranked="${rlines[1]#*$'\t'}"
+    rlines=("${(@)rlines[2,-1]}")
+    if (( ${#ranked} > ${#LBUFFER} )) && [[ "${ranked[1,${#LBUFFER}]}" == "$LBUFFER" ]]; then
+      hist_ghost="${ranked[${#LBUFFER}+1,-1]}"
+    fi
+  else
+    __nerv_history_ghost
+    hist_ghost=$REPLY
+  fi
+
   # A command-word correction comes back alone — the engine returns it as
   # the whole answer (`complete.rs`, the `registry.lookup` miss branch),
   # which is why one row is the only shape checked here. Drop it when the
@@ -751,10 +1084,18 @@ __nerv_complete() {
     fi
   fi
 
+  # No hand-written spec: rows zsh's own completion function offers beat
+  # the ones scraped from `--help`. Nothing captured keeps those.
+  if (( unspecced )) && __nerv_compsys_rows "$send_line"; then
+    rlines=("${__NERV_COMPSYS_ROWS[@]}")
+    # rc 6's "typed token is complete" described the rows just replaced.
+    token_complete=0
+  fi
+
   if (( ${#rlines} == 0 )); then
     # No spec completions, but a history suggestion may still apply.
     __nerv_hide_popup
-    [[ -n "$hist_ghost" ]] && POSTDISPLAY="$hist_ghost"
+    [[ -n "$hist_ghost" ]] && __nerv_ghost "$hist_ghost"
     return
   fi
 
@@ -806,11 +1147,29 @@ __nerv_complete() {
     __NERV_SELECTED=1
   fi
   if [[ -n "$hist_ghost" ]]; then
-    POSTDISPLAY="$hist_ghost"
+    __nerv_ghost "$hist_ghost"
   else
     __nerv_set_ghost
   fi
   __nerv_show_popup "${rlines[@]}"
+}
+
+# Inline ghost text (POSTDISPLAY), unless another plugin owns it.
+# zsh-autosuggestions paints the same slot from its own widget wrappers;
+# two writers overwrite each other on every key, so with it loaded nerv
+# keeps only the popup and leaves the ghost to it. Decided at the first
+# prompt, not when this file is sourced: a plugin manager may load it
+# after nerv.
+typeset -gi __NERV_GHOST_OFF=0 __NERV_GHOST_CHECKED=0
+__nerv_ghost() { (( __NERV_GHOST_OFF )) || POSTDISPLAY=$1; }
+__nerv_ghost_owner() {
+  (( __NERV_GHOST_CHECKED )) && return
+  __NERV_GHOST_CHECKED=1
+  # Defined for the life of the shell: MANUAL_REBIND removes the precmd
+  # hook, not the function.
+  (( ${+functions[_zsh_autosuggest_start]} )) || return
+  __NERV_GHOST_OFF=1
+  print -ru2 -- "[nerv] zsh-autosuggestions is loaded: it keeps the inline ghost text, nerv shows only its popup."
 }
 
 # Most recent history command that strictly extends the current buffer,
@@ -820,10 +1179,12 @@ __nerv_complete() {
 # so a buffer containing `[`, `*`, etc. still matches literally. The
 # remainder is sliced by length (not `#`) so those metacharacters can't
 # over-strip. REPLY (no `$(...)` subshell) keeps this off the fork path
-# — it runs on every keystroke.
+# — it runs on the keystroke path.
 __nerv_history_ghost() {
   emulate -L zsh
   REPLY=''
+  # Another plugin owns the ghost: the scan's answer would be discarded.
+  (( __NERV_GHOST_OFF )) && return
   [[ -z "$LBUFFER" ]] && return
   local match="${history[(r)${(b)LBUFFER}*]}"
   [[ -z "$match" || "$match" == "$LBUFFER" ]] && return
@@ -840,6 +1201,7 @@ __nerv_history_ghost() {
 # suggestion onto the cursor line — that looks like the cursor
 # teleported into a new word.
 __nerv_set_ghost() {
+  (( __NERV_GHOST_OFF )) && return
   POSTDISPLAY=''
   (( ${#__NERV_ITEMS} == 0 )) && return
   # Bail when nothing typed yet for the current word — keeps the
@@ -870,7 +1232,14 @@ zle -A self-insert __nerv_orig_self_insert 2>/dev/null
 __nerv_self_insert() { zle __nerv_orig_self_insert "$@"; __nerv_complete; }
 zle -N self-insert __nerv_self_insert
 
-__nerv_space() { LBUFFER+=" "; __nerv_complete; }
+__nerv_space() {
+  LBUFFER+=" "
+  __nerv_complete
+  # zsh-autosuggestions does not wrap `_`-named widgets, so its ghost for
+  # the line before the space would stay on: ask it for a new one.
+  (( __NERV_GHOST_OFF )) && { POSTDISPLAY=''; zle autosuggest-fetch 2>/dev/null; }
+  return 0
+}
 zle -N __nerv_space
 bindkey ' ' __nerv_space
 
@@ -909,6 +1278,9 @@ __nerv_line_finish() {
     __NERV_PREV_LBUFFER=""
     __NERV_SELECTED=0
     __NERV_ITEMS=()
+    # An unaccepted ghost is not part of the command: keep it out of the
+    # scrollback line zsh leaves behind.
+    POSTDISPLAY=''
     zle .accept-line
   fi
 }
@@ -1040,7 +1412,8 @@ bindkey $'\e[6~' __nerv_page_down
 # __nerv_complete so the popup reappears when the cursor lands back
 # at the end of the buffer.
 __nerv_accept_ghost() {
-  if (( ${+POSTDISPLAY} )) && [[ -n "$POSTDISPLAY" ]] && [[ -z "$RBUFFER" ]]; then
+  # A zsh-autosuggestions ghost is accepted by its own forward-char wrapper.
+  if (( ! __NERV_GHOST_OFF )) && [[ -n "$POSTDISPLAY" && -z "$RBUFFER" ]]; then
     LBUFFER+="$POSTDISPLAY"
     POSTDISPLAY=''
     __NERV_PREV_LBUFFER="$LBUFFER"
@@ -1085,8 +1458,15 @@ __nerv_pre_redraw() {
   # our previous entry (matched by the memo tag so we never clobber a
   # highlight another plugin added), then re-add if a ghost is showing.
   # POSTDISPLAY chars occupy buffer positions ${#BUFFER}..+len.
+  # The prediction belongs to the empty line. A widget nerv does not wrap
+  # (Up-arrow history recall, a paste) can fill the buffer without going
+  # through __nerv_complete, and Right-arrow would then glue the two
+  # together (`echo prepecho next-thing`).
+  if [[ -n $BUFFER && -n $POSTDISPLAY && $POSTDISPLAY == "$__NERV_PREDICTED" ]]; then
+    POSTDISPLAY=''
+  fi
   region_highlight=(${region_highlight:#*memo=nerv_ghost*})
-  if [[ -n "$POSTDISPLAY" ]]; then
+  if (( ! __NERV_GHOST_OFF )) && [[ -n "$POSTDISPLAY" ]]; then
     region_highlight+=("${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) fg=242, memo=nerv_ghost")
   fi
 }
@@ -1106,7 +1486,46 @@ else
   zle -N zle-line-pre-redraw __nerv_pre_redraw
 fi
 
-__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; }
+# Empty-prompt prediction (docs/history-suggestions.md §4): the command
+# that usually follows the one just run, as ghost text on the fresh line.
+# One `_predict` per prompt; clearing the line back to empty shows the
+# same prediction again without asking. NERV_PREDICT=0 turns it off.
+typeset -g __NERV_PREDICTED=""
+__nerv_line_init() {
+  __NERV_PREDICTED=""
+  [[ ${NERV_PREDICT:-1} == 0 || -z $__NERV_PREV_CMD || -n $BUFFER ]] && return
+  (( __NERV_GHOST_OFF )) && return
+  local row rc
+  # Same 150 ms bound as `_predict`: the prompt waits on this.
+  if __nerv_sock_call 0.15 predict "$__NERV_PREV_CMD" "${PWD:A}"; then
+    row=${__NERV_SOCK_LINES[1]}
+    rc=$REPLY
+  else
+    row=$(NERV_PREV="$__NERV_PREV_CMD" "$__NERV_BIN" _predict 2>/dev/null)
+    rc=$?
+  fi
+  if (( rc )); then
+    # A daemon error, or no answer within _predict's 150 ms bound: no
+    # prediction either way. Under NERV_DEBUG it is logged, not guessed at.
+    [[ -n "${NERV_DEBUG:-}" ]] && print -r -- "  predict: FAILED rc=$rc" >> /tmp/nerv-debug.log
+    return
+  fi
+  [[ $row == $'\x1f'ghost$'\t'?* ]] || return
+  __NERV_PREDICTED="${row#*$'\t'}"
+  POSTDISPLAY="$__NERV_PREDICTED"
+}
+zle -N __nerv_line_init
+# Registered like line-pre-redraw below: hooked when add-zle-hook-widget
+# exists (so another plugin's line-init keeps running), bound directly
+# otherwise.
+if autoload -Uz add-zle-hook-widget 2>/dev/null && \
+   add-zle-hook-widget line-init __nerv_line_init 2>/dev/null; then
+  :
+else
+  zle -N zle-line-init __nerv_line_init
+fi
+
+__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; __NERV_PREDICTED=""; }
 zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
 
@@ -1120,6 +1539,9 @@ __nerv_escape() {
     __nerv_hide_popup
     __NERV_PREV_LBUFFER=""
     POSTDISPLAY=''
+  elif [[ -n $POSTDISPLAY && $POSTDISPLAY == "$__NERV_PREDICTED" ]]; then
+    # A showing prediction is dismissed for this line, like ^G.
+    POSTDISPLAY='' __NERV_PREDICTED=''
   else
     zle .send-break 2>/dev/null || true
   fi
@@ -1151,6 +1573,9 @@ __nerv_precmd_reset() {
   __NERV_ITEMS=()
   __NERV_SELECTED=0
   __NERV_PREV_LBUFFER=""
+  # A new prompt means the last command may have changed what completes
+  # (a new branch, a killed process): nothing captured before it is reused.
+  __NERV_COMPSYS_KEY=""
 }
 
 __nerv_rebind() {
@@ -1164,14 +1589,94 @@ __nerv_rebind() {
   # Fig, fzf-tab, zsh-autosuggestions) re-bind during their own
   # post-init. The last `zle -N self-insert <name>` wins, so we
   # re-claim every prompt.
-  zle -N self-insert          __nerv_self_insert      2>/dev/null
-  zle -N backward-delete-char __nerv_backward_delete  2>/dev/null
-  zle -N accept-line          __nerv_line_finish      2>/dev/null
+  __nerv_claim self-insert          __nerv_self_insert
+  __nerv_claim backward-delete-char __nerv_backward_delete
+  __nerv_claim accept-line          __nerv_line_finish
+}
+
+# Bind widget $1 to ours ($2) unless zsh-autosuggestions already wraps
+# ours: its wrapper calls ours first, then refreshes its ghost, which is
+# how both run. It wraps at the first prompt and, unless
+# ZSH_AUTOSUGGEST_MANUAL_REBIND is set, on every prompt after
+# (`_zsh_autosuggest_start`), keeping the original as
+# `autosuggest-orig-<n>-<widget>`; taking the
+# widget back would leave the plugin's ghost frozen while typing.
+__nerv_claim() {
+  local cur=${widgets[$1]}
+  if [[ $cur == user:_zsh_autosuggest_bound_* ]]; then
+    local n=${${cur#user:_zsh_autosuggest_bound_}%%_*}
+    [[ ${widgets[${ZSH_AUTOSUGGEST_ORIGINAL_WIDGET_PREFIX:-autosuggest-orig-}$n-$1]} == user:$2 ]] && return
+  fi
+  zle -N $1 $2 2>/dev/null
 }
 autoload -Uz add-zsh-hook 2>/dev/null && {
+  add-zsh-hook precmd __nerv_ghost_owner
   add-zsh-hook precmd __nerv_precmd_reset
   add-zsh-hook precmd __nerv_rebind
   add-zsh-hook precmd __nerv_register_shell_names
+  add-zsh-hook preexec __nerv_preexec
+  add-zsh-hook precmd __nerv_precmd_record
+}
+
+# Command history behind the history-ranked ghost (docs/history-suggestions.md).
+# preexec keeps the line as typed ($1, leading whitespace intact) and
+# zsh's alias-expanded form ($3); precmd sends both with the exit status
+# and the command before it. What zsh itself would not remember never
+# leaves the shell: a leading space under hist_ignore_space, or a match
+# for HISTORY_IGNORE. Such a command also breaks the chain — it is not
+# kept as the next command's predecessor, and no adjacency is invented
+# across it. Command text travels on stdin, never argv (`ps` shows argv
+# to every user). `&!` disowns, so no job notice lands on the prompt.
+typeset -g __NERV_LAST_CMD="" __NERV_LAST_EXP="" __NERV_PREV_CMD=""
+typeset -gi __NERV_IMPORT_TRIED=0
+__nerv_history_ignored() {
+  # No history file (never set, `unset HISTFILE`, `fc -p`, /dev/null):
+  # zsh keeps nothing of this session on disk, so neither does nerv.
+  [[ -z $HISTFILE || $HISTFILE == /dev/null ]] && return 0
+  [[ -o hist_ignore_space && $1 == [[:space:]]* ]] && return 0
+  [[ -n $HISTORY_IGNORE && $1 == ${~HISTORY_IGNORE} ]] && return 0
+  return 1
+}
+__nerv_preexec() {
+  # The command about to run would inherit the socket (zsocket descriptors
+  # stay open across exec), and a long-running one would hold the daemon
+  # connection for its lifetime. The next request reconnects.
+  __nerv_sock_close
+  # $1 is empty when the history mechanism is off; without the typed
+  # line the ignore rules cannot be applied, so nothing is recorded.
+  if [[ -z $1 ]] || __nerv_history_ignored "$1"; then
+    __NERV_LAST_CMD="" __NERV_PREV_CMD=""
+    return
+  fi
+  __NERV_LAST_CMD=$1 __NERV_LAST_EXP=$3
+}
+__nerv_precmd_record() {
+  local -i ec=$?
+  local hist="${NERV_HISTORY_FILE:-$HOME/Library/Caches/nerv/history.tsv}"
+  [[ $hist == - ]] && return
+  if (( ! __NERV_IMPORT_TRIED )); then
+    __NERV_IMPORT_TRIED=1
+    # First prompt with no history yet: seed it from zsh's own file once.
+    if [[ ! -e $hist && -n $HISTFILE && -r $HISTFILE ]]; then
+      "$__NERV_BIN" _import-history "$HISTFILE" >/dev/null 2>&1 &!
+    fi
+  fi
+  [[ -n $__NERV_LAST_CMD ]] || return
+  local cmd=${__NERV_LAST_CMD%$'\n'}
+  # No reply to wait for: the socket write is the whole cost. It runs in
+  # this shell, not a background job, so the connection it opens is the one
+  # the keystrokes reuse. The daemon caps a line at 256 KiB, in bytes; a
+  # character is at most 4 bytes on the wire, escaped or UTF-8, so past
+  # 60,000 characters the command goes through `_record-cmd` instead, which
+  # appends the file itself if need be. A daemon from before the text protocol drops a socket record (the
+  # widget notices at the next read and forks from then on) — one row, once.
+  if (( ${#cmd} + ${#__NERV_LAST_EXP} + ${#__NERV_PREV_CMD} >= 60000 )) \
+     || ! __nerv_sock_send record "$cmd" "$__NERV_LAST_EXP" "${PWD:A}" $ec "$__NERV_PREV_CMD"; then
+    print -rN -- "$cmd" "$__NERV_LAST_EXP" "$__NERV_PREV_CMD" \
+      | "$__NERV_BIN" _record-cmd --cwd "${PWD:A}" --exit $ec >/dev/null 2>&1 &!
+  fi
+  __NERV_PREV_CMD=$cmd
+  __NERV_LAST_CMD=""
 }
 
 # Register this session's function·alias names with the daemon so they

@@ -433,6 +433,27 @@ upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없�
 | 스키마 | manifest `schema_version` **3**. v2 데몬이 v3 캐시를 읽으면 `aws iam ` 이 빈 서브커맨드로 완성된다(조용한 오답) → E5 게이트가 차단 |
 | 되돌리기 | 임계값 아래로 내려간 spec 은 다음 빌드에서 서브트리 디렉터리째 삭제된다 — 루트가 더 이상 안 가리키는 파일이 남지 않는다 |
 
+### 6.4 셸 자체 완성 폴백 (compsys, ZLE) — (2026-09-27)
+
+§6.2 의 `--help` 추출은 모양만 준다 — 동적 값(브랜치·PID·패키지)도 서브커맨드별 옵션도 없다. 그런데
+사용자 셸에는 CLI 가 직접 설치한 zsh 완성 함수(`_uv`·`_rg`·`_gh` …, 실측 fpath 1001개)가 이미 있다.
+손으로 쓴 spec 이 없는 명령에서는 ZLE 위젯이 그 함수에게 묻는다.
+
+| 항목 | 규칙 |
+|------|------|
+| 신호 | `CompleteResult.unspecced` → IPC `Response::{Suggestions,Empty}.unspecced` (`#[serde(default)]` — 옛 데몬 응답은 false). **판정은 파일이 어느 층에 있나** (`SpecRegistry::has_written_spec` — overlay·primary 에 파일이 있으면 false). 빈 결과로 판정하지 않는다: 아직 파싱 중인 번들 spec 도 첫 키에 빈 결과를 내고, 그때 셸로 넘기면 `git ` 이 한 키 동안 엉뚱한 목록을 보인다 |
+| 첫 토큰 | 명령 이름 입력 중에는 항상 false — 명령 이름은 엔진 몫 |
+| 파손 파일 | 층에 파일이 있으면 파싱 실패여도 written — 그 명령은 셸로 넘기지 않는다 (§6.2 "파손 파일 negative" 와 같은 규칙) |
+| 종료 코드 | `nerv _complete --compsys` 만 5(unspecced)·6(unspecced + 토큰 완성)을 쓴다. 플래그 없으면 기존 0·3·4 그대로 — 업그레이드된 바이너리 아래서 도는 옛 위젯은 모르는 코드를 E1 "daemon not running" 으로 읽는다 |
+| 캡처 | 위젯이 `zle -C` 완성 위젯(`__nerv_compsys`)을 같은 셸 안에서 부르고, 그 한 번 동안 `compadd` 를 가로챈다(fzf-tab 과 같은 방식). `-O/-A/-D` 필터 호출은 그대로 통과 — 기록하면 `_describe` 명령이 두 번씩 뜬다. 아무것도 삽입·나열하지 않는다 (`compstate[insert]`·`[list]` 비움) |
+| 대상 | `$_comps[<명령>]` 이 그 명령 전용 함수일 때만. `_default`·`_files`·`_normal` 은 어느 명령에나 같은 파일 목록을 주므로 제외. 캡처가 0행이면 derived 행을 그대로 쓴다 |
+| 행 | `IPREFIX` + `-P` + `-p` + 후보를 insertion 으로 다시 붙인다 — nerv 는 커서 아래 토큰 전체를 바꾸므로 zsh 가 쪼갠 후보(`--mode=` + `fast`)도 한 토큰이어야 한다. 설명은 `-d` 표시 문자열의 ` -- ` 뒤. 최대 500행 |
+| 단어당 1회 | 캡처는 커서 아래 단어의 시작에서 한 번. 같은 디렉터리·같은 앞부분·같은 프롬프트에서 그 단어를 이어 치는 동안은 저장한 행을 셸에서 거른다(`__nerv_compsys_rows`). 단어 모양이 바뀌면 다시 캡처 — 새 `/`(다른 디렉터리), 새 `=`(옵션 값), 앞머리 `-`(옵션). 500행 상한에 잘린 캡처도 재사용하지 않는다(거르기로는 잘린 꼬리를 못 본다). 아무것도 안 맞는 단어는 빈 채로 두고 키마다 다시 묻지 않는다 — 단 `matcher-list` zstyle 이 있으면(oh-my-zsh 기본 대소문자 무시) 앞부분 일치로 비어도 zsh 는 맞출 수 있으므로 다시 묻는다 — matcher 로만 맞는 동안은 Tab 처럼 키마다, 아무것도 안 맞으면 단어당 한 번. 새 프롬프트(`precmd`)에서 캐시를 버린다 — 방금 실행한 명령이 브랜치·프로세스를 바꿨을 수 있다 |
+| 느린 명령 | 캡처가 300 ms(그 명령 첫 호출은 1000 ms — autoload·콜드 캐시 비용, 실측 `gh pr ` 콜드 480 ms / 웜 60 ms)를 넘으면 그 셸 수명 동안 그 명령은 캡처하지 않는다. 이번 결과는 그대로 보인다. 셸 안에서 돌아 타임아웃을 걸 수 없으므로 한 번은 기다린다 |
+| 끄기 | `NERV_COMPSYS=0` — 위젯이 `--compsys` 를 안 보내 종료 코드도 이전 그대로 |
+| 접미사 | `-S` 값(공백 제외 — 위젯이 붙인다), `-f` 후보가 디렉터리면 `/` — `-W` 가 있으면 그 아래(경로가 이미 들어 있다), 없으면 `-p` 아래에서 확인. `-s`(숨은 접미사)는 버린다 — 커서가 항상 줄 끝이라 비어 있다. compadd 옵션은 묶음(`-Qf`, `-qS/`)으로 오므로 zparseopts 대신 글자 단위로 읽는다 |
+| 알려진 한계 | tty 를 직접 읽는 완성 함수(`read -k`)는 다음 키를 먹는다. zle 이 터미널을 직접 읽어서 `zle … </dev/null` 로도 못 막는다 (실측 2026-09-27). 캡처 중 멈추는 함수는 Ctrl-C 로 빠져나온다 |
+
 ---
 
 ## 7. 회귀 정책
@@ -523,3 +544,4 @@ v0.5 의 M0-9 산출물 5개 중 3개는 v0.5 에서 완료, 2개는 v0.6 폐기
 *v1.3 — PLAN.md v0.6 §0.2 / §5.7 정합. v1.2 → v1.3 변경: §0 헤더에 자작 transpile 폐기 + loadSpec.ts 포팅 명시, §4 빌드 파이프라인 전면 재정의 (build/spec-transpile/ → nerv-engine::{shell_parser, spec_parser, spec_loader}), **§4.4 rquickjs opt-in 신설** (M1 Tier C 회복, deno_core 금지), §5.0 신설 (두 upstream 의 역할 + matrix 모니터링), §5.1 라이선스 ISC 정정, §6 라이선스 표 정정 + 흡수 crate 라이선스 처리, §10 체크리스트를 v0.6 M0-1~6 산출물로 재구성. Tier A/B/C 분류 알고리즘 / classifier 자체 / §3 대체 큐 / §5.2 / §5.3 / §7 회귀 정책은 모두 무변경. 변경 트리거: M1 rquickjs 활성, withfig→fork 트리거 발동, aws-autocomplete EOL 신호 발견 시.*
 *v1.4 — `limited_args` / §5.1 힌트 UX 폐기 반영. v1.3 → v1.4 변경: §1 v1.0 결정을 "동적 generator 런타임 실행" (Tier B 직접 spawn + recognizer 회복) 으로 갱신 + v1.4 갱신 박스 추가, §4.1 manifest 예제에서 `limited_args` 제거 (스키마 v2 `SpecMeta = {name, tier, sha256}`). 폐기 근거: M1 에서 Tier B 실행 + well-known recognizer 가 동적완성을 실제로 작동시켜 마킹/힌트 메커니즘 (`Response::DynamicHint` / `LimitedArg`) 이 불필요해짐 → 코드 삭제 (CLAUDE.md §3, first-5-min §8, PLAN §5.1). §2 Tier 분류 / §3~§11 정책 본문은 무변경 (본문의 `limited_args` 언급은 역사적 설계 기록).*
 *v1.5 — 파생 spec 층 신설 (2026-09-05). v1.4 → v1.5 변경: **§6.2 신설** — 어느 층에도 spec 이 없는 명령의 `--help`(fallback `man`) 를 데몬이 파싱해 `~/Library/Caches/nerv/derived/` 에 캐시하는 자동 경로. 층 순서 `[overlay, primary, derived]`, `[derived] enabled = false` 스위치, 소스 선택 기준 = 파싱 성공 (모양 기준은 `ls -h` 목록에 속음), 실행 안전장치 (셸 미경유·절대경로·env 초기화·PATH 만 상속·timeout·cap), 백그라운드 populator 에서만 실행, binary mtime 재파생, 파손 파일 negative 유지, doctor/spec list 읽기 전용. §6.1 overlay 계약 무변경 — 파생은 그 *뒤*에 붙는다. Tier A/B/C 분류 / §3~§5 / §7 무변경. 변경 트리거: 새 help 레이아웃 (fixture 4종 밖) 이 파싱 실패로 보고될 때, 컬럼 히스토그램 파서 재설계 착수 시.*
+*v1.6 — 셸 자체 완성 폴백 (2026-09-27). v1.5 → v1.6 변경: **§6.4 신설** — 손으로 쓴 spec 이 없는 명령(`unspecced`, 파일 층으로 판정)에서 ZLE 위젯이 zsh compsys 완성 함수의 후보를 쓴다. `_complete --compsys` 종료 코드 5·6. 단어당 1회 캡처 + 셸 내 필터, 300/1000 ms 초과 명령 자동 제외, `NERV_COMPSYS=0`. 층 순서·§6.1~§6.3 무변경. 변경 트리거: PTY 경로(zpty 숨은 셸) 착수, bash·fish 브리지 착수 시.*

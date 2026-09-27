@@ -1733,6 +1733,7 @@ dependencies = [
  "anyhow",
  "clap",
  "flate2",
+ "libc",
  "nerv-quickjs",
  "notify",
  "once_cell",
