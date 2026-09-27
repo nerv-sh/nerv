@@ -11,7 +11,8 @@ is the screen we assert on: no VT parser of our own.
 
 Scenarios: popup renders · a split shows it only in the active pane ·
 the last-row prompt still gets the whole box · a detach and reattach
-leaves it working.
+leaves it working · (zle) a resize closes the popup and chains to the
+user's own WINCH handler, in both the function and the `trap` form.
 
 Run from the repo root:  python3 scripts/e2e-tmux-popup.py --path zle
 Requires: cargo-built debug binaries, tmux and zsh on PATH (measured on
@@ -101,6 +102,12 @@ def make_env(path):
     with open(os.path.join(zdot, ".zshrc"), "w") as f:
         f.write(f"PS1='{prompt}'\n")
         if path == "zle":
+            # A user WINCH handler set before nerv loads, in either form:
+            # the resize case checks that nerv chains to it.
+            # The list trap ends non-zero on purpose: zsh ignores that
+            # status, and chaining must not turn it into an interrupt.
+            f.write('if [[ -n $E2E_LIST_TRAP ]]; then trap \': >> "$HOME/user-winch"; false\' WINCH\n')
+            f.write('else TRAPWINCH() { : >> "$HOME/user-winch" }; fi\n')
             f.write(f'eval "$({NERV} init zsh)"\n')
         else:
             f.write(f"source {PTY_ZSH}\n")
@@ -113,8 +120,8 @@ def make_env(path):
     return home, env, prompt
 
 
-def shell_cmd(path):
-    return "/bin/zsh -i" if path == "zle" else f"{NERV_PTY} -- /bin/zsh"
+def shell_cmd(path, env=""):
+    return f"{env}/bin/zsh -i" if path == "zle" else f"{env}{NERV_PTY} -- /bin/zsh"
 
 
 class Harness:
@@ -124,6 +131,17 @@ class Harness:
 
     def start(self):
         subprocess.run([NERV, "start"], env=self.env, capture_output=True)
+        # `nerv start` returns before nervd serves; a first keystroke that
+        # beats it gets no popup. Wait until a completion comes back.
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            r = subprocess.run([NERV, "_complete", TYPED, str(len(TYPED))],
+                               env=self.env, capture_output=True, text=True)
+            if "checkout" in r.stdout:
+                break
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("nervd never answered a completion")
         # -f /dev/null keeps the user's ~/.tmux.conf (base-index, hooks) out.
         subprocess.run(["tmux", "-L", SOCK, "-f", "/dev/null", "new-session", "-d",
                         "-s", SESSION, "-x", str(COLS), "-y", str(ROWS), "sleep 3600"],
@@ -139,10 +157,10 @@ class Harness:
         subprocess.run([NERV, "stop"], env=self.env, capture_output=True)
         shutil.rmtree(self.home, ignore_errors=True)
 
-    def window(self):
+    def window(self, env=""):
         """A fresh window running the shell under test; returns its pane id."""
         pane = tmux("new-window", "-t", SESSION, "-P", "-F", "#{pane_id}",
-                    shell_cmd(self.path)).strip()
+                    shell_cmd(self.path, env)).strip()
         self.ready(pane)
         return pane
 
@@ -162,7 +180,12 @@ class Harness:
             raise RuntimeError(f"no prompt in {pane}")
 
     def type(self, pane, text):
-        tmux("send-keys", "-t", pane, "-l", text)
+        # One key at a time, at typing speed. A burst (`send-keys -l` of the
+        # whole string) races the widget: a Space landing while the `g`
+        # popup is up accepts `gh` — a typeahead issue outside this test.
+        for ch in text:
+            tmux("send-keys", "-t", pane, "-l", ch)
+            time.sleep(0.05)
 
     def key(self, pane, *keys):
         tmux("send-keys", "-t", pane, *keys)
@@ -200,7 +223,7 @@ def check_split(h):
 
 def check_bottom(h):
     pane = h.window()
-    h.type(pane, "for i in {1..40}; do echo line$i; done")
+    tmux("send-keys", "-t", pane, "-l", "for i in {1..40}; do echo line$i; done")
     h.key(pane, "Enter")
     scrolled, lines = wait_for(pane, lambda ls: "line40" in ls and ls[-1].startswith(h.prompt.rstrip()))
     if not scrolled:
@@ -213,6 +236,64 @@ def check_bottom(h):
     if not (ok and prompt_ok):
         dump(lines)
     return ok and prompt_ok
+
+
+def check_resize(h, env=""):
+    """A resize erases the popup (zsh redraws the prompt); the next key
+    must not steer a popup the user can no longer see."""
+    pane = h.window(env)
+    h.split(pane)
+    tmux("select-pane", "-t", pane)
+    h.type(pane, TYPED)
+    ok, lines = wait_for(pane, popup_up)
+    if not ok:
+        log("  popup never opened")
+        dump(lines)
+        return False
+    marker = os.path.join(h.home, "user-winch")
+    if os.path.exists(marker):          # the split above already sent one
+        os.remove(marker)
+    tmux("resize-pane", "-Z", "-t", pane)
+    gone, lines = wait_for(pane, lambda ls: not box_rows(ls))
+    if not gone:
+        log("  popup survived the resize")
+        dump(lines)
+        return False
+    # The trap runs when zsh gets the signal, not when resize-pane returns.
+    deadline = time.time() + 3
+    while not os.path.exists(marker) and time.time() < deadline:
+        time.sleep(0.1)
+    chained = os.path.exists(marker)
+    h.key(pane, "Down")
+    # Unzoom back to the original geometry: the popup is still gone, which
+    # is why this is a trap and not a $COLUMNS:$LINES comparison.
+    tmux("resize-pane", "-Z", "-t", pane)
+    h.key(pane, "Down")
+    # An absence can't be polled for; give a stray repaint time to land.
+    time.sleep(0.8)
+    lines = capture(pane)
+    hidden = not box_rows(lines)
+    # The cursor's row, not any row: an aborted line stays on screen with
+    # a fresh prompt drawn under it.
+    cy = int(tmux("display", "-p", "-t", pane, "#{cursor_y}").strip())
+    kept = cy < len(lines) and lines[cy].startswith(h.prompt + TYPED)
+    if not kept:
+        log("  the resize dropped the typed line")
+        dump(lines)
+        return False
+    if not hidden:
+        log("  Down repainted the popup after the resize")
+        dump(lines)
+    if not chained:
+        log("  the user's TRAPWINCH did not run")
+    # Typing again must open a fresh popup: the reset closed it, not broke it.
+    h.key(pane, "BSpace")
+    h.type(pane, "c")
+    reopened, lines = wait_for(pane, popup_up)
+    if not reopened:
+        log("  typing after the resize did not reopen the popup")
+        dump(lines)
+    return hidden and chained and reopened
 
 
 def attach_client():
@@ -282,6 +363,12 @@ SCENARIOS = [
     ("bottom", check_bottom),
     ("detach-attach", check_detach_attach),
 ]
+# Per-path: how each render path answers a resize differs (03 adds pty).
+PATH_SCENARIOS = {
+    "zle": [("resize", check_resize),
+            ("resize-list-trap", lambda h: check_resize(h, "E2E_LIST_TRAP=1 "))],
+    "pty": [],
+}
 
 
 def main():
@@ -309,7 +396,8 @@ def main():
     failed = []
     try:
         h.start()
-        for name, fn in SCENARIOS:
+        scenarios = SCENARIOS + PATH_SCENARIOS[args.path]
+        for name, fn in scenarios:
             ok = fn(h)
             log(f"{args.path}/{name}: {'ok' if ok else 'FAIL'}")
             if not ok:
@@ -319,7 +407,7 @@ def main():
     if failed:
         log(f"FAIL — {', '.join(failed)}")
         return 1
-    log(f"PASS — {len(SCENARIOS)} scenarios on the {args.path} path")
+    log(f"PASS — {len(scenarios)} scenarios on the {args.path} path")
     return 0
 
 
