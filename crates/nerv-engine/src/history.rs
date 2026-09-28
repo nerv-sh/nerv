@@ -126,6 +126,12 @@ pub const W_DIR: f64 = 0.3;
 /// Times a command must have followed another before an empty prompt
 /// predicts it.
 pub const PREDICT_MIN: u32 = 2;
+/// …and the share of everything that followed it the command must hold,
+/// as `1 / PREDICT_SHARE`. Chosen on a replay of a real history
+/// (scripts/eval-history-replay.py, 679 commands, 80/20): the repeat
+/// rule alone was right 23.6% of the times it showed; a third doubles
+/// that (48.6%) for 2.9 points fewer hits. docs/history-suggestions.md §4.
+pub const PREDICT_SHARE: u32 = 3;
 /// Recency decay constant of frecency: `exp(-age / 1 week)`.
 pub const DECAY_SECS: f64 = 7.0 * 24.0 * 3600.0;
 
@@ -518,24 +524,31 @@ impl HistoryStore {
     }
 
     /// The command to offer on an empty prompt: what most often came
-    /// right after `prev`. Only a habit seen at least [`PREDICT_MIN`] times
-    /// counts — frecency alone would put a ghost on every prompt. `prev`'s
+    /// right after `prev`. Only a habit counts — seen at least
+    /// [`PREDICT_MIN`] times, and at least a [`PREDICT_SHARE`]th of what
+    /// followed `prev` — so frecency alone never puts a ghost on a prompt,
+    /// nor does a command that is one of many next steps. `prev`'s
     /// command head (`git add` of `git add .`) is the fallback key. Ties go
     /// to the directory affinity, then the most recent run.
     pub fn predict(&self, prev: &str, cwd: &str) -> Option<String> {
         let a = self.agg.lock().ok()?;
         let cwd = a.id(cwd);
+        // One pass: every follower counts toward the share, only a
+        // repeated, ghost-able one can be the pick.
         let best = |map: &FxMap<(u32, u32), u32>, key: u32| {
-            map.iter()
-                .filter(|&(&(k, id), &n)| {
-                    k == key && n >= PREDICT_MIN && !a.stats[id as usize].no_ghost
-                })
-                .map(|(&(_, id), &n)| {
-                    let st = a.stats[id as usize];
+            let mut followers = 0u32;
+            let mut top = None;
+            for (&(k, id), &n) in map {
+                if k != key {
+                    continue;
+                }
+                followers += n;
+                if n >= PREDICT_MIN && !a.stats[id as usize].no_ghost {
                     let here = cwd.map_or(0, |c| a.dirs.get(&(id, c)).copied().unwrap_or(0));
-                    (n, here, st.last, id)
-                })
-                .max()
+                    top = top.max(Some((n, here, a.stats[id as usize].last, id)));
+                }
+            }
+            top.filter(|&(n, ..)| n * PREDICT_SHARE >= followers)
         };
         let exact = a.id(prev).and_then(|p| best(&a.seq, p));
         let pick = exact.or_else(|| head(prev).and_then(|h| best(&a.seq_head, a.id(&h)?)))?;
@@ -1291,6 +1304,39 @@ mod tests {
         );
         assert_eq!(store.predict("ls", "/"), None);
         assert_eq!(store.predict("", "/"), None);
+    }
+
+    /// A repeat is not a habit when the command is usually followed by
+    /// something else: the top follower must be a third of them.
+    #[test]
+    fn predict_needs_a_dominant_follower() {
+        let store = HistoryStore::empty();
+        for next in ["make", "make", "ls", "vim a", "git status", "cat b", "pwd"] {
+            store.record(at(next, "/", "cd src", NOW)).unwrap();
+        }
+        // `make` followed twice, but 2 of 7 is under a third.
+        assert_eq!(store.predict("cd src", "/"), None);
+        store.record(at("make", "/", "cd src", NOW)).unwrap();
+        // 3 of 8 is over a third.
+        assert_eq!(store.predict("cd src", "/").as_deref(), Some("make"));
+
+        // A multi-line command is never offered, but it did follow `prev`:
+        // it counts toward the share. 2 of 7 again.
+        let store = HistoryStore::empty();
+        for _ in 0..5 {
+            store.record(at("for x\ndone", "/", "cd lib", NOW)).unwrap();
+        }
+        for _ in 0..2 {
+            store.record(at("make", "/", "cd lib", NOW)).unwrap();
+        }
+        assert_eq!(store.predict("cd lib", "/"), None);
+
+        // Exactly a third is enough: 2 of 6.
+        let store = HistoryStore::empty();
+        for next in ["make", "make", "ls", "vim a", "git status", "pwd"] {
+            store.record(at(next, "/", "cd src", NOW)).unwrap();
+        }
+        assert_eq!(store.predict("cd src", "/").as_deref(), Some("make"));
     }
 
     #[test]

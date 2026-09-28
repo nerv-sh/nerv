@@ -948,11 +948,14 @@ __nerv_complete() {
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=0
+  __NERV_RANKED_FOR=$LBUFFER __NERV_RANKED=""
 
   if [[ -z "${LBUFFER// /}" ]]; then
     __nerv_hide_popup
-    # Back to an empty line: the prompt's prediction returns.
-    [[ -z $BUFFER ]] && __nerv_ghost "$__NERV_PREDICTED"
+    # Back to an empty line: the prompt's prediction returns. Written even
+    # when zsh-autosuggestions owns the ghost: it never paints an empty
+    # line, and its wrapper does not fetch over one.
+    [[ -z $BUFFER ]] && (( ! __NERV_YIELD )) && POSTDISPLAY=$__NERV_PREDICTED
     return
   fi
 
@@ -1060,6 +1063,7 @@ __nerv_complete() {
     rlines=("${(@)rlines[2,-1]}")
     if (( ${#ranked} > ${#LBUFFER} )) && [[ "${ranked[1,${#LBUFFER}]}" == "$LBUFFER" ]]; then
       hist_ghost="${ranked[${#LBUFFER}+1,-1]}"
+      __NERV_RANKED=$ranked
     fi
   else
     __nerv_history_ghost
@@ -1157,19 +1161,64 @@ __nerv_complete() {
 # Inline ghost text (POSTDISPLAY), unless another plugin owns it.
 # zsh-autosuggestions paints the same slot from its own widget wrappers;
 # two writers overwrite each other on every key, so with it loaded nerv
-# keeps only the popup and leaves the ghost to it. Decided at the first
-# prompt, not when this file is sourced: a plugin manager may load it
-# after nerv.
+# stops writing the slot while typing and hands its ranking to the plugin
+# instead, as the `nerv` strategy (docs/history-suggestions.md §7).
+# Decided at the first prompt, not when this file is sourced: a plugin
+# manager may load it after nerv.
 typeset -gi __NERV_GHOST_OFF=0 __NERV_GHOST_CHECKED=0
+# NERV_AUTOSUGGEST=0 with the plugin loaded: nerv shows only its popup, as
+# in 0.1.19 — no ranking handed over, no empty-prompt prediction either.
+typeset -gi __NERV_YIELD=0
 __nerv_ghost() { (( __NERV_GHOST_OFF )) || POSTDISPLAY=$1; }
 __nerv_ghost_owner() {
   (( __NERV_GHOST_CHECKED )) && return
   __NERV_GHOST_CHECKED=1
+  # What was found, for the one-time notice and `nerv doctor` (paths.rs
+  # AUTOSUGGEST_SEEN_NAME). Removed once the plugin is gone.
+  local seen=$HOME/Library/Caches/nerv/autosuggest-seen mode
   # Defined for the life of the shell: MANUAL_REBIND removes the precmd
   # hook, not the function.
-  (( ${+functions[_zsh_autosuggest_start]} )) || return
+  if (( ! ${+functions[_zsh_autosuggest_start]} )); then
+    [[ -e $seen ]] && rm -f -- $seen
+    return
+  fi
   __NERV_GHOST_OFF=1
-  print -ru2 -- "[nerv] zsh-autosuggestions is loaded: it keeps the inline ghost text, nerv shows only its popup."
+  if [[ ${NERV_AUTOSUGGEST:-1} == 0 ]]; then
+    mode=yield __NERV_YIELD=1
+  else
+    mode=strategy
+    # First, so the ranking answers before the user's own strategies; they
+    # still answer whenever it has nothing.
+    # Split like the plugin does (`${=…}`): a user may have set a string.
+    local -a strategies=(${=ZSH_AUTOSUGGEST_STRATEGY})
+    ZSH_AUTOSUGGEST_STRATEGY=(nerv ${strategies:#nerv})
+  fi
+  # Said once per install, and again only when the mode changes; the file
+  # is not rewritten otherwise, so a shell start costs one read.
+  local was
+  [[ -r $seen ]] && IFS= read -r was < $seen
+  [[ $was == $mode ]] && return
+  if [[ $mode == yield ]]; then
+    print -ru2 -- "[nerv] zsh-autosuggestions is loaded: it keeps the inline ghost text, nerv shows only its popup."
+  else
+    print -ru2 -- "[nerv] zsh-autosuggestions is loaded: its inline ghost now comes from nerv's ranked history (NERV_AUTOSUGGEST=0 to turn off)."
+  fi
+  # Without the folder (no daemon has run yet) the notice would repeat.
+  { mkdir -p -- ${seen:h} && print -r -- $mode >| $seen } 2>/dev/null
+}
+
+# The ghost the daemon ranked for the line as typed at the last request,
+# for the `nerv` strategy. The plugin's widget wrappers fetch right after
+# nerv's widget has run, and its async child is forked then too, so the
+# value is this keystroke's. `__NERV_RANKED_FOR` names the line it belongs
+# to: a buffer changed by a widget that does not ask the daemon (a paste,
+# history recall) never gets a stale ranking. Empty when nothing was ranked
+# — no history, no daemon, a bare command word — and the next strategy
+# answers.
+typeset -g __NERV_RANKED_FOR="" __NERV_RANKED=""
+_zsh_autosuggest_strategy_nerv() {
+  [[ $1 == "$__NERV_RANKED_FOR" && -n $__NERV_RANKED ]] || return
+  typeset -g suggestion=$__NERV_RANKED
 }
 
 # Most recent history command that strictly extends the current buffer,
@@ -1465,9 +1514,20 @@ __nerv_pre_redraw() {
   if [[ -n $BUFFER && -n $POSTDISPLAY && $POSTDISPLAY == "$__NERV_PREDICTED" ]]; then
     POSTDISPLAY=''
   fi
+  __nerv_paint_ghost
+}
+__nerv_paint_ghost() {
   region_highlight=(${region_highlight:#*memo=nerv_ghost*})
-  if (( ! __NERV_GHOST_OFF )) && [[ -n "$POSTDISPLAY" ]]; then
-    region_highlight+=("${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) fg=242, memo=nerv_ghost")
+  # With zsh-autosuggestions the plugin styles its own ghost; the
+  # prediction on the empty line is nerv's, and no plugin widget has run
+  # yet to style it.
+  if [[ -n "$POSTDISPLAY" ]] && { (( ! __NERV_GHOST_OFF )) \
+       || [[ -z $BUFFER && $POSTDISPLAY == "$__NERV_PREDICTED" ]]; }; then
+    # The plugin's style when it draws the rest, so a prediction typed
+    # through keeps one colour.
+    local style=fg=242
+    (( __NERV_GHOST_OFF )) && style=${ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE:-fg=8}
+    region_highlight+=("${#BUFFER} $(( ${#BUFFER} + ${#POSTDISPLAY} )) $style, memo=nerv_ghost")
   fi
 }
 # Chain into the pre-redraw hook via add-zle-hook-widget instead of
@@ -1494,7 +1554,7 @@ typeset -g __NERV_PREDICTED=""
 __nerv_line_init() {
   __NERV_PREDICTED=""
   [[ ${NERV_PREDICT:-1} == 0 || -z $__NERV_PREV_CMD || -n $BUFFER ]] && return
-  (( __NERV_GHOST_OFF )) && return
+  (( __NERV_YIELD )) && return
   local row rc
   # Same 150 ms bound as `_predict`: the prompt waits on this.
   if __nerv_sock_call 0.15 predict "$__NERV_PREV_CMD" "${PWD:A}"; then
@@ -1513,6 +1573,8 @@ __nerv_line_init() {
   [[ $row == $'\x1f'ghost$'\t'?* ]] || return
   __NERV_PREDICTED="${row#*$'\t'}"
   POSTDISPLAY="$__NERV_PREDICTED"
+  # line-pre-redraw ran before this hook, so the grey is painted here.
+  __nerv_paint_ghost
 }
 zle -N __nerv_line_init
 # Registered like line-pre-redraw below: hooked when add-zle-hook-widget
@@ -1575,7 +1637,8 @@ __nerv_precmd_reset() {
   __NERV_PREV_LBUFFER=""
   # A new prompt means the last command may have changed what completes
   # (a new branch, a killed process): nothing captured before it is reused.
-  __NERV_COMPSYS_KEY=""
+  # The ranked ghost was ranked after a different previous command.
+  __NERV_COMPSYS_KEY="" __NERV_RANKED_FOR="" __NERV_RANKED=""
 }
 
 __nerv_rebind() {

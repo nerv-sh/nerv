@@ -624,6 +624,7 @@ fn build_doctor_report() -> DoctorReport {
     check_specs(&mut r);
     check_spec_misses(&mut r);
     check_history(&mut r);
+    check_autosuggest(&mut r);
     check_schema_version(&mut r);
     check_pty_mode(&mut r);
     r
@@ -694,6 +695,40 @@ fn check_history_in(r: &mut DoctorReport, path: &std::path::Path) {
         detail,
         Some(format!("{}", path.display())),
     );
+}
+
+/// Whether the widget found zsh-autosuggestions, and what it did: feed it
+/// nerv's ranking (the `nerv` strategy) or yield the ghost to it. Only the
+/// widget can see the plugin; it leaves [`paths::AUTOSUGGEST_SEEN_NAME`]
+/// behind for this row.
+fn check_autosuggest(r: &mut DoctorReport) {
+    if let Some(dir) = paths::cache_dir() {
+        check_autosuggest_in(r, &dir.join(paths::AUTOSUGGEST_SEEN_NAME));
+    }
+}
+
+fn check_autosuggest_in(r: &mut DoctorReport, path: &std::path::Path) {
+    let Ok(mode) = std::fs::read_to_string(path) else {
+        r.push(
+            DoctorLevel::Ok,
+            "autosuggestions",
+            "not detected".into(),
+            None,
+        );
+        return;
+    };
+    // Rewritten only when the mode changes, so its mtime is the day this
+    // mode began.
+    let since = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .map(|t| time::OffsetDateTime::from(t).date().to_string())
+        .unwrap_or_else(|_| "?".into());
+    let detail = match mode.trim() {
+        "strategy" => format!("detected — its ghost uses nerv's ranking (since {since})"),
+        "yield" => format!("detected — nerv yields the ghost, NERV_AUTOSUGGEST=0 (since {since})"),
+        _ => "detected (unreadable stamp)".to_string(),
+    };
+    r.push(DoctorLevel::Ok, "autosuggestions", detail, None);
 }
 
 /// E5: spec cache schema version vs the daemon's supported version
@@ -2733,6 +2768,28 @@ mod tests {
         }
         assert!(record_request(b" export T=1\0export T=1\0\0", "/".into(), 0).is_none());
         assert!(record_request(b"", "/".into(), 0).is_none());
+    }
+
+    #[test]
+    fn doctor_autosuggest_row_reads_the_widget_stamp() {
+        let path = std::env::temp_dir().join(format!("nerv-as-seen-{}", std::process::id()));
+        let detail = |content: Option<&str>| {
+            let _ = std::fs::remove_file(&path);
+            if let Some(c) = content {
+                std::fs::write(&path, c).unwrap();
+            }
+            let mut r = DoctorReport::default();
+            check_autosuggest_in(&mut r, &path);
+            r.entries[0].detail.clone()
+        };
+        assert_eq!(detail(None), "not detected");
+        assert!(
+            detail(Some("strategy\n"))
+                .starts_with("detected — its ghost uses nerv's ranking (since 20")
+        );
+        assert!(detail(Some("yield\n")).contains("NERV_AUTOSUGGEST=0"));
+        assert_eq!(detail(Some("\u{0}garbage")), "detected (unreadable stamp)");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -237,7 +237,7 @@ runtime beyond a native binary. The closest projects, and how they differ:
 | **Amazon Q Developer CLI** (`aws/amazon-q-developer-cli`) | Fig's successor: autocomplete plus agentic AI chat; requires an AWS Builder ID login | Nerv keeps only the autocomplete half — no login, no AI, no telemetry, a few MB instead of hundreds |
 | **inshellisense** (`microsoft/inshellisense`) | Node.js/TypeScript tool that also consumes Fig specs; cross-platform, runs the shell inside a PTY | Nerv is Rust with no Node on the hot path, and the default zsh path is a plain ZLE widget, not a PTY wrapper |
 | **carapace** (`carapace-sh/carapace-bin`) | Go multi-shell completion binary with its own spec format, hooked into each shell's native completion system | Nerv is an inline popup with descriptions and live values on every keystroke, not a Tab-triggered completer |
-| **zsh-autosuggestions** | History-based grey ghost text | Nerv ranks its history ghost by folder and the previous command, and adds the spec popup; with the plugin loaded, nerv leaves the ghost to it and keeps the popup |
+| **zsh-autosuggestions** | History-based grey ghost text | Nerv ranks its history ghost by folder and the previous command, and adds the spec popup; with the plugin loaded, the plugin draws nerv's ranked ghost as its first strategy |
 | **fzf-tab** | Fuzzy picker over zsh's native `compsys` completions on Tab | Nerv completes as you type from the Fig spec corpus, and falls back to `compsys` only for commands no spec covers, shown in the same popup |
 
 Nerv is a good fit if you want Fig back on macOS + zsh with zero cloud. It is
@@ -277,8 +277,9 @@ Windows later.
 **Does Nerv work with oh-my-zsh, powerlevel10k, tmux, and zsh-autosuggestions?**
 Yes. The widget rebinds its keys after other frameworks load, aligns the
 popup under a full-width powerlevel10k prompt, and is tested inside tmux.
-With zsh-autosuggestions loaded, the plugin keeps the inline ghost text and
-Nerv shows only its popup; the shell says so once at start-up
+With zsh-autosuggestions loaded, the plugin keeps drawing the inline ghost
+but takes it from Nerv's ranking first (the `nerv` strategy), and Nerv adds
+its popup; `NERV_AUTOSUGGEST=0` turns the strategy off
 ([docs/history-suggestions.md](docs/history-suggestions.md) §7).
 
 **What does Nerv record about the commands I run?**
