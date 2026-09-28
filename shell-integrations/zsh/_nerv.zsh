@@ -85,13 +85,67 @@ if [[ "${NERV_AUTOSTART:-1}" != "0" ]]; then
   ( "$__NERV_BIN" start >/dev/null 2>&1 & ) 2>/dev/null
 fi
 
-__nerv_reset_state() {
+__nerv_clear_state_vars() {
   __NERV_ACTIVE=0
   __NERV_SELECTED=0
   __NERV_HAS_SENTINEL=0
   __NERV_RESERVED=0
   __NERV_ITEMS=()
+}
+
+__nerv_reset_state() {
+  __nerv_clear_state_vars
   zle -R ""
+}
+
+# A resize makes zsh redraw the prompt, which erases the popup rows, but
+# the popup state would stay open: the next Down/Tab would steer a popup
+# the user can no longer see. Close it. Traps run outside ZLE, so only
+# plain variables may change here — no `zle -R`, no widget, no printf.
+# An existing WINCH handler (user or plugin, set before us) is chained,
+# not replaced — both forms: a TRAPWINCH function and a `trap '…' WINCH`
+# list trap (defining TRAPWINCH would silently drop the latter). A
+# handler set after us replaces ours (docs/terminal-compat.md §6).
+if [[ "${functions[TRAPWINCH]-}" != *__nerv_clear_state_vars* ]]; then
+  unfunction __nerv_prev_trapwinch 2>/dev/null
+  typeset -g __NERV_PREV_WINCH_LIST=""
+  if (( $+functions[TRAPWINCH] )); then
+    functions -c TRAPWINCH __nerv_prev_trapwinch
+  else
+    # `trap` prints the list trap as `trap -- '<cmd>' WINCH`; eval the
+    # quoted word back into the plain command string. Not `$(trap)`: a
+    # command substitution is a subshell, where zsh has already reset traps.
+    # Builtins only (sysopen, zf_rm, `$(<f)`): this runs at every shell
+    # start, and forking mktemp/rm cost ~3.9 ms against ~0.3 ms (measured).
+    () {
+      zmodload -F zsh/system b:sysopen 2>/dev/null || return 0
+      zmodload -F zsh/files b:zf_rm 2>/dev/null || return 0
+      local tmp="${TMPDIR:-/tmp}/nerv-trap.$$.$RANDOM" fd line
+      sysopen -w -o excl,creat -m 600 -u fd "$tmp" 2>/dev/null || return 0
+      trap >&$fd
+      exec {fd}>&-
+      line=${(M)${(f)"$(<$tmp)"}:#trap -- * WINCH}
+      zf_rm -f "$tmp"
+      [[ -n "$line" ]] && eval "__NERV_PREV_WINCH_LIST=${${line#trap -- }% WINCH}"
+    }
+  fi
+fi
+TRAPWINCH() {
+  local rc=0
+  if (( $+functions[__nerv_prev_trapwinch] )); then
+    __nerv_prev_trapwinch "$@"; rc=$?
+  elif [[ -n "$__NERV_PREV_WINCH_LIST" ]]; then
+    # A list trap's status is ignored by zsh; returning it from this
+    # function would read as "interrupted" and drop the typed line.
+    eval "$__NERV_PREV_WINCH_LIST"
+  fi
+  __nerv_clear_state_vars
+  # As in __nerv_escape: forget the last buffer, or retyping it after the
+  # resize reads as "unchanged" and never reopens the popup.
+  __NERV_PREV_LBUFFER=""
+  # A non-zero return from a TRAPNAL function means "interrupted" — keep
+  # the chained function's answer.
+  return $rc
 }
 
 # Scan the item set ONCE to size the box: widest display name (display

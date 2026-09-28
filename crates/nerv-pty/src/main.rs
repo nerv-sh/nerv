@@ -439,10 +439,8 @@ where
 /// it started.
 async fn draw_overlay(stdout: &mut io::Stdout, overlay: &mut Overlay, cols: usize) {
     let need = overlay.popup.as_ref().map(|p| p.rows()).unwrap_or(0);
-    if need > overlay.reserved {
-        let _ = stdout
-            .write_all(popup::reserve_seq(need - overlay.reserved).as_bytes())
-            .await;
+    if let Some(seq) = popup::grow_reserve(overlay.reserved, need) {
+        let _ = stdout.write_all(seq.as_bytes()).await;
         overlay.reserved = need;
     }
     if overlay.drawn > 0 {
@@ -534,9 +532,6 @@ fn build_shell_command(command: Option<&[String]>) -> Result<CommandBuilder> {
     };
 
     builder.env(NERV_TERM, env!("CARGO_PKG_VERSION"));
-    if env::var_os("TMUX").is_some() {
-        builder.env("NERV_TERM_TMUX", env!("CARGO_PKG_VERSION"));
-    }
 
     // Clean up environment and launch shell.
     builder.env_remove(NERV_SHELL);

@@ -47,15 +47,6 @@ pub const LINUX_TERMINALS: &[Terminal] = &[
     Terminal::Positron,
 ];
 
-/// Other terminals that figterm should launch within that are not full terminal emulators
-pub const SPECIAL_TERMINALS: &[Terminal] = &[
-    Terminal::Ssh,
-    Terminal::Tmux,
-    Terminal::Nvim,
-    Terminal::Vim,
-    Terminal::Zellij,
-];
-
 pub fn current_terminal() -> Option<&'static Terminal> {
     static CURRENT_TERMINAL: OnceLock<Option<Terminal>> = OnceLock::new();
     CURRENT_TERMINAL
@@ -68,12 +59,6 @@ pub fn current_terminal_version() -> Option<&'static str> {
     CURRENT_TERMINAL_VERSION
         .get_or_init(Terminal::version)
         .as_deref()
-}
-
-/// Checks if the current process is inside of one of the pseudoterminals listed under
-/// [`SPECIAL_TERMINALS`], returning the terminal if true.
-pub fn in_special_terminal(ctx: &Context) -> Option<Terminal> {
-    Terminal::from_process_info(ctx, &SPECIAL_TERMINALS.to_vec())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -600,14 +585,6 @@ impl Terminal {
             Terminal::Konsole => PositioningKind::Logical,
             _ => PositioningKind::Physical,
         }
-    }
-
-    /// Other pseudoterminal that we want to launch within
-    pub fn is_special(&self) -> bool {
-        matches!(
-            self,
-            Terminal::Ssh | Terminal::Tmux | Terminal::Vim | Terminal::Nvim | Terminal::Zellij
-        )
     }
 
     pub fn as_custom(&self) -> Option<&CustomTerminal> {

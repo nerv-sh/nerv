@@ -215,6 +215,16 @@ pub fn reserve_seq(n: usize) -> String {
     format!("{}\x1b[{}A", "\n".repeat(n), n)
 }
 
+/// Sequence that grows the reservation from `reserved` to `need` rows, or
+/// `None` when the rows are already there. It walks all `need` rows, not
+/// the difference: the cursor starts on the prompt row, above the rows
+/// already reserved, so `need - reserved` newlines would only move through
+/// those without scrolling, and at the bottom of the screen the grown box
+/// would clamp onto the last row (the bug this replaced).
+pub fn grow_reserve(reserved: usize, need: usize) -> Option<String> {
+    (need > reserved).then(|| reserve_seq(need))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +382,21 @@ mod tests {
     fn reserve_seq_scrolls_then_returns() {
         assert_eq!(reserve_seq(0), "");
         assert_eq!(reserve_seq(3), "\n\n\n\x1b[3A");
+    }
+
+    #[test]
+    fn grow_reserve_covers_every_row_not_just_the_delta() {
+        // The cursor sits on the prompt row, above the rows already
+        // reserved. Emitting only the delta walks it through those rows
+        // without scrolling, so at the bottom of the screen the grown box
+        // clamps onto the last row. Every needed row must be walked.
+        assert_eq!(
+            grow_reserve(6, 8),
+            Some(format!("{}\x1b[8A", "\n".repeat(8)))
+        );
+        assert_eq!(grow_reserve(0, 3), Some("\n\n\n\x1b[3A".to_string()));
+        assert_eq!(grow_reserve(8, 6), None);
+        assert_eq!(grow_reserve(8, 8), None);
     }
 
     #[test]

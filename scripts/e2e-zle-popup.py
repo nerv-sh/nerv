@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """E2E smoke for the ZLE-widget popup column anchor (_nerv.zsh).
 
-The widget anchors the popup's left edge under the input cursor by
-asking the terminal for the cursor column via DSR (`ESC [ 6 n`). A plain
-pty doesn't emulate a terminal, so this harness plays the terminal: it
-answers the DSR with a chosen column, then asserts the widget paints the
-popup at that column (`ESC [ <col> G`) rather than column 1.
+The widget anchors the popup's left edge under the input cursor. It
+computes the column from the prompt width plus the typed text; since
+a51ac77 it no longer sends a DSR (`ESC [ 6 n`) query. This harness still
+answers a DSR if one shows up, so a regression back to querying doesn't
+hang. It asserts the widget paints the popup past column 1
+(`ESC [ <col> G`) under a long prompt.
 
 Run from repo root:  python3 scripts/e2e-zle-popup.py
 Requires: cargo-built debug binaries, zsh on PATH.
