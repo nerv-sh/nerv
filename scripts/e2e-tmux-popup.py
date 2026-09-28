@@ -42,6 +42,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEBUG = os.path.join(REPO, "target", "debug")
 NERV = os.path.join(DEBUG, "nerv")
 NERV_PTY = os.path.join(DEBUG, "nerv-pty")
+ZSH = shutil.which("zsh")
 SPECS = os.path.join(REPO, "crates", "nerv-engine", "tests", "fixtures", "specs")
 PTY_ZSH = os.path.join(REPO, "shell-integrations", "zsh", "_nerv-pty.zsh")
 
@@ -127,14 +128,14 @@ def make_env(path):
     env = dict(os.environ)
     env.pop("TMUX", None)          # we may be running inside the user's tmux
     env.pop("NERV_PTY_SESSION_ID", None)
-    env.update(HOME=home, ZDOTDIR=zdot, SHELL="/bin/zsh",
+    env.update(HOME=home, ZDOTDIR=zdot, SHELL=ZSH,
                PATH=f"{DEBUG}:{env.get('PATH', '')}",
                NERV_SPECS_DIR=SPECS, NERV_PATH_SCAN="0", NERV_AUTOSTART="0")
     return home, env, prompt
 
 
 def shell_cmd(path, env=""):
-    return f"{env}/bin/zsh -i" if path == "zle" else f"{env}{NERV_PTY} -- /bin/zsh"
+    return f"{env}{ZSH} -i" if path == "zle" else f"{env}{NERV_PTY} -- {ZSH}"
 
 
 class Harness:
@@ -473,6 +474,9 @@ def main():
         return 2
     if not shutil.which("tmux"):
         log("tmux not on PATH")
+        return 2
+    if not ZSH:
+        log("zsh not on PATH")
         return 2
 
     # `finally` runs on exceptions only; a SIGTERM from `timeout` or CI
