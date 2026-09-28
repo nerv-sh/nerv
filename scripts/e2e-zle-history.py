@@ -310,6 +310,11 @@ def check_predict(e):
         if ghost != "echo next-thing":
             log(f"  after prep: {ghost!r}")
             return False
+        # Grey, not the typed text's colour: line-init sets it after the
+        # redraw hook has painted.
+        if ghost_fg(sh, ghost) in (None, "default"):
+            log(f"  prediction not greyed: fg={ghost_fg(sh, ghost)!r}")
+            return False
         # Right-arrow accepts it into the line.
         sh.key("\x1b[C")
         sh.settle(lambda: sh.at_typed("echo next-thing"), 2)
@@ -594,6 +599,13 @@ AUTOSUGGEST = next((p for p in [
 ] if p and os.path.exists(p)), None)
 AUTOSUGGEST_STUB = "_zsh_autosuggest_start() { :; }\n"
 YIELD_NOTICE = "zsh-autosuggestions is loaded"
+# dir-ghost's rows, and a zsh history whose newest match is `two`.
+AUTOSUGGEST_DIR_ENV = {
+    "histfile_lines": ["echo alpha one", "echo alpha two"],
+    "history_rows": [("echo alpha one", "a", ""), ("echo alpha one", "a", ""),
+                     ("echo alpha two", "b", ""), ("echo alpha two", "b", "")]
+    + [("echo prep", "", ""), ("echo next-thing", "", "echo prep")] * 2,
+}
 AUTOSUGGEST_ENV = {
     "histfile_lines": ["git check-plugin-ghost"],
     "history_rows": [("git checkout main", "", "")] * 3
@@ -601,46 +613,164 @@ AUTOSUGGEST_ENV = {
 }
 
 
-def check_autosuggest_yield(e, real):
-    # nerv's own ghost stays off: no prediction after `echo prep`, and
-    # `git chec` would ghost `kout` from the popup's top row and the ranked
-    # history's `git checkout main`. The popup itself stays, and the notice
-    # is printed once per shell. With the stub nothing else paints, so any
-    # ghost is nerv's; the real plugin overwrites nerv on the keys it wraps.
+def check_autosuggest(e, real):
+    # nerv stops painting while typing and hands its ranking to the plugin
+    # as the `nerv` strategy, first in ZSH_AUTOSUGGEST_STRATEGY. The popup
+    # stays, and the notice is printed once. With the stub nothing paints,
+    # so any ghost would be nerv's own; with the real plugin, `git chec`
+    # gets nerv's ranked `git checkout main` over $history's newest
+    # `git check-plugin-ghost`.
     sh = e.shell()
     try:
         run(sh, "echo prep")
         predicted = prompt_ghost(sh)
+        run(sh, "print -r -- S=${(j:,:)ZSH_AUTOSUGGEST_STRATEGY}")
+        strategies = next((l.strip() for l in sh.screen.display if l.startswith("S=")), "")
         sh.type("git chec")
         sh.settle(lambda: any("checkout" in l for l in sh.box()), 3)
         popup = any("checkout" in l for l in sh.box())
         after = sh.cursor_line()[len(PROMPT + "git chec"):].strip()
         notices = sum(YIELD_NOTICE in l for l in sh.screen.display)
-        ok = predicted == "" and popup and notices == 1
-        spaced = ""
+        ok = (predicted == "echo next-thing" and popup and notices == 1
+              and strategies.startswith("S=nerv"))
+        spaced = bare = ""
         if real:
-            # The plugin's ghost comes from $history, and Right-arrow
-            # accepts it through the plugin's own forward-char wrapper.
-            ok = ok and after == "k-plugin-ghost"
+            ok = ok and strategies == "S=nerv,history" and after == "kout main"
+            # Accepted through the plugin's own forward-char wrapper.
             sh.key("\x1b[C")
-            sh.settle(lambda: sh.at_typed("git check-plugin-ghost"), 2)
-            ok = ok and sh.at_typed("git check-plugin-ghost")
-            # Space is nerv's own widget, which the plugin does not wrap:
-            # its ghost must follow the new line, not stay glued on.
+            sh.settle(lambda: sh.at_typed("git checkout main"), 2)
+            ok = ok and sh.at_typed("git checkout main")
+            # A bare command word is ranked too. Space is nerv's own widget,
+            # which the plugin does not wrap: the ghost must be re-fetched
+            # for `git `, not stay glued on (`git  checkout main`).
             sh.type("\x15git")
-            sh.settle(lambda: "check-plugin-ghost" in sh.cursor_line(), 2)
+            sh.settle(lambda: "checkout main" in sh.cursor_line(), 2)
+            bare = sh.cursor_line()
             sh.type(" ")
-            sh.settle(lambda: sh.cursor_line() == PROMPT + "git check-plugin-ghost", 2)
+            sh.settle(lambda: sh.cursor_line() == PROMPT + "git checkout main"
+                      and sh.at_typed("git "), 2)
             spaced = sh.cursor_line()
-            ok = ok and spaced == PROMPT + "git check-plugin-ghost" and sh.at_typed("git ")
+            ok = (ok and bare == PROMPT + "git checkout main"
+                  and spaced == PROMPT + "git checkout main" and sh.at_typed("git "))
         else:
-            ok = ok and after == ""
+            ok = ok and strategies == "S=nerv" and after == ""
         if not ok:
-            log(f"  real={real} predicted={predicted!r} popup={popup} after={after!r}"
-                f" notices={notices} spaced={spaced!r} line={sh.cursor_line()!r}")
+            log(f"  real={real} predicted={predicted!r} strategies={strategies!r} popup={popup}"
+                f" after={after!r} notices={notices} bare={bare!r} spaced={spaced!r}"
+                f" line={sh.cursor_line()!r}")
         return ok
     finally:
         sh.close()
+
+
+def ghost_fg(sh, text):
+    """Foreground colour of the first ghost cell after the prompt."""
+    y = sh.screen.cursor.y
+    return sh.screen.buffer[y][len(PROMPT)].fg if text else None
+
+
+def check_autosuggest_predict(e, real):
+    # The empty prompt's prediction is nerv's even with the plugin: it
+    # never paints an empty line. It is grey (not typed-looking), Right
+    # accepts it through the plugin's wrapper, and deleting back to an
+    # empty line brings it back.
+    sh = e.shell()
+    try:
+        run(sh, "echo prep")
+        predicted = prompt_ghost(sh)
+        fg = ghost_fg(sh, predicted)
+        ok = predicted == "echo next-thing" and fg not in (None, "default")
+        back = accepted = ""
+        if real:
+            # Typed through: the plugin keeps the rest of the ghost.
+            sh.type("ec")
+            sh.settle(lambda: sh.cursor_line() == PROMPT + "echo next-thing", 2)
+            through = sh.cursor_line()
+            sh.type("\x7f\x7f")
+            back = prompt_ghost(sh)
+            sh.key("\x1b[C")
+            sh.settle(lambda: sh.at_typed("echo next-thing"), 2)
+            accepted = sh.cursor_line()
+            ok = (ok and through == PROMPT + "echo next-thing" and back == "echo next-thing"
+                  and sh.at_typed("echo next-thing"))
+        if not ok:
+            log(f"  real={real} predicted={predicted!r} fg={fg!r} back={back!r}"
+                f" accepted={accepted!r} line={sh.cursor_line()!r}")
+        return ok
+    finally:
+        sh.close()
+
+
+def check_autosuggest_dir(e):
+    # The plugin's ghost follows the folder, like nerv's own (dir-ghost):
+    # $history alone would say `two` everywhere.
+    sh = e.shell()
+    try:
+        run(sh, "cd a")
+        ghost = ghost_after(sh, "echo alpha ")
+        # A paste does not ask the daemon: the ranking for the typed line
+        # must not answer for it, and the history strategy does.
+        sh.type("\x15")
+        sh.key("\x1b[200~echo alpha\x1b[201~")
+        sh.settle(lambda: len(sh.cursor_line()) > len(PROMPT + "echo alpha"), 2)
+        pasted = sh.cursor_line()[len(PROMPT + "echo alpha"):].strip()
+        # A shell word (alias `ec`) never reaches the daemon: the ranking
+        # made for `ech` just before must be cleared, and history answers.
+        sh.type("\x15ech")
+        sh.settle(lambda: "alpha" in sh.cursor_line(), 2)
+        sh.type("\x7f")
+        sh.settle(lambda: sh.cursor_line() == PROMPT + "echo alpha two", 2)
+        word = sh.cursor_line()
+        sh.type("\x15")
+        run(sh, "cd ../b")
+        ghost_b = ghost_after(sh, "echo alpha ")
+        ok = (ghost == "one" and pasted == "two" and word == PROMPT + "echo alpha two"
+              and ghost_b == "two")
+        if not ok:
+            log(f"  ghost={ghost!r} pasted={pasted!r} word={word!r} b={ghost_b!r}")
+        return ok
+    finally:
+        sh.close()
+
+
+def check_autosuggest_off(e):
+    # NERV_AUTOSUGGEST=0: the plugin keeps its own strategies, as in 0.1.19,
+    # and there is no empty-prompt prediction.
+    sh = e.shell()
+    try:
+        run(sh, "echo prep")
+        predicted = prompt_ghost(sh)
+        run(sh, "cd a")
+        run(sh, "print -r -- S=${(j:,:)ZSH_AUTOSUGGEST_STRATEGY}")
+        strategies = next((l.strip() for l in sh.screen.display if l.startswith("S=")), "")
+        ghost = ghost_after(sh, "echo alpha ")
+        ok = strategies == "S=history" and ghost == "two" and predicted == ""
+        if not ok:
+            log(f"  strategies={strategies!r} ghost={ghost!r} predicted={predicted!r}")
+        return ok
+    finally:
+        sh.close()
+
+
+def check_autosuggest_notice_once(e):
+    # The notice is said once per install: the widget leaves a stamp in the
+    # cache folder, and a second shell stays quiet. A shell without the
+    # plugin removes the stamp, so `nerv doctor` stops reporting it.
+    seen = os.path.join(e.home, "Library/Caches/nerv/autosuggest-seen")
+    counts = []
+    for env in (e.env, e.env, dict(e.env, NERV_E2E_NO_PLUGIN="1")):
+        sh = Shell(env, e.work)
+        try:
+            run(sh, "echo one")
+            counts.append(sum(YIELD_NOTICE in l for l in sh.screen.display))
+            if len(counts) == 2:
+                stamp = open(seen).read().strip() if os.path.exists(seen) else None
+        finally:
+            sh.close()
+    ok = counts == [1, 0, 0] and stamp == "strategy" and not os.path.exists(seen)
+    if not ok:
+        log(f"  notices={counts} stamp={stamp!r} left={os.path.exists(seen)}")
+    return ok
 
 
 def check_no_plugin_no_notice(e):
@@ -688,23 +818,33 @@ SCENARIOS = [
     ("predict-hung-daemon", check_predict_hung_daemon, {}),
     ("empty-history-fallback", check_empty_history_fallback,
      {"histfile_lines": ["ls -la zztop"], "history_rows": "empty"}),
-    ("autosuggest-yield-stub", lambda e: check_autosuggest_yield(e, False),
+    ("autosuggest-stub", lambda e: check_autosuggest(e, False),
      dict(AUTOSUGGEST_ENV, pre_rc=AUTOSUGGEST_STUB)),
     # The block `nerv init` writes is usually last, but a plugin manager
     # may still load the plugin after it.
-    ("autosuggest-yield-late", lambda e: check_autosuggest_yield(e, False),
+    ("autosuggest-stub-late", lambda e: check_autosuggest(e, False),
      dict(AUTOSUGGEST_ENV, extra_rc=AUTOSUGGEST_STUB)),
     ("no-plugin-no-notice", check_no_plugin_no_notice, {}),
+    ("autosuggest-predict-stub", lambda e: check_autosuggest_predict(e, False),
+     dict(AUTOSUGGEST_ENV, pre_rc=AUTOSUGGEST_STUB)),
+    ("autosuggest-notice-once", check_autosuggest_notice_once,
+     {"pre_rc": "[[ -n $NERV_E2E_NO_PLUGIN ]] || " + AUTOSUGGEST_STUB}),
     ("ranked-nothing-wins", check_ranked_nothing_wins,
      {"histfile_lines": ["ls -la zzsecretdir"], "history_rows": [("echo unrelated", "", "")]}),
 ]
 
 if AUTOSUGGEST:
     SCENARIOS += [
-        ("autosuggest-yield-plugin", lambda e: check_autosuggest_yield(e, True),
+        ("autosuggest-plugin", lambda e: check_autosuggest(e, True),
          dict(AUTOSUGGEST_ENV, pre_rc=f"source {AUTOSUGGEST}\n")),
-        ("autosuggest-yield-plugin-late", lambda e: check_autosuggest_yield(e, True),
+        ("autosuggest-plugin-late", lambda e: check_autosuggest(e, True),
          dict(AUTOSUGGEST_ENV, extra_rc=f"source {AUTOSUGGEST}\n")),
+        ("autosuggest-predict-plugin", lambda e: check_autosuggest_predict(e, True),
+         dict(AUTOSUGGEST_ENV, pre_rc=f"source {AUTOSUGGEST}\n")),
+        ("autosuggest-dir", check_autosuggest_dir,
+         dict(AUTOSUGGEST_DIR_ENV, pre_rc=f"alias ec=echo\nsource {AUTOSUGGEST}\n")),
+        ("autosuggest-off", check_autosuggest_off,
+         dict(AUTOSUGGEST_DIR_ENV, pre_rc=f"NERV_AUTOSUGGEST=0\nsource {AUTOSUGGEST}\n")),
     ]
 
 

@@ -124,13 +124,38 @@ On a fresh prompt, before anything is typed, the widget asks once
 (`nerv _predict`, from zle's `line-init` hook) for the command that usually
 follows the one just run, and shows it as ghost text.
 
-- **Habit threshold.** Only a command that followed the previous one at least twice is predicted. Frecency alone would put a ghost on every prompt, so it plays no part here.
+- **Habit threshold.** A command is predicted only when it followed the previous one at least twice *and* makes up at least a third of everything that followed it. Frecency alone would put a ghost on every prompt, so it plays no part here.
 - **Fallback key.** When the exact previous command has no such follower, its command head is tried (`git add` of `git add .`).
 - **Ties.** Runs in the current directory decide first, then the most recent run.
 - **Accept.** Right-arrow accepts the prediction.
 - **Typing and deleting.** Typing replaces it. Deleting back to an empty line shows it again without a new request.
 - **Enter.** Enter on the empty line runs nothing, and no ghost text is left in the scrollback. The same holds for any ghost that was not accepted.
 - **Turning it off.** `NERV_PREDICT=0` turns prediction off. Esc or `^G` hides it for the current line.
+
+**How the threshold was chosen.** `scripts/eval-history-replay.py` replays a
+zsh history file. It learns from the first 80% of the commands and predicts
+each of the rest in order. It prints totals only, never command text. On one
+real history (679 commands, 136 predicted; small, so one or two cases are
+noise):
+
+| Rule | Shown | Right | Right when shown |
+|---|---|---|---|
+| Followed at least twice (before) | 65.4% | 15.4% | 23.6% |
+| … at least three times | 55.9% | 12.5% | 22.4% |
+| … and at least a quarter of what followed | 28.7% | 13.2% | 46.2% |
+| **… and at least a third of what followed** | **25.7%** | **12.5%** | **48.6%** |
+| … and at least two fifths of what followed | 22.8% | 11.0% | 48.4% |
+| … and at least half of what followed | 20.6% | 10.3% | 50.0% |
+| … half, without the command-head fallback | 15.4% | 8.1% | 52.4% |
+| Baseline: what followed it last time | 74.3% | 13.2% | 17.8% |
+
+The replay leaves out multi-line commands, which the shipped rule counts
+among the followers. That shifts the share slightly, likely by less than the
+noise above.
+
+The third was the most precise rule that lost at most 3 points of hits. A
+wrong ghost on the prompt costs attention on every prompt. A missing one
+costs nothing.
 
 ## 5. Popup order
 
@@ -246,19 +271,47 @@ the typed line.
 ## 7. With zsh-autosuggestions
 
 zsh-autosuggestions paints its ghost into the same slot (`POSTDISPLAY`) from
-its own widget wrappers. Two writers would overwrite each other on every key,
-so when it is loaded nerv leaves the ghost to it and keeps only the popup.
+its own widget wrappers. Two writers would overwrite each other on every key.
+So when the plugin is loaded, nerv stops painting while you type and hands its
+ranking to the plugin as a strategy. The plugin still draws the ghost, and
+takes it from nerv's ranking first. The plugin asks again only when the typed
+text leaves the ghost it shows, so while you type through a ghost it stays the
+one ranked for the earlier prefix. The popup stays as it is.
 
 - **Detection.** At the first prompt the widget looks for the plugin's
   `_zsh_autosuggest_start` function. The check waits for the prompt because a
-  plugin manager may load the plugin after nerv.
-- **Notice.** The shell prints one line to stderr, once:
-  `[nerv] zsh-autosuggestions is loaded: it keeps the inline ghost text, nerv shows only its popup.`
-- **What nerv stops.** The ranked history ghost, the popup's top-row ghost
-  and the empty-prompt prediction. Right-arrow falls through to
-  `forward-char`, which the plugin wraps to accept its own ghost. Space is
-  nerv's own widget, which the plugin does not wrap, so nerv asks the plugin
-  for a new ghost after it (`autosuggest-fetch`).
+  plugin manager may load the plugin after nerv. A plugin loaded later than
+  that (zinit turbo, zsh-defer) is not detected.
+- **The `nerv` strategy.** nerv puts `nerv` first in
+  `ZSH_AUTOSUGGEST_STRATEGY` and keeps the user's own strategies after it. The
+  strategy answers with the command the daemon ranked for the line, which
+  nerv's widget has already asked for on that keystroke, so it costs no extra
+  request. The plugin fetches right after nerv's widget runs, and in async mode
+  its child process is forked then too, so the value is always this key's.
+- **When nerv has no answer.** The strategy leaves the suggestion empty and the
+  user's next strategy (by default `history`) answers. That happens with no
+  recorded history, with no daemon, for a shell word (alias, function,
+  builtin), when the ranking found no match, and when the buffer changed
+  without asking the daemon (a paste, history recall). The ranking carries the
+  line it was made for, so it never answers for a different one.
+- **Empty-prompt prediction.** The prediction (§4) is still nerv's: the plugin
+  never paints an empty line. It uses the plugin's
+  `ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE`, so it keeps one colour when you type
+  through it and the plugin draws the rest. Right-arrow accepts it through the
+  plugin's own wrapper, and backspacing to an empty line brings it back. In
+  async mode (the plugin's default), backspacing fast can let the plugin's late
+  answer for the previous line clear it. `NERV_PREDICT=0` turns it off.
+- **Turning it off.** `NERV_AUTOSUGGEST=0` leaves the plugin's strategies
+  alone, as in 0.1.19: the plugin keeps its own ghost and nerv shows only the
+  popup, with no empty-prompt prediction.
+- **Notice.** The first shell that finds the plugin prints one line to stderr
+  naming the mode. It leaves `~/Library/Caches/nerv/autosuggest-seen` holding
+  that mode, so later shells stay quiet until the mode changes. A shell that no
+  longer finds the plugin removes the file. `nerv doctor` reads it for its
+  `autosuggestions` row.
+- **Keys.** Right-arrow falls through to `forward-char`, which the plugin wraps
+  to accept its ghost. Space is nerv's own widget, which the plugin does not
+  wrap, so nerv asks the plugin for a new ghost after it (`autosuggest-fetch`).
 - **Widget order.** The plugin wraps every widget at the first prompt, and
   again at each prompt unless `ZSH_AUTOSUGGEST_MANUAL_REBIND` is set. Nerv
   re-claims `self-insert`, `backward-delete-char` and `accept-line` at each
