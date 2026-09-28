@@ -708,7 +708,7 @@ fn check_autosuggest(r: &mut DoctorReport) {
 }
 
 fn check_autosuggest_in(r: &mut DoctorReport, path: &std::path::Path) {
-    let Ok(mode) = std::fs::read_to_string(path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         r.push(
             DoctorLevel::Ok,
             "autosuggestions",
@@ -717,6 +717,7 @@ fn check_autosuggest_in(r: &mut DoctorReport, path: &std::path::Path) {
         );
         return;
     };
+    let mode = String::from_utf8_lossy(&bytes);
     // Rewritten only when the mode changes, so its mtime is the day this
     // mode began.
     let since = std::fs::metadata(path)
@@ -2789,6 +2790,12 @@ mod tests {
         );
         assert!(detail(Some("yield\n")).contains("NERV_AUTOSUGGEST=0"));
         assert_eq!(detail(Some("\u{0}garbage")), "detected (unreadable stamp)");
+        // Not UTF-8: still a stamp, not an absent one.
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, [0xff, 0xfe]).unwrap();
+        let mut r = DoctorReport::default();
+        check_autosuggest_in(&mut r, &path);
+        assert_eq!(r.entries[0].detail, "detected (unreadable stamp)");
         let _ = std::fs::remove_file(&path);
     }
 

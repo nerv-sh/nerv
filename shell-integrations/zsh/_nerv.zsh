@@ -1213,7 +1213,8 @@ __nerv_ghost_owner() {
 # value is this keystroke's. `__NERV_RANKED_FOR` names the line it belongs
 # to: a buffer changed by a widget that does not ask the daemon (a paste,
 # history recall) never gets a stale ranking. Empty when nothing was ranked
-# — no history, no daemon, a bare command word — and the next strategy
+# — no history, no daemon, a shell word (alias, function, builtin) — and
+# the next strategy
 # answers.
 typeset -g __NERV_RANKED_FOR="" __NERV_RANKED=""
 _zsh_autosuggest_strategy_nerv() {

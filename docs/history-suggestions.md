@@ -149,6 +149,10 @@ noise):
 | … half, without the command-head fallback | 15.4% | 8.1% | 52.4% |
 | Baseline: what followed it last time | 74.3% | 13.2% | 17.8% |
 
+The replay leaves out multi-line commands, which the shipped rule counts
+among the followers. That shifts the share slightly, likely by less than the
+noise above.
+
 The third was the most precise rule that lost at most 3 points of hits. A
 wrong ghost on the prompt costs attention on every prompt. A missing one
 costs nothing.

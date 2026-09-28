@@ -26,8 +26,8 @@ pub const HISTORY_NAME: &str = "history.tsv";
 /// The zsh widget script cached by `nerv init zsh --shell-script`.
 pub const INIT_CACHE_NAME: &str = "init.zsh";
 /// Written by the zsh widget when it finds zsh-autosuggestions: the mode
-/// (`strategy` or `yield`). Its presence keeps the notice to one shell;
-/// `nerv doctor` reports it.
+/// (`strategy` or `yield`). While it holds the same mode, later shells
+/// skip the notice; `nerv doctor` reports it.
 pub const AUTOSUGGEST_SEEN_NAME: &str = "autosuggest-seen";
 pub const DERIVED_SUBDIR: &str = "derived";
 
