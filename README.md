@@ -6,6 +6,7 @@
 
 <p align="center">
   <strong>IDE-grade autocomplete for your terminal.</strong><br>
+  Fig-style popup completions for zsh on macOS.<br>
   No login. No AI. No telemetry. No Electron. Just one small binary and your zsh.
 </p>
 
@@ -64,6 +65,10 @@ cloud attached is now a local daemon and a zsh widget.
   suggestion. On an empty prompt it predicts the command you usually run next
   (`NERV_PREDICT=0` turns that off). Right-arrow accepts. The ranking follows
   [deja](https://github.com/Giammarco-Ferranti/deja).
+- **Looks like your terminal** — the popup has no background of its own and
+  uses only your terminal's 16 ANSI colors, so it matches dark and light
+  themes alike. The highlighted row gets a `›` marker and a bold name in your
+  theme's bright magenta.
 - **Frecency ranking** — rows you pick, or type by hand, float to the top,
   more so in the folder where you use them.
 - **Understands your shell** — completes through `alias g=git`, behind
@@ -108,6 +113,29 @@ token too; their names live in the daemon's memory only, never on disk.
 > Apple Silicon. If you download a release tarball in a browser instead, clear
 > the flag once with `xattr -dr com.apple.quarantine <path>`.
 
+## Using the popup
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/popup-light.png">
+    <img src="docs/assets/popup-dark.png" width="620" alt="The Nerv popup under the prompt after typing git and a space: an Immediately execute row, then git subcommands such as add, apply, archive and checkout with dimmed argument hints like [pathspec...], the apply row highlighted with a magenta marker, and a footer showing its description, Apply a patch to files and/or to the index, with the position 2/40">
+  </picture>
+</p>
+
+The popup opens as you type. Its first row, **Immediately execute**, is
+highlighted by default, so Enter still runs what you typed; the list only
+takes a key once you move into it.
+
+| Key | What it does |
+|---|---|
+| <kbd>↓</kbd> / <kbd>↑</kbd> | Move the highlight; it wraps at either end |
+| <kbd>PageDown</kbd> / <kbd>PageUp</kbd> | Move a page at a time |
+| <kbd>Tab</kbd> | Insert the highlighted item and open the next level (a subcommand's flags, a flag's values). On *Immediately execute* it moves to the first item |
+| <kbd>Shift</kbd>+<kbd>Tab</kbd> | Move the highlight up |
+| <kbd>Enter</kbd> | On *Immediately execute*, run the line as typed. On an item, insert it; a folder is inserted and run in the same keypress |
+| <kbd>→</kbd> | Accept the grey ghost text |
+| <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>G</kbd> | Close the popup and its ghost text |
+
 ## How it works
 
 ```text
@@ -135,8 +163,9 @@ token too; their names live in the daemon's memory only, never on disk.
   QuickJS interpreter (~1 MB) covers the long tail of spec-defined JavaScript
   generators.
 - **The widget is plain ZLE.** No alternate screen, no 24-bit color, no PTY
-  interposition — just cursor save/restore and line clearing, so it stays
-  inside what real terminals reliably support. An opt-in PTY mode
+  interposition — just cursor save/restore, line clearing and the 16 ANSI
+  colors, so it stays inside what real terminals reliably support and takes
+  on your color theme. An opt-in PTY mode
   (`NERV_PTY=1`) exists for bash and fish.
 
 Measured on Apple Silicon (release build, v0.1.15, 2026-09):
@@ -281,6 +310,17 @@ With zsh-autosuggestions loaded, the plugin keeps drawing the inline ghost
 but takes it from Nerv's ranking first (the `nerv` strategy), and Nerv adds
 its popup; `NERV_AUTOSUGGEST=0` turns the strategy off
 ([docs/history-suggestions.md](docs/history-suggestions.md) §7).
+
+**How do I pick a suggestion from the popup?**
+Arrow down to it and press Tab to insert it, or Enter to insert it (a folder
+also runs). Right-arrow accepts the grey ghost text. Every key is in
+[Using the popup](#using-the-popup).
+
+**Can I change the popup's colors?**
+The popup takes its colors from your terminal theme: the border and hints use
+the theme's "bright black" and the highlighted row its "bright magenta". Change
+those two colors in your terminal's settings and the popup follows. Nerv has
+no color setting of its own.
 
 **What does Nerv record about the commands I run?**
 Each command you run, with its folder, exit status and the command before it,
