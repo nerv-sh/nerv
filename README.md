@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/icon-1024.png" width="132" alt="Nerv">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/icon-dark-1024.png">
+    <img src="docs/assets/icon-light-1024.png" width="132" alt="Nerv — a purple leaf with its veins (in German, Nerv also names a leaf's veins)">
+  </picture>
 </p>
 
 <h1 align="center">Nerv</h1>
