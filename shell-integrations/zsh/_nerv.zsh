@@ -361,19 +361,24 @@ __nerv_show_popup() {
   repeat $plain_rows; do plain+=("$blank"); done
 
   # --- Build colored lines ---
+  # Theme-native palette: no painted background, only the default fg and
+  # the 16 ANSI slots, so the box takes the user's own terminal colors
+  # and reads right on light themes too (a fixed 256-color slab turned
+  # into a dark block there). Chrome — border, icons, arg hints, counter —
+  # sits in bright black; the selection is the one accent: a `›` marker
+  # and a bold name in the theme's bright magenta (nerv's pink). The
+  # sentinel row skips the marker — its own `↩` already leads the row.
   local R=$'\e[0m'
-  local BG=$'\e[48;5;236m' BDR=$'\e[38;5;240m'
-  local ITEM=$'\e[38;5;252m' DESC=$'\e[38;5;244m'
-  local SELBG=$'\e[48;5;62m' SELFG=$'\e[38;5;255m\e[1m'
-  local ICON=$'\e[38;5;141m'
+  local BDR=$'\e[90m' ICON=$'\e[90m' DESC=$'\e[90m'
+  local ITEM=$'\e[39m' FOOT=$'\e[39m'
+  local SELMARK=$'\e[95m›' SELFG=$'\e[95m\e[1m'
   # Fig-style arg hint (`cmd [remote] [branch]`): dimmer than the
-  # command name. HINT for normal rows, HINTSEL drops bold + uses light
-  # grey so it stays legible on the selected-row accent background.
-  local HINT=$'\e[38;5;244m' HINTSEL=$'\e[22m\e[38;5;250m'
+  # command name. HINTSEL drops the selected row's bold first.
+  local HINT=$'\e[90m' HINTSEL=$'\e[22m\e[90m'
 
   local -a colored=()
 
-  colored+=("  ${BG}${BDR}╭${hbar}╮${R}")
+  colored+=("  ${BDR}╭${hbar}╮${R}")
 
   # Row body width (between the two vertical bars): everything past
   # " │" on the left and " │" on the right. Equals W - 2.
@@ -406,9 +411,9 @@ __nerv_show_popup() {
     (( sent_pad_n < 0 )) && sent_pad_n=0
     local sent_pad=""; repeat $sent_pad_n; do sent_pad+=" "; done
     if (( __NERV_SELECTED == 0 )); then
-      colored+=("  ${SELBG}${BDR}│${SELBG} ${SELFG}${sent_txt}${sent_pad}${BDR}│${R}")
+      colored+=("  ${BDR}│${SELFG} ${sent_txt}${sent_pad}${R}${BDR}│${R}")
     else
-      colored+=("  ${BG}${BDR}│${DESC} ${sent_txt}${sent_pad}${BDR}│${R}")
+      colored+=("  ${BDR}│${DESC} ${sent_txt}${sent_pad}${BDR}│${R}")
     fi
   fi
 
@@ -465,13 +470,13 @@ __nerv_show_popup() {
     fi
 
     if (( i == __NERV_SELECTED )); then
-      colored+=("  ${SELBG}${BDR}│${SELBG} ${ICON}${glyph}${SELFG} ${dpre}${HINTSEL}${dpost}${row_pad}${BDR}│${R}")
+      colored+=("  ${BDR}│${SELMARK}${ICON}${glyph}${SELFG} ${dpre}${HINTSEL}${dpost}${row_pad}${R}${BDR}│${R}")
     else
-      colored+=("  ${BG}${BDR}│${BG} ${ICON}${glyph}${ITEM} ${dpre}${HINT}${dpost}${row_pad}${BDR}│${R}")
+      colored+=("  ${BDR}│ ${ICON}${glyph}${ITEM} ${dpre}${HINT}${dpost}${row_pad}${BDR}│${R}")
     fi
   done
 
-  colored+=("  ${BG}${BDR}├${hbar}┤${R}")
+  colored+=("  ${BDR}├${hbar}┤${R}")
 
   # Footer: " desc … [n/total]" — right-side counter ALWAYS shown
   # so users can see Tab cycle progression at a glance, even when
@@ -486,8 +491,9 @@ __nerv_show_popup() {
   else
     counter="[${__NERV_SELECTED}/${total}]"
   fi
-  # Reserve cells for: leading " ", trailing " ", counter.
-  local sel_avail=$(( W - 4 - ${#counter} ))
+  # Reserve cells for: leading " ", trailing " ", counter, and one
+  # space of gap so a long description never runs into the counter.
+  local sel_avail=$(( W - 5 - ${#counter} ))
   (( sel_avail < 0 )) && sel_avail=0
   # Width-aware truncate: a CJK description must be cut on a cell
   # boundary or the counter is pushed past the right border.
@@ -496,9 +502,9 @@ __nerv_show_popup() {
   local fpad=$(( W - 4 - ${(m)#sel_desc} - ${#counter} ))
   (( fpad < 0 )) && fpad=0
   local fps=""; repeat $fpad; do fps+=" "; done
-  colored+=("  ${BG}${BDR}│${DESC} ${sel_desc}${fps}${counter} ${BDR}│${R}")
+  colored+=("  ${BDR}│${FOOT} ${sel_desc}${fps}${DESC}${counter} ${BDR}│${R}")
 
-  colored+=("  ${BG}${BDR}╰${hbar}╯${R}")
+  colored+=("  ${BDR}╰${hbar}╯${R}")
 
   # Reserve the space with ZLE — but only on first show or when the row
   # count changes. Re-issuing `zle -R` on every keystroke blanks the whole
