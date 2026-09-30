@@ -62,6 +62,64 @@ typeset -gA __NERV_COMPSYS_SEEN=() __NERV_COMPSYS_SLOW=()
 # after the init block.
 KEYTIMEOUT=1
 typeset -gi __NERV_WIDTH=46
+
+# Popup palette, chosen once per shell. NERV_POPUP_THEME:
+#   purple (default) — the bar and the matched letters in nerv's purple,
+#     rgb(192,103,222) (tak-cc-statusline's branch color) as its nearest
+#     256-color index, 134; chrome in the theme's bright black;
+#   native — only the terminal's 16 ANSI colors (bright-magenta reverse bar).
+# Item names keep the terminal's default color either way, and chrome
+# follows the theme, so light and dark terminals both read right. No true
+# color (docs/terminal-compat.md §2).
+__nerv_palette() {
+  typeset -g __NERV_C_ITEM=$'\e[39m' __NERV_C_BDR=$'\e[90m' \
+    __NERV_C_DESC=$'\e[90m' __NERV_C_ICON=$'\e[90m'
+  if [[ ${NERV_POPUP_THEME:-purple} == native ]]; then
+    typeset -g __NERV_C_SEL=$'\e[0;95;7m' \
+      __NERV_C_HL=$'\e[95m' __NERV_C_HLOFF=$'\e[39m' \
+      __NERV_C_SHL="" __NERV_C_SHLOFF=""
+  else
+    # On the bar the name is already white on purple; a matched letter
+    # there would be purple on purple, so it gets none.
+    typeset -g __NERV_C_SEL=$'\e[0;48;5;134;38;5;255m' \
+      __NERV_C_HL=$'\e[38;5;134m' __NERV_C_HLOFF=$'\e[39m' \
+      __NERV_C_SHL="" __NERV_C_SHLOFF=""
+  fi
+}
+__nerv_palette
+
+# Mark the letters of `$2` (what is typed) inside `$1` (a row's name) with
+# `$3`, going back to the row's color with `$4`. The first way that fits
+# wins: `$1` starts with it (prefix mode, and a fuzzy row that also starts
+# with it), contains it (zoxide, `substring` args), or holds its letters in
+# order (fuzzy, 3+ letters as in `mode_match`). Case-insensitive, like the
+# matching. REPLY = `$1` unchanged when nothing fits or `$3` is empty.
+__nerv_mark() {
+  local t=$1 q=$2 on=$3 off=$4
+  REPLY=$t
+  [[ -z $q || -z $on ]] && return
+  local lt=${(L)t} lq=${(L)q} n=${#q}
+  if [[ $lt == ${(b)lq}* ]]; then
+    REPLY="$on${t[1,n]}$off${t[n+1,-1]}"
+    return
+  fi
+  local pre=${lt%%${(b)lq}*}
+  if [[ $pre != $lt ]]; then
+    local a=$(( ${#pre} + 1 ))
+    REPLY="${t[1,a-1]}$on${t[a,a+n-1]}$off${t[a+n,-1]}"
+    return
+  fi
+  (( n < 3 )) && return
+  local out="" k j=1
+  for (( k=1; k<=${#t}; k++ )); do
+    if (( j <= n )) && [[ ${lt[k]} == "${lq[j]}" ]]; then
+      out+="$on${t[k]}$off"; (( j++ ))
+    else
+      out+=${t[k]}
+    fi
+  done
+  (( j > n )) && REPLY=$out
+}
 typeset -gi __NERV_PASTING=0
 typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 
@@ -90,6 +148,7 @@ __nerv_clear_state_vars() {
   __NERV_SELECTED=0
   __NERV_HAS_SENTINEL=0
   __NERV_RESERVED=0
+  __NERV_PAINTED=""
   __NERV_ITEMS=()
 }
 
@@ -160,7 +219,11 @@ __nerv_measure_items() {
     local d="${rest%%	*}"                  # display
     local after="${rest#*	}"               # desc \t icon \t replace
     local desc_full="${after%%	*}"         # desc
-    local dw=${(m)#d} ew=${(m)#desc_full}
+    # A path description (zoxide, folders) is shortened from the left in
+    # the footer, so it never sets the box width — a 50-cell path under
+    # 8-cell names made a box three times wider than its rows.
+    local dw=${(m)#d} ew=0
+    [[ "$desc_full" == [/~]* ]] || ew=${(m)#desc_full}
     (( dw > md )) && md=$dw
     (( ew > me )) && me=$ew
     if (( ! hw )); then
@@ -205,6 +268,9 @@ __nerv_cycle_prev() {
 # `read` competes with the line editor for stdin and the terminal's
 # reply leaks into the buffer. Limitation: multi-line / dynamically
 # repainted prompts (some powerlevel themes) may be approximate.
+# Sets REPLY (no subshell — the keystroke path) and __NERV_PROMPT_W, the
+# cells the prompt's last line takes before the typed text.
+typeset -gi __NERV_PROMPT_W=0
 __nerv_cursor_col() {
   emulate -L zsh
   setopt local_options extended_glob
@@ -230,11 +296,13 @@ __nerv_cursor_col() {
   # multiline themes that trigger this). A left box is always usable;
   # a right-clamped one is not.
   local cols=${COLUMNS:-80}
+  __NERV_PROMPT_W=${#p}
   if (( col > cols - 20 )); then
     col=$(( 1 + ${#LBUFFER} ))
+    __NERV_PROMPT_W=2
     (( col > cols - 20 )) && col=1
   fi
-  print -r -- $col
+  REPLY=$col
 }
 
 # Max visible rows — tight enough that the popup never runs past
@@ -252,7 +320,7 @@ __nerv_max_vis() {
   # -8, not -7: the box now carries an extra "Immediately execute"
   # sentinel row on top of the item window + 4 chrome rows.
   REPLY=$(( term_lines - 8 ))
-  (( REPLY > 10 )) && REPLY=10
+  (( REPLY > 8 )) && REPLY=8
   (( REPLY < 3 )) && REPLY=3
 }
 
@@ -278,15 +346,19 @@ __nerv_show_popup() {
   # Wire format from `nerv _complete`:
   #   insertion \t display \t description \t icon
   # All 4 fields tab-separated; icon may be empty. SELECTED==0 is the
-  # sentinel — no item, so the footer shows the "Immediately execute"
-  # blurb instead of a per-item description.
-  local sel_desc
+  # sentinel — no item, and its row already says what Enter does, so the
+  # footer shows the keys instead of repeating the label.
+  local sel_desc sel_color
   if (( __NERV_SELECTED == 0 )); then
-    sel_desc="Immediately execute"
+    sel_desc="enter run · tab pick · esc close"
+    sel_color=$__NERV_C_DESC
   else
     local sel_line="${items[$__NERV_SELECTED]}"
     sel_desc="${sel_line#*	}"; sel_desc="${sel_desc#*	}"
     sel_desc="${sel_desc%%	*}"  # drop the icon + replace fields
+    [[ -n "$HOME" && ( "$sel_desc" == "$HOME" || "$sel_desc" == "$HOME"/* ) ]] \
+      && sel_desc="~${sel_desc#$HOME}"
+    sel_color=$'\e[39m'
   fi
 
   # Box dimensions come from __nerv_measure_items (called once when the
@@ -315,10 +387,12 @@ __nerv_show_popup() {
   else
     body=$(( 4 + max_disp + 1 ))
   fi
-  # Footer needs " " + desc + " " (= foot_hint + 2). Pick whichever
-  # is wider so neither row wraps.
+  # Footer needs " " + desc + " " + counter + " ", sized for the widest
+  # counter (`[N/N]`) so a description that set the width isn't cut short
+  # by it. Pick whichever is wider so neither row wraps.
+  local cmax="[${total}/${total}]"
   local W=$body
-  (( foot_hint + 2 > W )) && W=$(( foot_hint + 2 ))
+  (( foot_hint + 3 + ${#cmax} > W )) && W=$(( foot_hint + 3 + ${#cmax} ))
   (( W > cap )) && W=$cap
   (( W < __NERV_WIDTH )) && W=$__NERV_WIDTH
   # Terminal-width hard clamp LAST — the fixed minimum above must never
@@ -361,20 +435,23 @@ __nerv_show_popup() {
   repeat $plain_rows; do plain+=("$blank"); done
 
   # --- Build colored lines ---
-  # Theme-native palette: no painted background, only the default fg and
-  # the 16 ANSI slots, so the box takes the user's own terminal colors
-  # and reads right on light themes too (a fixed 256-color slab turned
-  # into a dark block there). Chrome — border, icons, arg hints, counter —
-  # sits in bright black; the selection is the one accent: a `›` marker
-  # and a bold name in the theme's bright magenta (nerv's pink). The
-  # sentinel row skips the marker — its own `↩` already leads the row.
+  # Colors come from the palette (__nerv_palette). The box has no
+  # background of its own and item names keep the terminal's default
+  # color; the selection is a bar across the row, with a `›` marker and
+  # a bold name for a terminal that drops the color. Matched letters
+  # (__nerv_mark) are the one other accent.
   local R=$'\e[0m'
-  local BDR=$'\e[90m' ICON=$'\e[90m' DESC=$'\e[90m'
-  local ITEM=$'\e[39m' FOOT=$'\e[39m'
-  local SELMARK=$'\e[95m›' SELFG=$'\e[95m\e[1m'
+  local BDR=$__NERV_C_BDR ICON=$__NERV_C_ICON DESC=$__NERV_C_DESC
+  local ITEM=$__NERV_C_ITEM
+  local SEL=$__NERV_C_SEL SELB=$'\e[1m' SELNB=$'\e[22m'
   # Fig-style arg hint (`cmd [remote] [branch]`): dimmer than the
-  # command name. HINTSEL drops the selected row's bold first.
-  local HINT=$'\e[90m' HINTSEL=$'\e[22m\e[90m'
+  # command name. Inside the selection bar it only drops the bold — a
+  # grey there would paint a grey patch into the bar.
+  local HINT=$__NERV_C_DESC
+  # What the rows are matched against: the word being typed, past its
+  # last `/` (a path level) or `=` (`--color=`), as the engine splits it.
+  local query=${LBUFFER##*[[:space:]]}
+  query=${query##*/}; query=${query##*=}
 
   local -a colored=()
 
@@ -411,7 +488,7 @@ __nerv_show_popup() {
     (( sent_pad_n < 0 )) && sent_pad_n=0
     local sent_pad=""; repeat $sent_pad_n; do sent_pad+=" "; done
     if (( __NERV_SELECTED == 0 )); then
-      colored+=("  ${BDR}│${SELFG} ${sent_txt}${sent_pad}${R}${BDR}│${R}")
+      colored+=("  ${BDR}│${SEL} ${SELB}${sent_txt}${SELNB}${sent_pad}${R}${BDR}│${R}")
     else
       colored+=("  ${BDR}│${DESC} ${sent_txt}${sent_pad}${BDR}│${R}")
     fi
@@ -470,39 +547,62 @@ __nerv_show_popup() {
     fi
 
     if (( i == __NERV_SELECTED )); then
-      colored+=("  ${BDR}│${SELMARK}${ICON}${glyph}${SELFG} ${dpre}${HINTSEL}${dpost}${row_pad}${R}${BDR}│${R}")
+      __nerv_mark "$dpre" "$query" "$__NERV_C_SHL" "$__NERV_C_SHLOFF"
+      colored+=("  ${BDR}│${SEL}›${glyph} ${SELB}${REPLY}${SELNB}${dpost}${row_pad}${R}${BDR}│${R}")
     else
-      colored+=("  ${BDR}│ ${ICON}${glyph}${ITEM} ${dpre}${HINT}${dpost}${row_pad}${BDR}│${R}")
+      __nerv_mark "$dpre" "$query" "$__NERV_C_HL" "$__NERV_C_HLOFF"
+      colored+=("  ${BDR}│ ${ICON}${glyph}${ITEM} ${REPLY}${HINT}${dpost}${row_pad}${BDR}│${R}")
     fi
   done
 
   colored+=("  ${BDR}├${hbar}┤${R}")
 
-  # Footer: " desc … [n/total]" — right-side counter ALWAYS shown
-  # so users can see Tab cycle progression at a glance, even when
-  # the whole list fits in one window. Layout inside `│...│` must
-  # equal W-2 cells (matches the body rows above):
-  # " " + desc + pad + counter + " ".
-  # ASCII: cells == chars. Sentinel selected → show the item count
-  # alone (`[8]`); an item → its 1-based position (`[3/8]`).
-  local counter
-  if (( __NERV_SELECTED == 0 )); then
-    counter="[${total}]"
-  else
-    counter="[${__NERV_SELECTED}/${total}]"
+  # Footer: " desc … [n/total]". The counter shows only when the list
+  # runs past the window — it is the one sign that more rows scroll in
+  # (Fig had none at all); a list that fits shows every row already.
+  # Layout inside `│...│` must equal W-2 cells (matches the body rows
+  # above): " " + desc + pad + counter + " ". ASCII: cells == chars.
+  # Sentinel selected → the item count alone (`[18]`); an item → its
+  # 1-based position (`[3/18]`).
+  local counter="" gap=0
+  if (( total > visible )); then
+    gap=1
+    if (( __NERV_SELECTED == 0 )); then
+      counter="[${total}]"
+    else
+      counter="[${__NERV_SELECTED}/${total}]"
+    fi
   fi
   # Reserve cells for: leading " ", trailing " ", counter, and one
   # space of gap so a long description never runs into the counter.
-  local sel_avail=$(( W - 5 - ${#counter} ))
+  local sel_avail=$(( W - 4 - gap - ${#counter} ))
   (( sel_avail < 0 )) && sel_avail=0
   # Width-aware truncate: a CJK description must be cut on a cell
-  # boundary or the counter is pushed past the right border.
-  sel_desc="${(mr:$sel_avail:)sel_desc}"
-  (( ${(m)#sel_desc} > sel_avail )) && sel_desc="${(mr:$sel_avail:)${sel_desc%?}}"
+  # boundary or the counter is pushed past the right border. A path keeps
+  # its tail — the folder name is the part that tells rows apart — so it
+  # loses its head, at a `/` when one is left (`…/lemon/voucher-wiki`, not
+  # `…mon/voucher-wiki`); other text loses its end. When a 2-cell glyph
+  # straddles the cut, (m) keeps it whole and overshoots by 1; drop one
+  # more character.
+  if (( ${(m)#sel_desc} > sel_avail )); then
+    local keep=$(( sel_avail - 1 ))
+    if (( keep < 1 )); then
+      sel_desc="${(mr:$sel_avail:)sel_desc}"
+    elif [[ "$sel_desc" == [/~]* ]]; then
+      sel_desc="${(ml:$keep:)sel_desc}"
+      (( ${(m)#sel_desc} > keep )) && sel_desc="${(ml:$keep:)${sel_desc#?}}"
+      [[ "$sel_desc" == ?*/?* ]] && sel_desc="/${sel_desc#*/}"
+      sel_desc="…$sel_desc"
+    else
+      sel_desc="${(mr:$keep:)sel_desc}"
+      (( ${(m)#sel_desc} > keep )) && sel_desc="${(mr:$keep:)${sel_desc%?}}"
+      sel_desc="$sel_desc…"
+    fi
+  fi
   local fpad=$(( W - 4 - ${(m)#sel_desc} - ${#counter} ))
   (( fpad < 0 )) && fpad=0
   local fps=""; repeat $fpad; do fps+=" "; done
-  colored+=("  ${BDR}│${FOOT} ${sel_desc}${fps}${DESC}${counter} ${BDR}│${R}")
+  colored+=("  ${BDR}│${sel_color} ${sel_desc}${fps}${DESC}${counter} ${BDR}│${R}")
 
   colored+=("  ${BDR}╰${hbar}╯${R}")
 
@@ -514,7 +614,7 @@ __nerv_show_popup() {
   # box in place (each row clears to EOL) — no blank frame.
   if (( ! __NERV_ACTIVE || __NERV_RESERVED != ${#plain} )); then
     zle -R "" "${plain[@]}"
-    __NERV_RESERVED=${#plain}
+    __NERV_RESERVED=${#plain} __NERV_RESERVED_ROWS=("${plain[@]}")
   fi
 
   # Anchor the popup's left edge under the input cursor. Clamp so a box
@@ -522,7 +622,8 @@ __nerv_show_popup() {
   # carries 2 leading spaces, so the footprint is W + 2 cells; keep one
   # more column of slack (start_col + 2 + W ≤ cols) or the pending-wrap
   # flag scrolls the next row and tears the box.
-  local start_col=$(__nerv_cursor_col)
+  __nerv_cursor_col
+  local start_col=$REPLY
   (( start_col < 1 )) && start_col=1
   (( start_col + W + 2 > term_cols )) && start_col=$(( term_cols - W - 2 ))
   (( start_col < 1 )) && start_col=1
@@ -530,16 +631,51 @@ __nerv_show_popup() {
   # Save cursor, move down + overwrite each row at the anchored column,
   # restore cursor. Stays within the visible screen: MAX_VIS clamps to
   # $LINES so we don't trigger a mid-render scroll that would invalidate
-  # the saved cursor position.
+  # the saved cursor position. `ESC[J` after the bottom border clears
+  # what a previous, taller box left.
+  #
+  # The box starts on the line under the cursor even when the edit display
+  # goes on below it (text after the cursor, a ghost that wraps): it covers
+  # those lines, as Fig's window did. zle reserves its space below the
+  # whole display, so the rows the box needs always exist; the covered
+  # lines come back when the popup closes (__nerv_hide_popup).
   local move=$'\e[B\e['${start_col}'G'
-  local buf=$'\e7'
-  for (( i=1; i<=${#colored}; i++ )); do
+  local buf=$'\e7\e[B\e['"${start_col}G${colored[1]}"$'\e[K'
+  for (( i=2; i<=${#colored}; i++ )); do
     buf+="${move}${colored[$i]}"$'\e[K'
   done
-  buf+=$'\e8'
+  buf+=$'\e[J\e8'
   printf '%s' "$buf"
 
-  __NERV_ACTIVE=1
+  __NERV_ACTIVE=1 __NERV_PAINTED=$buf
+  # Widgets that run after this one (zsh-autosuggestions draws its ghost
+  # there) change the lines the box covers, and zle's redraw at the end of
+  # the key wipes the box on them. Paint once more after that redraw: a
+  # `zle -F` handler runs when zle is back to waiting for a key, and
+  # /dev/null is readable at once. The brace group keeps `2>/dev/null` off
+  # the shell (see __NERV_SOCK_FD).
+  if (( ${+__NERV_IDLE_FD} )) || { exec {__NERV_IDLE_FD}</dev/null } 2>/dev/null; then
+    zle -F $__NERV_IDLE_FD __nerv_repaint
+  fi
+}
+
+# Paint the open popup again, as last drawn. `zle -R` first, so the redraw
+# zle does after a handler finds nothing left to change.
+__nerv_repaint() {
+  [[ -n $1 ]] && zle -F $1
+  if (( __NERV_ACTIVE )) && [[ -n $__NERV_PAINTED ]]; then
+    zle -R "" "${__NERV_RESERVED_ROWS[@]}"
+    printf '%s' "$__NERV_PAINTED"
+  fi
+}
+
+# zsh-autosuggestions in async mode (its default) draws its ghost later
+# still, from its own `zle -F` handler. Paint again after it.
+__nerv_repaint_after_autosuggest() {
+  __nerv_as_async_response "$@"
+  local rc=$?
+  __nerv_repaint
+  return rc
 }
 
 __nerv_hide_popup() {
@@ -1008,7 +1144,7 @@ __nerv_complete() {
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=0
-  __NERV_RANKED_FOR=$LBUFFER __NERV_RANKED=""
+  __NERV_RANKED_FOR=$LBUFFER __NERV_RANKED="" __NERV_PREFILLED=""
 
   if [[ -z "${LBUFFER// /}" ]]; then
     __nerv_hide_popup
@@ -1178,6 +1314,21 @@ __nerv_complete() {
       rlines[__sn_i]="${(pj:\t:)__sn_fields}"
     fi
   done
+  # The ghost and the popup must not disagree: when the history ghost
+  # continues the word being typed into one of the rows (`yarn we` +
+  # ghost `b:start` → `web:start`), that row goes first, so the selection
+  # Enter and Tab act on is the one the grey text shows. The ghost's next
+  # word is compared to each row's insertion; a ghost that starts with a
+  # space finished the word already and names no row.
+  if [[ -n "$hist_ghost" && "$hist_ghost" != [[:space:]]* ]]; then
+    local want="${LBUFFER##*[[:space:]]}${hist_ghost%%[[:space:]]*}" __gi
+    for (( __gi = 2; __gi <= ${#rlines}; __gi++ )); do
+      if [[ "${rlines[__gi]%%$tab*}" == "$want" ]]; then
+        rlines=("${rlines[__gi]}" "${(@)rlines[1,__gi-1]}" "${(@)rlines[__gi+1,-1]}")
+        break
+      fi
+    done
+  fi
   __NERV_ITEMS=("${rlines[@]}")
   __nerv_measure_items   # size the box once; show_popup reads the cache
   # The "Immediately execute" sentinel shows ONLY at a segment boundary —
@@ -1215,6 +1366,27 @@ __nerv_complete() {
   else
     __nerv_set_ghost
   fi
+  # zsh-autosuggestions clears its ghost while this widget runs and draws
+  # it after, so the box would be laid out for a one-line edit display and
+  # then covered by a ghost that wraps. Put the ghost it is about to draw
+  # (the ranked line nerv hands it, or the same `$history` match) in place
+  # first, styled as the plugin styles it (__nerv_paint_ghost).
+  # With no ranked line the plugin falls through to its own strategies;
+  # its `history` one is this same `$history` scan. Only when the plugin
+  # will draw — loaded for real, not disabled, the buffer under its size
+  # cap (`_zsh_autosuggest_modify`) — or the ghost put here would stay.
+  local max=${ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE-}
+  if (( __NERV_GHOST_OFF && ! __NERV_YIELD && $+functions[_zsh_autosuggest_fetch] \
+        && ! ${+_ZSH_AUTOSUGGEST_DISABLED} )) \
+     && [[ -z $max || ${#BUFFER} -le $max ]]; then
+    local pre=$hist_ghost
+    if [[ -z $pre ]] && (( ${${(@)=ZSH_AUTOSUGGEST_STRATEGY}[(Ie)history]} )); then
+      __nerv_history_ghost force
+      pre=$REPLY
+    fi
+    POSTDISPLAY=$pre
+    __NERV_PREFILLED=$pre
+  fi
   __nerv_show_popup "${rlines[@]}"
 }
 
@@ -1229,6 +1401,13 @@ typeset -gi __NERV_GHOST_OFF=0 __NERV_GHOST_CHECKED=0
 # NERV_AUTOSUGGEST=0 with the plugin loaded: nerv shows only its popup, as
 # in 0.1.19 — no ranking handed over, no empty-prompt prediction either.
 typeset -gi __NERV_YIELD=0
+# The ghost __nerv_complete put in place for zsh-autosuggestions before
+# painting the popup (see there); styled here until the plugin redraws it.
+typeset -g __NERV_PREFILLED=""
+# The last paint and the rows reserved for it, for
+# __nerv_repaint_after_autosuggest.
+typeset -g __NERV_PAINTED=""
+typeset -ga __NERV_RESERVED_ROWS=()
 __nerv_ghost() { (( __NERV_GHOST_OFF )) || POSTDISPLAY=$1; }
 __nerv_ghost_owner() {
   (( __NERV_GHOST_CHECKED )) && return
@@ -1243,6 +1422,11 @@ __nerv_ghost_owner() {
     return
   fi
   __NERV_GHOST_OFF=1
+  if (( $+functions[_zsh_autosuggest_async_response] \
+        && ! $+functions[__nerv_as_async_response] )); then
+    functions -c _zsh_autosuggest_async_response __nerv_as_async_response
+    functions -c __nerv_repaint_after_autosuggest _zsh_autosuggest_async_response
+  fi
   if [[ ${NERV_AUTOSUGGEST:-1} == 0 ]]; then
     mode=yield __NERV_YIELD=1
   else
@@ -1293,8 +1477,9 @@ _zsh_autosuggest_strategy_nerv() {
 __nerv_history_ghost() {
   emulate -L zsh
   REPLY=''
-  # Another plugin owns the ghost: the scan's answer would be discarded.
-  (( __NERV_GHOST_OFF )) && return
+  # Another plugin owns the ghost: the scan's answer would be discarded —
+  # unless `force`, to know what that plugin is about to draw.
+  (( __NERV_GHOST_OFF )) && [[ $1 != force ]] && return
   [[ -z "$LBUFFER" ]] && return
   local match="${history[(r)${(b)LBUFFER}*]}"
   [[ -z "$match" || "$match" == "$LBUFFER" ]] && return
@@ -1583,7 +1768,8 @@ __nerv_paint_ghost() {
   # prediction on the empty line is nerv's, and no plugin widget has run
   # yet to style it.
   if [[ -n "$POSTDISPLAY" ]] && { (( ! __NERV_GHOST_OFF )) \
-       || [[ -z $BUFFER && $POSTDISPLAY == "$__NERV_PREDICTED" ]]; }; then
+       || [[ -z $BUFFER && $POSTDISPLAY == "$__NERV_PREDICTED" ]] \
+       || [[ $POSTDISPLAY == "$__NERV_PREFILLED" ]]; }; then
     # The plugin's style when it draws the rest, so a prediction typed
     # through keeps one colour.
     local style=fg=242

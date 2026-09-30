@@ -476,10 +476,13 @@ def check_popup_history_rows(e):
         sh.type("git checkout f")
         sh.settle(lambda: any("feature-x" in l for l in sh.box()), 3)
         box = sh.box()
-        items = [l for l in box if "│" in l and "[" not in l and l.strip("│ ").strip()]
+        # Rows are the lines above the divider; the footer is the line
+        # after it (a list that fits carries no counter to tell them apart).
+        div = [i for i, l in enumerate(box) if "├" in l]
+        items = [l for l in box[:div[0]] if "│" in l] if div else []
         # `feature-x` is the only row, so it is the selected one, and the
         # selected row's description sits in the footer.
-        footer = [l for l in box if "[1/1]" in l]
+        footer = [box[div[0] + 1]] if div and div[0] + 1 < len(box) else []
         ok = (len(items) == 1 and "feature-x" in items[0]
               and bool(footer) and "history" in footer[0])
         if not ok:

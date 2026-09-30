@@ -191,10 +191,10 @@ def main():
         # 1 + 3: a partial command name opens the popup, and the history
         # ghost is painted alongside it.
         os.write(master, b"doc")
-        text = pump(master, 1.5).decode(errors="replace")
-        if "docker" not in text or "[1/" not in text:
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
+        if "docker" not in text or "╭" not in text:
             failures.append("'doc' did not open a command-name popup")
-        log(f"'doc': popup={'[1/' in text} docker={'docker' in text}")
+        log(f"'doc': popup={'╭' in text} docker={'docker' in text}")
         if GHOST_MARK not in text:
             failures.append("history ghost was lost under the popup")
         log(f"'doc': history ghost={GHOST_MARK in text}")
@@ -206,10 +206,12 @@ def main():
         raw = pump(master, 1.5)
         plain = strip_ansi(raw)
         tab_inserted = b"docker" in plain
-        # The name is now complete, so nerv closes the popup behind the
-        # insert. A Tab that fell through to zsh's own completion would
-        # leave the box up.
-        popup_closed = "[1/" not in raw.decode(errors="replace")
+        # The name is now complete, so nerv closes the command-name popup
+        # behind the insert; a box after it can only be the next level
+        # (`docker ` → its subcommands, sentinel first). A Tab that fell
+        # through to zsh's own completion would leave the name popup up.
+        after = strip_ansi(raw).decode(errors="replace")
+        popup_closed = "╭" not in after or "Immediately execute" in after
         if not (tab_inserted and popup_closed):
             failures.append("Tab did not insert the command name")
         log(f"'doc'+Tab: inserted={tab_inserted} popup_closed={popup_closed}")
@@ -219,22 +221,22 @@ def main():
         os.write(master, b"\x15")  # ctrl-u: clear the line
         pump(master, 0.6)
         os.write(master, b"gi")
-        text = pump(master, 1.5).decode(errors="replace")
-        if "[1/" not in text:
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
+        if "╭" not in text:
             failures.append("'gi' drew no popup — the 'git' check would be vacuous")
-        log(f"'gi': popup={'[1/' in text}")
+        log(f"'gi': popup={'╭' in text}")
         os.write(master, b"t")
-        text = pump(master, 1.5).decode(errors="replace")
-        if "[1/" in text:
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
+        if "╭" in text:
             failures.append("exact command name 'git' still drew a popup")
-        log(f"'git': popup redrawn={'[1/' in text}")
+        log(f"'git': popup redrawn={'╭' in text}")
 
         # 2b: a shell FUNCTION the daemon now knows (registered from
         # ${(k)functions} at the first precmd) is offered like any name.
         os.write(master, b"\x15")
         pump(master, 0.6)
         os.write(master, b"dock")
-        text = pump(master, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
         if "dockr" not in text:
             failures.append("shell function 'dockr' was not offered for 'dock'")
         log(f"'dock': function offered={'dockr' in text}")
@@ -246,7 +248,7 @@ def main():
         os.write(master, b"\x15")
         pump(master, 0.6)
         os.write(master, b"q")
-        text = pump(master, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
         if "qk" not in text:
             failures.append("shell alias 'qk' was not offered for 'q'")
         if "alias → qstat" not in text:
@@ -258,7 +260,7 @@ def main():
         os.write(master, b"\x07\x15")
         pump(master, 0.6)
         os.write(master, b"git checko")
-        text = pump(master, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
         if "alias → qcheckout" in text:
             failures.append("spec row 'checkout' took the alias description")
         if "Switch branches" not in text:
@@ -270,7 +272,7 @@ def main():
         os.write(master, b"\x15")
         pump(master, 0.6)
         os.write(master, b"dokcer")
-        text = pump(master, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
         if "docker" not in text or "did you mean" not in text:
             failures.append("typo 'dokcer' was not corrected to 'docker'")
         log(f"'dokcer': corrected={'did you mean' in text}")
@@ -290,7 +292,7 @@ def main():
         os.write(master, b"\x15")
         pump(master, 0.6)
         os.write(master, b"dokcer ")
-        text = pump(master, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
         if "did you mean" not in text:
             failures.append("'dokcer ' (after the space) drew no correction")
         log(f"'dokcer ': corrected={'did you mean' in text}")
@@ -301,7 +303,7 @@ def main():
             os.write(master, b"\x15")
             pump(master, 0.6)
             os.write(master, typed)
-            text = pump(master, 1.5).decode(errors="replace")
+            text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
             os.write(master, b"\t")
             last = strip_ansi(pump(master, 1.5)).rsplit(b"\r", 1)[-1]
             ok = "did you mean" in text and want in last and b"dokcer" not in last
@@ -365,7 +367,7 @@ def main():
             os.write(master, typed[:-1])
             pump(master, 1.5)
             os.write(master, typed[-1:])
-            text = pump(master, 1.5).decode(errors="replace")
+            text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
             if "did you mean" in text:
                 failures.append(f"shell word in {line!r} drew a correction")
             log(f"{line!r}: engine={'did you mean' in direct} popup={'did you mean' in text}")
@@ -444,7 +446,7 @@ def main():
         os.write(master, b"dk p")
         pump(master, 1.5)
         os.write(master, b"s")
-        text = pump(master, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
         if "did you mean" in text:
             failures.append("a correction survived alias expansion ('dk ps')")
         log(f"alias-expanded 'dk ps': correction={'did you mean' in text}")
@@ -455,20 +457,20 @@ def main():
         os.write(master, b"\x15")
         pump(master, 0.6)
         os.write(master, b"k")
-        text = pump(master, 1.5).decode(errors="replace")
-        if "[1/" in text or "kubectl" in text:
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
+        if "╭" in text or "kubectl" in text:
             failures.append("alias 'k' drew a command-name popup")
-        log(f"alias 'k': popup={'[1/' in text}")
+        log(f"alias 'k': popup={'╭' in text}")
 
         # Leading whitespace (the HIST_IGNORE_SPACE habit) is the same
         # command to the engine, so the guard must strip it too.
         os.write(master, b"\x15")
         pump(master, 0.6)
         os.write(master, b"  k")
-        text = pump(master, 1.5).decode(errors="replace")
-        if "[1/" in text or "kubectl" in text:
+        text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
+        if "╭" in text or "kubectl" in text:
             failures.append("space-prefixed alias '  k' drew a popup")
-        log(f"alias '  k': popup={'[1/' in text}")
+        log(f"alias '  k': popup={'╭' in text}")
 
         # With no daemon the history ghost must still be painted — it
         # never needed the engine.
@@ -526,7 +528,7 @@ def main():
         master2 = m2
         pump(m2, 2.0)  # first prompt: the registration attempt fails
         os.write(m2, b"dock")
-        text = pump(m2, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(m2, 1.5)).decode(errors="replace")
         if "dockr" in text:
             failures.append("shell names registered despite the daemon being down")
         log(f"daemon down: function offered={'dockr' in text}")
@@ -537,7 +539,7 @@ def main():
         os.write(m2, b"\r")  # next prompt → the hook retries
         pump(m2, 1.5)
         os.write(m2, b"dock")
-        text = pump(m2, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(m2, 1.5)).decode(errors="replace")
         if "dockr" not in text:
             failures.append("registration was not retried on the next precmd")
         log(f"after retry: function offered={'dockr' in text}")
@@ -554,7 +556,7 @@ def main():
         os.write(m2, b"\r")  # next prompt → new daemon pid → re-register
         pump(m2, 1.5)
         os.write(m2, b"dock")
-        text = pump(m2, 1.5).decode(errors="replace")
+        text = strip_ansi(pump(m2, 1.5)).decode(errors="replace")
         if "dockr" not in text:
             failures.append("shell names were not re-registered after a daemon restart")
         log(f"after restart: function offered={'dockr' in text}")

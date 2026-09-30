@@ -61,6 +61,10 @@ pub struct Entry {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Stat {
     pub count: u32,
+    /// Of those runs, how many nerv saw exit 0. Rows imported from the zsh
+    /// history carry no status (recorded as 0, with no directory) and do
+    /// not count.
+    pub ok: u32,
     pub last: u64,
     /// Runs with a known directory (imported rows have none) — the
     /// denominator of directory affinity.
@@ -168,6 +172,10 @@ pub struct TokenSignals {
 pub struct TokenStat {
     /// Runs of commands that had this word here.
     pub count: u32,
+    /// Of those runs, how many nerv saw exit 0 (imported rows have no
+    /// status). A word only failed runs had is a typo (`web:deployㅔ`) or a
+    /// script that no longer exists.
+    pub ok: u32,
     pub last: u64,
     /// Of those runs, how many were in the current directory …
     pub here: u32,
@@ -263,6 +271,9 @@ impl Aggregates {
         }
         let stat = &mut self.stats[cmd as usize];
         stat.count = stat.count.saturating_add(1);
+        if e.exit == 0 && !e.cwd.is_empty() {
+            stat.ok = stat.ok.saturating_add(1);
+        }
         stat.last = stat.last.max(e.ts);
         stat.key = stat.frecency_key();
         stat.no_ghost = e.command.contains(['\n', '\t']);
@@ -504,6 +515,7 @@ impl HistoryStore {
                 continue;
             };
             t.count = t.count.saturating_add(st.count);
+            t.ok = t.ok.saturating_add(st.ok);
             t.last = t.last.max(st.last);
             t.here = t.here.saturating_add(here);
             t.in_dirs = t.in_dirs.saturating_add(st.in_dirs);

@@ -294,6 +294,19 @@ one ranked for the earlier prefix. The popup stays as it is.
   builtin), when the ranking found no match, and when the buffer changed
   without asking the daemon (a paste, history recall). The ranking carries the
   line it was made for, so it never answers for a different one.
+- **With the popup open.** The box opens on the line under the cursor and
+  covers the lines of a ghost that wraps. The plugin clears its ghost while
+  nerv's widget runs and draws it after, and zsh redraws the lines the ghost
+  changed, wiping the box on them. So nerv puts the ghost the plugin is about
+  to draw (the ranked line, or with none the same `$history` match the
+  plugin's `history` strategy finds) in place first, styled as the plugin
+  styles it. Only when the plugin will draw: it is really loaded
+  (`_zsh_autosuggest_fetch`), not disabled, and the buffer is under
+  `ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE`. It also paints the box again once zsh
+  has finished redrawing the key (a `zle -F` handler on `/dev/null`, which is
+  readable at once), and again after the plugin's async answer arrives (it
+  wraps `_zsh_autosuggest_async_response`). Regression:
+  `scripts/e2e-zle-longghost.py`.
 - **Empty-prompt prediction.** The prediction (§4) is still nerv's: the plugin
   never paints an empty line. It uses the plugin's
   `ZSH_AUTOSUGGEST_HIGHLIGHT_STYLE`, so it keeps one colour when you type

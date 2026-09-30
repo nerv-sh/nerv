@@ -824,6 +824,12 @@ fn spec_stem_from_path(path: &Path) -> Option<String> {
 /// engine wrote — see [`no_spec_binary`].
 pub const NO_SPEC_REASON_PREFIX: &str = "no spec for ";
 
+/// Icon on rows recalled from shell history (engine `History` template
+/// and the daemon's history rows). `!` is the shell's own history
+/// character (`!!`, `!git`); a row without one leaves a hole in the
+/// popup's icon column next to spec rows that carry `$`.
+pub const HISTORY_ICON: &str = "!";
+
 /// Recover the command name from a "no spec for …" reason. `None` for
 /// every other reason (empty input, quoted string, schema mismatch).
 pub fn no_spec_binary(reason: &str) -> Option<&str> {
@@ -2199,7 +2205,7 @@ fn emit_candidates_for_arg(
                         description: Some("history".into()),
                         kind: SuggestionKind::Argument,
                         priority: None,
-                        icon: None,
+                        icon: Some(HISTORY_ICON.into()),
                         source_ranked: false,
                         replace: None,
                     }),
@@ -2545,14 +2551,14 @@ fn emit_candidates_for_arg(
                         // higher-scored sibling (`zeph-to`) instead of the
                         // dir the user picked. `z <absolute-existing-dir>`
                         // cd's there exactly. Display stays the short name.
-                        for (rank, (name, path, score)) in rank_zoxide_matches(rows, prefix, mode)
+                        for (rank, (name, path, _score)) in rank_zoxide_matches(rows, prefix, mode)
                             .into_iter()
                             .enumerate()
                         {
                             out.push(Suggestion {
                                 insertion: shell_quote_arg(&path),
                                 display: name,
-                                description: Some(format!("{path} (score {score:.1})")),
+                                description: Some(path),
                                 kind: SuggestionKind::Argument,
                                 priority: Some(10_000u32.saturating_sub(rank as u32)),
                                 icon: None,
