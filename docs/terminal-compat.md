@@ -48,10 +48,11 @@
 | 커서를 컬럼 1 로 | `ESC [ G` | |
 | 라인 끝까지 지움 | `ESC [ K` (EL 0) | |
 | 화면 끝까지 지움 | `ESC [ J` (ED 0) | 팝업 영역 정리에만 |
-| 색상 (전경, 테마) | `ESC [ 39 m` · `ESC [ 90–97 m` | 기본 fg + ANSI 16색. zsh 팝업은 이것만 쓴다 — 사용자 테마를 따른다 |
+| 색상 (전경, 테마) | `ESC [ 39 m` · `ESC [ 90–97 m` | 기본 fg + ANSI 16색. zsh 팝업 항목 이름은 항상 기본 fg, `NERV_POPUP_THEME=native` 는 전부 이것만 쓴다 |
 | 색상 (전경) | `ESC [ 38 ; 5 ; <n> m` | 256색까지만, true color 미사용 |
-| 색상 (배경) | `ESC [ 48 ; 5 ; <n> m` | zsh 팝업은 배경을 칠하지 않는다 |
-| Bold | `ESC [ 1 m` | |
+| 색상 (배경) | `ESC [ 48 ; 5 ; <n> m` | zsh 팝업은 선택 바 한 행만 칠한다 (기본 보라 134 — `_nerv.zsh::__nerv_palette`). 박스 자체엔 배경 없음 |
+| Bold | `ESC [ 1 m` · `ESC [ 22 m` | 22 = bold 해제 |
+| Reverse | `ESC [ 7 m` | `NERV_POPUP_THEME=native` 의 선택 바 — 테마 bright magenta 를 뒤집어 그 행만 칠한다 |
 | Dim (회색) | `ESC [ 2 m` | E1 hint 등에 사용 |
 | 리셋 | `ESC [ 0 m` | |
 
@@ -156,7 +157,7 @@ prompt> git c█           │ ← 사용자 입력 라인     │
 ### 5.2 Apple Terminal.app
 
 - *알려진 이슈*: 256색 인덱스 일부가 다른 터미널과 RGB 매핑 다름.
-- 회피: 팝업은 256색 인덱스를 쓰지 않고 테마의 ANSI 16색(bright black · bright magenta)만 쓴다. 색상 의존 정보 표시 X — 선택 행은 색 외에 `›` 마커와 bold 로도 구분된다.
+- 회피: 기본 팔레트는 256색 인덱스 하나(134 보라 — 선택 바·매치 글자)만 쓰고, 테두리·아이콘·설명은 bright black, 항목 이름은 기본 fg 다. 매핑이 어긋나는 터미널은 `NERV_POPUP_THEME=native` (ANSI 16색만). 색상 의존 정보 표시 X — 선택 행은 색 외에 `›` 마커·bold 로도 구분된다.
 - *알려진 이슈*: `ESC [ K` 가 lazy 하게 적용되는 경우 있음.
 - 회피: 팝업 갱신 후 `flush()` 명시적 호출.
 

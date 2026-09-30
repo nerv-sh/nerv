@@ -854,11 +854,13 @@ fn engine_complete(
     let signals = ranking
         .history
         .map(|h| h.token_signals(&completed_words(before), cwd.unwrap_or(""), ranking.prev));
+    let mut history_words = std::collections::HashSet::new();
     if let Some(sig) = signals
         .as_deref()
         .filter(|_| wants_history_rows(&result.items, result.reason.as_deref()))
     {
         let extra = history_rows(sig, &result.items, partial_word(before), cwd_path);
+        history_words = extra.iter().map(|s| s.insertion.clone()).collect();
         result.items.extend(extra);
     }
     if result.items.is_empty() {
@@ -878,6 +880,12 @@ fn engine_complete(
             MAX_SUGGESTIONS,
         );
     }
+    // History rows follow the spec's own, as in Fig: they are words the
+    // spec does not know, so a spec row that ranks lower is still the
+    // likelier pick. Stable, so each group keeps its ranked order.
+    result
+        .items
+        .sort_by_key(|s| history_words.contains(&s.insertion));
     // Ranking already truncated to the transport cap (MAX_SUGGESTIONS).
     debug_assert!(result.items.len() <= MAX_SUGGESTIONS);
     Response::Suggestions {
@@ -947,7 +955,10 @@ const HISTORY_ROWS: usize = 5;
 /// not offer — `feature-x` after `git checkout` when no branch generator
 /// ran, a host typed after `ssh` that `~/.ssh/config` does not list. Only words that extend what is being typed,
 /// best frecency first, at most [`HISTORY_ROWS`]. Their rows read
-/// `history` and are ranked with the rest.
+/// `history`, are ranked with the rest and then placed after the spec's
+/// rows ([`engine_complete`]). A word that only ever came in failed runs
+/// (`yarn web:deployㅔ`, `yarn w\eb:deploy`), or only once in the imported
+/// zsh history, is a typo, not a pick.
 ///
 /// A relative path (`src/x.rs`) names a file in the directory it was
 /// typed in: it is offered only where it was typed or where it exists,
@@ -967,12 +978,18 @@ fn history_rows(
         .iter()
         .filter(|(key, t)| {
             !have.contains(key.as_str())
+                // A success nerv saw, or — among rows imported from the zsh
+                // history, which carry no exit status (nor a directory, so
+                // they are `count - in_dirs`) — a word typed more than once:
+                // a one-off there is as likely a typo.
+                && (t.ok > 0 || t.count.saturating_sub(t.in_dirs) >= 2)
                 && t.word.starts_with(partial)
                 && t.word != partial
-                // Quoting, expansions, control operators and redirections:
-                // the index splits on whitespace only, so these are pieces
-                // of a larger word (`'quoted`, `&&`, `>`, `main;make`).
-                && !t.word.contains(['\'', '"', '`', '$', ';', '|', '&', '<', '>', '(', ')'])
+                // Quoting (a backslash too), expansions, control operators
+                // and redirections: the index splits on whitespace only, so
+                // these are pieces of a larger word (`'quoted`, `My\` of
+                // `My\ Folder/`, `&&`, `>`, `main;make`).
+                && !t.word.contains(['\'', '"', '`', '\\', '$', ';', '|', '&', '<', '>', '(', ')'])
                 && (t.here > 0 || !is_relative_path(&t.word) || cwd.is_some_and(|d| d.join(&t.word).exists()))
         })
         .map(|(_, t)| {
@@ -990,6 +1007,7 @@ fn history_rows(
             insertion: w.to_string(),
             display: w.to_string(),
             description: Some("history".to_string()),
+            icon: Some(nerv_engine::complete::HISTORY_ICON.to_string()),
             kind: nerv_engine::SuggestionKind::Argument,
             ..Suggestion::default()
         })
@@ -1505,6 +1523,7 @@ mod tests {
             "f && make",
             "fix;make",
             "f > out.patch",
+            "fo\\ bar",
         ] {
             run(&history, &format!("git checkout {w}"), "/");
         }
@@ -1514,9 +1533,13 @@ mod tests {
         // Extends `f`, best first; `main` is already a spec row.
         assert_eq!(words, ["feature-x", "fix-y"]);
         assert_eq!(rows[0].description.as_deref(), Some("history"));
+        assert_eq!(
+            rows[0].icon.as_deref(),
+            Some(nerv_engine::complete::HISTORY_ICON)
+        );
         let all = history_rows(&sig, &[], "", None);
         // Quoted words, operators and redirections are never offered back.
-        let bad = |w: &str| w.contains(['\'', ';', '&', '>', '|']);
+        let bad = |w: &str| w.contains(['\'', ';', '&', '>', '|', '\\']);
         assert!(all.iter().all(|s| !bad(&s.insertion)), "{all:?}");
         assert!(all.len() <= HISTORY_ROWS);
     }
@@ -1562,6 +1585,88 @@ mod tests {
         words.sort_unstable();
         assert_eq!(words, ["/etc/hosts", "src/real.rs", "src/typed-here.rs"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A word only failed runs had is a typo or a gone script: never a
+    /// row. One success is enough — `git push` that was rejected once
+    /// and then went through stays.
+    #[test]
+    fn history_rows_skip_words_only_failed_runs_had() {
+        let history = HistoryStore::empty();
+        let failed = |command: &str| {
+            history
+                .record(nerv_engine::history::Entry {
+                    ts: nerv_engine::history::now_unix(),
+                    exit: 1,
+                    cwd: "/".into(),
+                    prev: String::new(),
+                    command: command.into(),
+                    expanded: String::new(),
+                })
+                .unwrap();
+        };
+        let imported = |command: &str| {
+            history
+                .record(nerv_engine::history::Entry {
+                    ts: nerv_engine::history::now_unix(),
+                    exit: 0,
+                    cwd: String::new(),
+                    prev: String::new(),
+                    command: command.into(),
+                    expanded: String::new(),
+                })
+                .unwrap();
+        };
+        failed("yarn web:deployㅔ");
+        failed("yarn web:deployㅔ");
+        failed("yarn web:start");
+        run(&history, "yarn web:start", "/");
+        // Imported rows have no status: once is a typo, twice a habit.
+        imported("yarn web:deploy:de");
+        imported("yarn web:test");
+        imported("yarn web:test");
+        let sig = history.token_signals(&completed_words("yarn we"), "/", "");
+        let rows = history_rows(&sig, &[], partial_word("yarn we"), None);
+        let mut words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
+        words.sort_unstable();
+        assert_eq!(words, ["web:start", "web:test"]);
+    }
+
+    /// History rows come after the spec's, whatever their score (Fig
+    /// orders them the same way): `cherry`, typed five times, still sits
+    /// below the spec's `checkout`.
+    #[test]
+    fn history_rows_follow_the_spec_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("git.json"),
+            r#"{"name":"git","subcommands":[{"name":"checkout"},{"name":"commit"}]}"#,
+        )
+        .expect("write spec");
+        let registry = SpecRegistry::at_dir(tmp.path());
+        let history = HistoryStore::empty();
+        for _ in 0..5 {
+            run(&history, "git cherry", "/");
+        }
+        run(&history, "git commit", "/");
+        let resp = engine_complete(
+            &registry,
+            Ranking {
+                frecency: &FrecencyStore::empty(),
+                history: Some(&history),
+                prev: "",
+            },
+            None,
+            "git c",
+            5,
+            Some("/"),
+            MatchMode::default(),
+        );
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected rows, got {resp:?}");
+        };
+        let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(words, ["commit", "checkout", "cherry"]);
     }
 
     #[test]

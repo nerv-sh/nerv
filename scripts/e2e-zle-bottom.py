@@ -91,7 +91,7 @@ def make_home():
 
 def expected_rows(total_items, sentinel):
     """What __nerv_show_popup builds: visible + 4 chrome + sentinel."""
-    max_vis = max(3, min(10, ROWS - 8))
+    max_vis = max(3, min(8, ROWS - 8))  # __nerv_max_vis
     return min(total_items, max_vis) + 4 + sentinel
 
 

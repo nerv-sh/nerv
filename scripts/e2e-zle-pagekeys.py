@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """E2E smoke for PageUp/PageDown popup paging (_nerv.zsh).
 
-Types `brew ` (20 subcommands in the fixture, window of 10 on a 40-row
+Types `brew ` (20 subcommands in the fixture, window of 8 on a 40-row
 terminal), then sends PageDown and asserts the `[k/total]` footer jumps
 by one window (1 -> 11) instead of one row, and PageUp returns to 1.
 
@@ -88,7 +88,7 @@ def main():
     rc = 1
     try:
         master, slave = pty.openpty()
-        # 40 rows -> MAX_VIS clamps to 10; brew has 20 subcommands.
+        # 40 rows -> MAX_VIS clamps to 8; brew has 20 subcommands.
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         proc = subprocess.Popen(
             ["/bin/zsh"],
@@ -125,12 +125,12 @@ def main():
         after_up = sentinel_counters(out)
         log(f"after PageUp: sentinel counters={after_up[-3:]}")
 
-        # PageDown from the sentinel jumps one window (10) → item 10;
+        # PageDown from the sentinel jumps one window (8) → item 8;
         # PageUp returns to the sentinel (bare [N]).
-        down_ok = bool(after_down) and after_down[-1] == (10, total)
+        down_ok = bool(after_down) and after_down[-1] == (8, total)
         up_ok = bool(after_up) and after_up[-1] == total
         if down_ok and up_ok:
-            log(f"PASS — sentinel → PageDown [10/{total}] → PageUp [{total}]")
+            log(f"PASS — sentinel → PageDown [8/{total}] → PageUp [{total}]")
             rc = 0
         else:
             log(f"FAIL — down_ok={down_ok} up_ok={up_ok}")

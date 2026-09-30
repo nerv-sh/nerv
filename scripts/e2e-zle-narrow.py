@@ -33,7 +33,8 @@ COLS = 38             # narrow window from the bug report screenshot
 ROWS = 24
 
 CSI_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]")
-ROW_RE = re.compile(rb"\x1b\[B\x1b\[(\d+)G(.*?)\x1b\[K", re.DOTALL)
+# The first row moves down past any wrapped ghost lines (`ESC[<n>B`).
+ROW_RE = re.compile(rb"\x1b\[\d*B\x1b\[(\d+)G(.*?)\x1b\[K", re.DOTALL)
 BOX_GLYPHS = ("│", "╭", "╰", "├")
 
 

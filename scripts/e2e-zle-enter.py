@@ -158,8 +158,13 @@ def main():
         os.write(master, b"c")
         out3 = pump(master, 1.5)
         kill(master, proc)
+        # The `›` marker sits only on a selected ITEM row (the sentinel row
+        # has none), and the counter shows only when the list overflows —
+        # so the marker, not `[1/N]`, is what proves an item is selected.
         item_footer = re.findall(rb"\[(\d+)/(\d+)\]", out3)
-        partial_selects_item = bool(item_footer) and item_footer[-1][0] == b"1"
+        partial_selects_item = "›".encode() in out3 and (
+            not item_footer or item_footer[-1][0] == b"1"
+        )
         # A filtered (partial) popup must NOT carry the sentinel row.
         no_sentinel_on_partial = b"Immediately execute" not in out3
         log(

@@ -65,10 +65,11 @@ cloud attached is now a local daemon and a zsh widget.
   suggestion. On an empty prompt it predicts the command you usually run next
   (`NERV_PREDICT=0` turns that off). Right-arrow accepts. The ranking follows
   [deja](https://github.com/Giammarco-Ferranti/deja).
-- **Looks like your terminal** — the popup has no background of its own and
-  uses only your terminal's 16 ANSI colors, so it matches dark and light
-  themes alike. The highlighted row gets a `›` marker and a bold name in your
-  theme's bright magenta.
+- **Readable popup** — a purple bar on the highlighted row and the letters
+  you typed marked in the same purple; no background of its own, names in
+  your terminal's text color, chrome in its grey, so dark and light themes
+  both read right. History rows sit below the spec's, and the row the grey
+  ghost text points at comes first.
 - **Frecency ranking** — rows you pick, or type by hand, float to the top,
   more so in the folder where you use them.
 - **Understands your shell** — completes through `alias g=git`, behind
@@ -118,7 +119,7 @@ token too; their names live in the daemon's memory only, never on disk.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="docs/assets/popup-light.png">
-    <img src="docs/assets/popup-dark.png" width="620" alt="The Nerv popup under the prompt after typing git and a space: an Immediately execute row, then git subcommands such as add, apply, archive and checkout with dimmed argument hints like [pathspec...], the apply row highlighted with a magenta marker, and a footer showing its description, Apply a patch to files and/or to the index, with the position 2/40">
+    <img src="docs/assets/popup-dark.png" width="620" alt="The Nerv popup under the prompt after typing git c: git subcommands checkout, cherry-pick, clean, clone, commit and config with the typed c marked in purple and dimmed argument hints like [pathspec...], the checkout row highlighted as a purple bar, and a footer showing its description, Switch branches or restore working tree files">
   </picture>
 </p>
 
@@ -317,10 +318,11 @@ also runs). Right-arrow accepts the grey ghost text. Every key is in
 [Using the popup](#using-the-popup).
 
 **Can I change the popup's colors?**
-The popup takes its colors from your terminal theme: the border and hints use
-the theme's "bright black" and the highlighted row its "bright magenta". Change
-those two colors in your terminal's settings and the popup follows. Nerv has
-no color setting of its own.
+The border, icons and hints use your terminal theme's "bright black", so they
+follow the theme. The bar and the matched letters are a fixed purple (256-color
+index 134). For a popup made only of your theme's 16 colors (a "bright
+magenta" bar), set `NERV_POPUP_THEME=native` before the `nerv init` line in
+your `~/.zshrc`.
 
 **What does Nerv record about the commands I run?**
 Each command you run, with its folder, exit status and the command before it,
