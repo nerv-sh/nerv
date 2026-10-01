@@ -882,10 +882,19 @@ fn engine_complete(
     }
     // History rows follow the spec's own, as in Fig: they are words the
     // spec does not know, so a spec row that ranks lower is still the
-    // likelier pick. Stable, so each group keeps its ranked order.
-    result
-        .items
-        .sort_by_key(|s| history_words.contains(&s.insertion));
+    // likelier pick. Within the spec's rows, folders that exist here lead
+    // (`cd ` → subfolders before `~` and `-`): a constant collects picks
+    // and runs from every directory, a folder only from this one, so a
+    // folder never entered would otherwise sit under the constants.
+    // Stable, so each group keeps its ranked order (`./`, `../` first).
+    // Cached key: one stat per row, not one per comparison.
+    result.items.sort_by_cached_key(|s| {
+        let history = history_words.contains(&s.insertion);
+        let folder_here = !history
+            && s.insertion.ends_with('/')
+            && cwd_path.is_some_and(|d| d.join(&s.insertion).is_dir());
+        (history, !folder_here)
+    });
     // Ranking already truncated to the transport cap (MAX_SUGGESTIONS).
     debug_assert!(result.items.len() <= MAX_SUGGESTIONS);
     Response::Suggestions {
@@ -1667,6 +1676,52 @@ mod tests {
         };
         let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(words, ["commit", "checkout", "cherry"]);
+    }
+
+    /// Regression (2026-10-01): `cd ` listed `~` and `-` above a subfolder
+    /// never cd'd into. Those two carry picks and runs from every
+    /// directory, while a folder that is only here has none, so a pure
+    /// score order buried it. Folders that exist here come first; the
+    /// score still orders within each group.
+    #[test]
+    fn folders_here_lead_the_spec_constants() {
+        let specs = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            specs.path().join("cd.json"),
+            r#"{"name":"cd","args":[{"suggestions":[{"name":"-"},{"name":"~"}],
+                "generators":[{"type":"filepaths","folders_only":true}]}]}"#,
+        )
+        .expect("write spec");
+        let cwd = tempfile::tempdir().expect("tempdir");
+        for d in ["alpha", "beta", "gamma"] {
+            std::fs::create_dir(cwd.path().join(d)).expect("mkdir");
+        }
+        let cwd_str = cwd.path().to_str().expect("utf-8 tempdir");
+        let frecency = FrecencyStore::empty();
+        let history = HistoryStore::empty();
+        for _ in 0..3 {
+            frecency.record("cd", "-");
+            run(&history, "cd ~", "/elsewhere");
+        }
+        run(&history, "cd beta/", cwd_str);
+        let resp = engine_complete(
+            &SpecRegistry::at_dir(specs.path()),
+            Ranking {
+                frecency: &frecency,
+                history: Some(&history),
+                prev: "",
+            },
+            None,
+            "cd ",
+            3,
+            Some(cwd_str),
+            MatchMode::default(),
+        );
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected rows, got {resp:?}");
+        };
+        let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(words, ["beta/", "alpha/", "gamma/", "-", "~"]);
     }
 
     #[test]

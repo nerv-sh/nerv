@@ -190,6 +190,7 @@ The weights are the ghost's (§3). Right after `git add .`, `commit` tops the
 - Typing `git status` by hand raises `status` just as picking it does.
 - Rows with no history keep the engine's order below the ones that have some.
 - `./` and `../` stay pinned to the top.
+- Folders that exist in the current directory come before the spec's other rows, each group still in score order. `cd ` lists the subfolders above `~` and `-`. Those two constants collect picks and runs from every directory, while a folder collects them only here, so a folder never entered would otherwise sit below them.
 - zoxide's rows keep zoxide's own order.
 
 **History rows.** The history can also add rows the spec does not have,

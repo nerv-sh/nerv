@@ -53,6 +53,7 @@ async fn ipc_roundtrip_p95_under_threshold() {
         .env("NERV_PID", &pid_path)
         .env("NERV_SPECS_DIR", &specs_dir)
         .env("NERV_FRECENCY_FILE", "-")
+        .env("NERV_HISTORY_FILE", "-")
         .env("NERV_MISSES_FILE", "-")
         // Never scan the developer\'s real PATH: command-name rows would
         // vary by machine.
@@ -156,6 +157,7 @@ async fn ipc_roundtrip_p95_with_shell_names_under_threshold() {
         .env("NERV_PID", &pid_path)
         .env("NERV_SPECS_DIR", &specs_dir)
         .env("NERV_FRECENCY_FILE", "-")
+        .env("NERV_HISTORY_FILE", "-")
         .env("NERV_MISSES_FILE", "-")
         .env("NERV_PATH_SCAN", "0")
         .env("NERV_LOG", "warn")
