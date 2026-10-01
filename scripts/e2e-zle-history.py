@@ -150,6 +150,25 @@ def check_record(e):
     return ok
 
 
+def check_cd_cwd(e):
+    # A row's cwd is where the command was typed, not where it left the
+    # shell: `cd sub/` typed in work is a work row, or the popup's
+    # directory signal never learns which folders you enter from here.
+    os.makedirs(os.path.join(e.work, "sub"), exist_ok=True)
+    sh = e.shell()
+    try:
+        run(sh, "cd sub/")
+        run(sh, "cd ..")
+    finally:
+        sh.close()
+    ok = wait_for(lambda: commands(e.home)[-2:] == ["cd sub/", "cd .."])
+    rs = rows(e.home)[-2:]
+    ok = ok and rs[0][2] == e.work and rs[1][2] == os.path.join(e.work, "sub")
+    if not ok:
+        log(f"  rows: {rs} work={e.work}")
+    return ok
+
+
 def check_privacy(e):
     sh = e.shell()
     try:
@@ -832,6 +851,7 @@ SCENARIOS = [
      dict(AUTOSUGGEST_ENV, pre_rc=AUTOSUGGEST_STUB)),
     ("autosuggest-notice-once", check_autosuggest_notice_once,
      {"pre_rc": "[[ -n $NERV_E2E_NO_PLUGIN ]] || " + AUTOSUGGEST_STUB}),
+    ("cd-cwd", check_cd_cwd, {}),
     ("ranked-nothing-wins", check_ranked_nothing_wins,
      {"histfile_lines": ["ls -la zzsecretdir"], "history_rows": [("echo unrelated", "", "")]}),
 ]
