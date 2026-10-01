@@ -1931,13 +1931,15 @@ autoload -Uz add-zsh-hook 2>/dev/null && {
 # Command history behind the history-ranked ghost (docs/history-suggestions.md).
 # preexec keeps the line as typed ($1, leading whitespace intact) and
 # zsh's alias-expanded form ($3); precmd sends both with the exit status
-# and the command before it. What zsh itself would not remember never
+# and the command before it. The directory is the one the command was
+# typed in, read at preexec: `cd sub/` belongs to where you typed it,
+# not to sub/. What zsh itself would not remember never
 # leaves the shell: a leading space under hist_ignore_space, or a match
 # for HISTORY_IGNORE. Such a command also breaks the chain — it is not
 # kept as the next command's predecessor, and no adjacency is invented
 # across it. Command text travels on stdin, never argv (`ps` shows argv
 # to every user). `&!` disowns, so no job notice lands on the prompt.
-typeset -g __NERV_LAST_CMD="" __NERV_LAST_EXP="" __NERV_PREV_CMD=""
+typeset -g __NERV_LAST_CMD="" __NERV_LAST_EXP="" __NERV_LAST_CWD="" __NERV_PREV_CMD=""
 typeset -gi __NERV_IMPORT_TRIED=0
 __nerv_history_ignored() {
   # No history file (never set, `unset HISTFILE`, `fc -p`, /dev/null):
@@ -1958,7 +1960,7 @@ __nerv_preexec() {
     __NERV_LAST_CMD="" __NERV_PREV_CMD=""
     return
   fi
-  __NERV_LAST_CMD=$1 __NERV_LAST_EXP=$3
+  __NERV_LAST_CMD=$1 __NERV_LAST_EXP=$3 __NERV_LAST_CWD=${PWD:A}
 }
 __nerv_precmd_record() {
   local -i ec=$?
@@ -1981,9 +1983,9 @@ __nerv_precmd_record() {
   # appends the file itself if need be. A daemon from before the text protocol drops a socket record (the
   # widget notices at the next read and forks from then on) — one row, once.
   if (( ${#cmd} + ${#__NERV_LAST_EXP} + ${#__NERV_PREV_CMD} >= 60000 )) \
-     || ! __nerv_sock_send record "$cmd" "$__NERV_LAST_EXP" "${PWD:A}" $ec "$__NERV_PREV_CMD"; then
+     || ! __nerv_sock_send record "$cmd" "$__NERV_LAST_EXP" "$__NERV_LAST_CWD" $ec "$__NERV_PREV_CMD"; then
     print -rN -- "$cmd" "$__NERV_LAST_EXP" "$__NERV_PREV_CMD" \
-      | "$__NERV_BIN" _record-cmd --cwd "${PWD:A}" --exit $ec >/dev/null 2>&1 &!
+      | "$__NERV_BIN" _record-cmd --cwd "$__NERV_LAST_CWD" --exit $ec >/dev/null 2>&1 &!
   fi
   __NERV_PREV_CMD=$cmd
   __NERV_LAST_CMD=""

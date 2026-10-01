@@ -16,7 +16,7 @@ line and `precmd` sends it:
 |---|---|
 | command | preexec `$1`, the line as typed. The ghost offers this text back. |
 | expanded | preexec `$3`, zsh's alias-expanded form. Empty when it equals `command`. |
-| cwd | `$PWD` at the prompt after the command. |
+| cwd | `$PWD` when the command started (preexec), the directory it was typed in. `cd sub/` is a row of the directory you typed it in, not of `sub/`. |
 | exit | `$?`, read on the first line of the hook. |
 | prev | The command run before this one in the same shell. |
 | ts | The daemon's clock when the row arrives. |
