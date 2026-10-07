@@ -971,7 +971,8 @@ const HISTORY_ROWS: usize = 5;
 ///
 /// A relative path (`src/x.rs`) names a file in the directory it was
 /// typed in: it is offered only where it was typed or where it exists,
-/// or it would outrank the files that are really here.
+/// or it would outrank the files that are really here. A word written as
+/// a folder (`build/`) is offered only while that folder exists.
 fn history_rows(
     signals: &nerv_engine::history::TokenSignals,
     items: &[Suggestion],
@@ -982,7 +983,7 @@ fn history_rows(
     let have: std::collections::HashSet<&str> =
         items.iter().map(|s| token_key(&s.insertion)).collect();
     let now = nerv_engine::history::now_unix();
-    let mut words: Vec<(f64, &str)> = signals
+    let mut words: Vec<(f64, &nerv_engine::history::TokenStat)> = signals
         .tokens
         .iter()
         .filter(|(key, t)| {
@@ -999,22 +1000,19 @@ fn history_rows(
                 // these are pieces of a larger word (`'quoted`, `My\` of
                 // `My\ Folder/`, `&&`, `>`, `main;make`).
                 && !t.word.contains(['\'', '"', '`', '\\', '$', ';', '|', '&', '<', '>', '(', ')'])
-                && (t.here > 0 || !is_relative_path(&t.word) || cwd.is_some_and(|d| d.join(&t.word).exists()))
         })
-        .map(|(_, t)| {
-            (
-                nerv_engine::history::frecency(t.count, t.last, now),
-                t.word.as_str(),
-            )
-        })
+        .map(|(_, t)| (nerv_engine::history::frecency(t.count, t.last, now), t))
         .collect();
-    words.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(b.1)));
+    words.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.word.cmp(&b.1.word)));
     words
         .into_iter()
+        // The disk is asked last and lazily: a stat for the few best
+        // words, not for every word the history holds.
+        .filter(|(_, t)| applies_here(t, cwd))
         .take(HISTORY_ROWS)
-        .map(|(_, w)| Suggestion {
-            insertion: w.to_string(),
-            display: w.to_string(),
+        .map(|(_, t)| Suggestion {
+            insertion: t.word.clone(),
+            display: t.word.clone(),
             description: Some("history".to_string()),
             icon: Some(nerv_engine::complete::HISTORY_ICON.to_string()),
             kind: nerv_engine::SuggestionKind::Argument,
@@ -1027,6 +1025,26 @@ fn history_rows(
 /// it has a `/`, and does not start at `/` or `~`.
 fn is_relative_path(word: &str) -> bool {
     word.contains('/') && !word.starts_with(['/', '~'])
+}
+
+/// Whether a history word still means something in `cwd`.
+///
+/// A word written as a folder (`build/`, `/tmp/out/`) must be one now:
+/// the source of an `mv` or `rm -r` that went through is gone, even
+/// where it was typed. Only the trailing `/` is trusted to say "folder" —
+/// `feature/x` or `org/image` may be a branch or an image, and a file
+/// typed before it exists (`touch new/x`) is a path too. `~/…` is not
+/// checked (the shell expands it, this does not), nor a word with a `:`
+/// (a URL, a remote path such as `host:backup/`).
+///
+/// Any other relative path applies where it was typed or where it exists.
+fn applies_here(t: &nerv_engine::history::TokenStat, cwd: Option<&std::path::Path>) -> bool {
+    let word = t.word.as_str();
+    let local_folder = word.ends_with('/') && !word.starts_with('~') && !word.contains(':');
+    match cwd {
+        Some(dir) if local_folder => dir.join(word).is_dir(),
+        _ => t.here > 0 || !is_relative_path(word) || cwd.is_some_and(|d| d.join(word).exists()),
+    }
 }
 
 /// The finished words of the command being completed: `["git"]` for
@@ -1594,6 +1612,49 @@ mod tests {
         words.sort_unstable();
         assert_eq!(words, ["/etc/hosts", "src/real.rs", "src/typed-here.rs"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Regression (2026-10-07): `mv kno` listed folders that had been moved
+    /// away. A folder typed here as the source of an `mv` or `rm` is gone
+    /// once the command succeeds, yet "typed here" kept offering it.
+    #[test]
+    fn history_rows_drop_folders_that_are_gone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("knowledge-kept")).unwrap();
+        let here = tmp.path().to_string_lossy().into_owned();
+        let history = HistoryStore::empty();
+        run(&history, "mv knowledge-moved/ elsewhere/", &here);
+        run(&history, "mv knowledge-kept/ elsewhere/", &here);
+        let sig = history.token_signals(&["mv"], &here, "");
+        let rows = history_rows(&sig, &[], "kno", Some(tmp.path()));
+        let words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(words, ["knowledge-kept/"]);
+    }
+
+    /// Only a local folder is checked against the disk: a branch, a remote
+    /// path and a URL name nothing here and are still offered.
+    #[test]
+    fn history_rows_keep_words_that_are_not_local_folders() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let here = tmp.path().to_string_lossy().into_owned();
+        let history = HistoryStore::empty();
+        run(&history, "sync feature/x", &here);
+        run(&history, "sync host:backup/", &here);
+        run(&history, "sync https://example.com/", &here);
+        run(&history, "sync ~/gone/", &here);
+        let sig = history.token_signals(&["sync"], &here, "");
+        let rows = history_rows(&sig, &[], "", Some(tmp.path()));
+        let mut words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
+        words.sort_unstable();
+        assert_eq!(
+            words,
+            [
+                "feature/x",
+                "host:backup/",
+                "https://example.com/",
+                "~/gone/"
+            ]
+        );
     }
 
     /// A word only failed runs had is a typo or a gone script: never a
