@@ -405,6 +405,19 @@ impl HistoryStore {
     /// on frecency alone and collects the few a directory or sequence
     /// boost could lift above it; only those are fully scored.
     pub fn ghost(&self, typed: &str, cwd: &str, prev: &str) -> Option<String> {
+        self.ghost_where(typed, cwd, prev, |_| true)
+    }
+
+    /// [`Self::ghost`] among the commands `accept` lets through — the
+    /// caller's reasons a recorded line no longer applies (a path in it
+    /// that is gone). Asked once per candidate, before any scoring.
+    pub fn ghost_where(
+        &self,
+        typed: &str,
+        cwd: &str,
+        prev: &str,
+        accept: impl Fn(&str) -> bool,
+    ) -> Option<String> {
         if typed.is_empty() {
             return None;
         }
@@ -433,7 +446,7 @@ impl HistoryStore {
                 break;
             }
             let st = a.stats[id as usize];
-            if st.count == 0 || st.no_ghost || s.len() == typed.len() {
+            if st.count == 0 || st.no_ghost || s.len() == typed.len() || !accept(s) {
                 continue;
             }
             let key = st.key;

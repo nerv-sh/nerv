@@ -99,6 +99,15 @@ These are deja's weights. Its fuzzy term drops out because a ghost only ever
 extends the typed text. The command-head term is nerv's own. Without it,
 `git add .` and `git add src/x.rs` would be unrelated predecessors.
 
+**A line whose path is gone is skipped.** The word at the cursor, as each
+candidate line continues it, is held to the same rule as a history row (§5,
+"History rows"): where the spec expects a path, or where the word ends in `/`,
+it has to exist. After `mv ` the ghost is the best line whose source is still
+here, and none when there is none. Only that one word is judged. Later words
+are not: a target that does not exist yet is how `mv a b` should look. While
+the command word itself is being typed (`mv`, no space yet) nothing is judged,
+since no argument is at the cursor.
+
 **What the widget sends.** With each keystroke's completion request the widget
 sends:
 
@@ -201,7 +210,7 @@ for example a branch no generator listed after `git checkout`, or a host typed a
 - only words that extend what is being typed;
 - never a word the spec already offers, and never one holding a quote, a backtick, `$`, a control operator or a redirection (`;|&<>()`); the history index splits on whitespace, so such a word is a piece of something larger;
 - a relative path (`src/x.rs`: a `/`, not starting at `/` or `~`) only where it was typed or where it exists, since it names a file in the directory it was typed in;
-- a path only while it exists, even where it was typed: the source of an `mv` or `rm -r` that succeeded is gone. Two things say "path". The spec, for the argument at the cursor (a `filepaths`/`folders` argument, as after `mv`, `cd`, `vim`): every word there is one, whatever it looks like (`mv old-name`). Or a trailing `/` (`build/`), which must be a folder, in any position. Never checked: an option (`-v`), `~/…`, a glob, and a word with a `:` (a URL, `host:backup/`). An argument that also has another source is not a path argument: `git checkout` lists branches;
+- a path only while it exists, even where it was typed: the source of an `mv` or `rm -r` that succeeded is gone. Two things say "path". The spec, for the argument at the cursor (a `filepaths`/`folders` argument, as after `mv`, `cd`, `vim`): every word there is one, whatever it looks like (`mv old-name`). Or a trailing `/` (`build/`), which must be a folder, in any position. `~/x` is looked up under the home directory. Never checked: an option (`-v`), `~user/…`, a glob, a quoted or escaped word, one with a `$`, and a word with a `:` (a URL, `host:backup/`). An argument that also has another source is not a path argument: `git checkout` lists branches;
 - each reads `history` and is ranked with the rest.
 
 There are no history rows next to a command-word correction, which the widget
