@@ -201,6 +201,7 @@ for example a branch no generator listed after `git checkout`, or a host typed a
 - only words that extend what is being typed;
 - never a word the spec already offers, and never one holding a quote, a backtick, `$`, a control operator or a redirection (`;|&<>()`); the history index splits on whitespace, so such a word is a piece of something larger;
 - a relative path (`src/x.rs`: a `/`, not starting at `/` or `~`) only where it was typed or where it exists, since it names a file in the directory it was typed in;
+- a word written as a folder (a trailing `/`: `build/`) only while that folder exists, even where it was typed: the source of an `mv` or `rm -r` that succeeded is gone. `~/…` and a word with a `:` (a URL, `host:backup/`) are not checked;
 - each reads `history` and is ranked with the rest.
 
 There are no history rows next to a command-word correction, which the widget
