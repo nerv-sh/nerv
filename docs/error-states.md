@@ -288,6 +288,10 @@ THEN:
                         → add a spec in ~/.config/nerv/specs
 ```
 
+- **실행할 수 있는 명령만 센다**: 명령 단어가 데몬의 `$PATH` 에 있는 실행 파일일 때만 집계한다.
+  붙여 넣은 코드(`const x = …`)나 난타(`asdasd`)도 명령 단어로 들어오지만 spec 이 빠진 게
+  아니다 (실측 2026-10-07: 상위 행이 `const 117`, `asdasd 12`, `sZdas 8`). 판정은 miss 가
+  확정될 때 디스크에 한 번 묻는다 — 이름 캐시가 꺼져 있어도(`NERV_PATH_SCAN=0`) 같다.
 - **로컬 전용**: 파일은 캐시 디렉터리 안에만 존재하고 어디로도 전송되지 않는다
   (PLAN §4 비목표 = 텔레메트리). `nerv uninstall` 이 캐시와 함께 삭제
   (uninstall-spec §2 행 5). 테스트/벤치 격리는 `NERV_MISSES_FILE=-`.

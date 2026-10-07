@@ -441,7 +441,11 @@ async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response
                     } = &resp
                     {
                         if let Some(binary) = no_spec_binary(r) {
-                            if !registry.is_loading(binary) {
+                            // Only a command that can be run: pasted code
+                            // (`const x = …`) and mashed keys reach here
+                            // as command words too, and a spec for them
+                            // is not what is missing.
+                            if !registry.is_loading(binary) && on_path(binary) {
                                 misses.record(binary);
                                 misses.flush_if_dirty();
                             }
@@ -948,16 +952,40 @@ fn attach_ghost(
     // The word at the cursor, as each candidate line continues it: the
     // one path the spec has just vouched for. Later words are not judged
     // — a target that does not exist yet is how `mv a b` should look.
-    let word_at = typed.len() - partial_word(typed).len();
+    // While the command word is being typed no argument is at the cursor,
+    // so the word after it is judged instead, on its trailing `/` alone
+    // (`cd gone/`): no spec has been read for it.
+    let word_at = last_word_start(typed);
+    let command_word = !typed.contains(char::is_whitespace);
     let dir = std::path::Path::new(cwd);
+    let exists = |word: &str, path_arg| path_exists(word, dir, path_arg) != Some(false);
     let found = history
         .ghost_where(typed, cwd, prev, |line| {
-            let word = line[word_at..].split(char::is_whitespace).next();
-            cwd.is_empty() || word.and_then(|w| path_exists(w, dir, path_arg)) != Some(false)
+            use nerv_engine::history::leading_word;
+            let (word, len) = leading_word(&line[word_at..]);
+            cwd.is_empty()
+                || (exists(&word, path_arg)
+                    && (!command_word
+                        || exists(&leading_word(line[word_at + len..].trim_start()).0, false)))
         })
         .unwrap_or_default();
     if let Response::Suggestions { ghost, .. } | Response::Empty { ghost, .. } = resp {
         *ghost = Some(found);
+    }
+}
+
+/// Where the word being typed starts in `typed` — its length when the
+/// line ends in whitespace. Read as the shell does, so the word of
+/// `cd My\ Fo` starts at `My`, not at `Fo`.
+fn last_word_start(typed: &str) -> usize {
+    let mut at = 0;
+    loop {
+        at += typed[at..].len() - typed[at..].trim_start().len();
+        let (_, len) = nerv_engine::history::leading_word(&typed[at..]);
+        if at + len >= typed.len() {
+            return at;
+        }
+        at += len;
     }
 }
 
@@ -981,6 +1009,25 @@ fn partial_word(before_cursor: &str) -> &str {
         .next()
         .unwrap_or("");
     word.rsplit([';', '|', '&']).next().unwrap_or(word)
+}
+
+/// Whether `name` is an executable in one of `$PATH`'s directories. Asked
+/// of the disk, not of the name cache: this runs once per settled miss,
+/// and the cache can be off (`NERV_PATH_SCAN=0`).
+fn on_path(name: &str) -> bool {
+    std::env::var("PATH").is_ok_and(|path| on_path_in(name, &path))
+}
+
+fn on_path_in(name: &str, path_var: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    !name.is_empty()
+        && !name.contains('/')
+        && nerv_engine::complete::path_dirs(path_var)
+            .iter()
+            .any(|dir| {
+                std::fs::metadata(dir.join(name))
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            })
 }
 
 /// Whether history rows may join this reply. Three replies are contracts
@@ -1037,10 +1084,13 @@ fn history_rows(
                 && (t.ok > 0 || t.count.saturating_sub(t.in_dirs) >= 2)
                 && t.word.starts_with(partial)
                 && t.word != partial
-                // Quoting (a backslash too), expansions, control operators
-                // and redirections: the index splits on whitespace only, so
-                // these are pieces of a larger word (`'quoted`, `My\` of
-                // `My\ Folder/`, `&&`, `>`, `main;make`).
+                // An option is offered by the spec, where it applies: among
+                // the arguments (`git checkout ` → `-b`) it is noise.
+                && (!t.word.starts_with('-') || partial.starts_with('-'))
+                // Quoting, expansions, control operators and redirections:
+                // the index reads backslash escapes and nothing else, so
+                // these are pieces of a larger word (`'quoted`, `&&`, `>`,
+                // `main;make`). A backslash left over is a literal one.
                 && !t.word.contains(['\'', '"', '`', '\\', '$', ';', '|', '&', '<', '>', '(', ')'])
         })
         .map(|(_, t)| (nerv_engine::history::frecency(t.count, t.last, now), t))
@@ -1050,7 +1100,7 @@ fn history_rows(
         .into_iter()
         // The disk is asked last and lazily: a stat for the few best
         // words, not for every word the history holds.
-        .filter(|(_, t)| applies_here(t, cwd, path_arg))
+        .filter(|(_, t)| !cut_short(t, signals, items) && applies_here(t, cwd, path_arg))
         .take(HISTORY_ROWS)
         .map(|(_, t)| Suggestion {
             insertion: t.word.clone(),
@@ -1067,6 +1117,24 @@ fn history_rows(
 /// it has a `/`, and does not start at `/` or `~`.
 fn is_relative_path(word: &str) -> bool {
     word.contains('/') && !word.starts_with(['/', '~'])
+}
+
+/// A word that a much likelier candidate extends — `de` next to
+/// `develop`, from `git checkout de` sent before the name was finished.
+/// "Much likelier" is a history word run at least three times as often,
+/// or, for a word run once, a row the spec offers. Two names in real use
+/// (`dev` 5 runs, `develop` 10) both stay.
+fn cut_short(
+    t: &nerv_engine::history::TokenStat,
+    signals: &nerv_engine::history::TokenSignals,
+    items: &[Suggestion],
+) -> bool {
+    let extends = |other: &str| other.len() > t.word.len() && other.starts_with(&t.word);
+    (t.count == 1 && items.iter().any(|s| extends(&s.insertion)))
+        || signals
+            .tokens
+            .values()
+            .any(|o| o.count >= t.count.saturating_mul(3) && extends(&o.word))
 }
 
 /// Whether a history word still means something in `cwd`: a path must
@@ -1096,9 +1164,9 @@ fn applies_here(
 ///   image.
 ///
 /// `~/x` is looked up under `$HOME`. Never judged: an option (`-v`);
-/// `~user/…`, a glob, a quoted or escaped word and one with a `$` (the
-/// shell rewrites them, this does not); a word with a `:` (a URL,
-/// `host:backup/`).
+/// `~user/…`, a glob, a quoted word and one with a `$` (the shell
+/// rewrites them, this does not); a word with a `:` (a URL,
+/// `host:backup/`). `word` is unescaped (`My Folder/`).
 fn path_exists(word: &str, dir: &std::path::Path, path_arg: bool) -> Option<bool> {
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     path_exists_from(word, dir, home.as_deref(), path_arg)
@@ -1644,8 +1712,10 @@ mod tests {
             false,
         );
         let words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
-        // Extends `f`, best first; `main` is already a spec row.
-        assert_eq!(words, ["feature-x", "fix-y"]);
+        // Extends `f`, best first; `main` is already a spec row. An
+        // escaped space is read as the shell reads it: one word, offered
+        // unescaped like a row listed from disk (the widget quotes it).
+        assert_eq!(words, ["feature-x", "fix-y", "fo bar"]);
         assert_eq!(rows[0].description.as_deref(), Some("history"));
         assert_eq!(
             rows[0].icon.as_deref(),
@@ -1845,7 +1915,6 @@ mod tests {
         run(&history, "mv gone.txt elsewhere", &here);
         run(&history, "mv gone-folder elsewhere", &here);
         run(&history, "mv kept.txt elsewhere", &here);
-        run(&history, "mv -v x y", &here);
         let resp = engine_complete(
             &registry,
             Ranking {
@@ -1864,7 +1933,7 @@ mod tests {
         };
         let mut words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
         words.sort_unstable();
-        assert_eq!(words, ["-v", "kept.txt", "mv.json"]);
+        assert_eq!(words, ["kept.txt", "mv.json"]);
     }
 
     /// Regression (2026-10-07): the grey ghost after `mv ` was a line
@@ -1910,6 +1979,103 @@ mod tests {
         // Mid-word too, and "nothing" is an answer: no line is left.
         assert_eq!(ghost_for("mv k").as_deref(), Some("mv kept.txt elsewhere"));
         assert_eq!(ghost_for("mv g").as_deref(), Some(""));
+    }
+
+    /// An option typed after the command is not an argument to offer
+    /// (`git checkout ` → `-b`), until an option is what is being typed.
+    /// A word sent before it was finished (`de`, once) is not offered
+    /// next to the name it was heading for.
+    #[test]
+    fn history_rows_skip_options_and_words_cut_short() {
+        let history = HistoryStore::empty();
+        run(&history, "git checkout -b topic", "/");
+        run(&history, "git checkout de push", "/");
+        run(&history, "git checkout de", "/");
+        for _ in 0..6 {
+            run(&history, "git checkout develop", "/");
+        }
+        run(&history, "git checkout dev", "/");
+        run(&history, "git checkout ma", "/");
+        let words = |partial: &str, items: &[Suggestion]| {
+            let sig = history.token_signals(&["git", "checkout"], "/", "");
+            let mut w: Vec<String> = history_rows(&sig, items, partial, None, false)
+                .into_iter()
+                .map(|s| s.insertion)
+                .collect();
+            w.sort_unstable();
+            w
+        };
+        // `de` ran twice, `dev` once, and `develop`, run six times,
+        // extends both; `ma` ran once and the spec's `main` extends it.
+        assert_eq!(words("", &[sugg("main")]), ["develop"]);
+        assert_eq!(words("-", &[]), ["-b"]);
+        // Two names in real use: neither is three times the other.
+        let both = HistoryStore::empty();
+        for _ in 0..5 {
+            run(&both, "git checkout dev", "/");
+        }
+        for _ in 0..10 {
+            run(&both, "git checkout develop", "/");
+        }
+        let sig = both.token_signals(&["git", "checkout"], "/", "");
+        assert_eq!(history_rows(&sig, &[], "", None, false).len(), 2);
+    }
+
+    /// A miss is a command that exists and has no spec. Pasted code and
+    /// mashed keys are command words too, and are not on `$PATH`.
+    #[test]
+    fn only_a_runnable_command_is_a_spec_miss() {
+        let bin = tempfile::tempdir().expect("tempdir");
+        let tool = bin.path().join("sometool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::write(bin.path().join("notes"), "").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("/nonexistent:{}", bin.path().display());
+        assert!(on_path_in("sometool", &path));
+        assert!(!on_path_in("notes", &path), "not executable");
+        assert!(!on_path_in("const", &path));
+        assert!(!on_path_in("window.__au", &path));
+        assert!(!on_path_in("./sometool", &path));
+        assert!(!on_path_in("", &path));
+    }
+
+    /// While the command word itself is typed, a line whose next word is
+    /// a folder that is gone is not the ghost; and the word being typed
+    /// is read with its escaped spaces.
+    #[test]
+    fn ghost_judges_the_folder_after_the_command_word() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(tmp.path().join("kept")).unwrap();
+        std::fs::create_dir(tmp.path().join("My Folder")).unwrap();
+        let here = tmp.path().to_string_lossy().into_owned();
+        let history = HistoryStore::empty();
+        for _ in 0..3 {
+            run(&history, "cd gone/", &here);
+        }
+        run(&history, "cd kept/", &here);
+        run(&history, "ls My\\ Folder/", &here);
+        let ghost_for = |typed: &str| {
+            let mut resp = Response::Empty {
+                reason: None,
+                unspecced: false,
+                ghost: None,
+            };
+            attach_ghost(&mut resp, &history, typed, &here, "", false);
+            match resp {
+                Response::Empty { ghost, .. } => ghost,
+                other => panic!("unexpected {other:?}"),
+            }
+        };
+        assert_eq!(ghost_for("cd").as_deref(), Some("cd kept/"));
+        assert_eq!(ghost_for("c").as_deref(), Some("cd kept/"));
+        assert_eq!(ghost_for("ls My\\ Fo").as_deref(), Some("ls My\\ Folder/"));
+        assert_eq!(last_word_start("ls My\\ Fo"), 3);
+        assert_eq!(last_word_start("ls "), 3);
+        assert_eq!(last_word_start("ls"), 0);
+        assert_eq!(last_word_start(""), 0);
     }
 
     /// `~/x` is a path under the home directory, wherever it is typed.
