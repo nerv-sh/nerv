@@ -859,7 +859,13 @@ fn engine_complete(
         .as_deref()
         .filter(|_| wants_history_rows(&result.items, result.reason.as_deref()))
     {
-        let extra = history_rows(sig, &result.items, partial_word(before), cwd_path);
+        let extra = history_rows(
+            sig,
+            &result.items,
+            partial_word(before),
+            cwd_path,
+            result.path_arg,
+        );
         history_words = extra.iter().map(|s| s.insertion.clone()).collect();
         result.items.extend(extra);
     }
@@ -978,6 +984,7 @@ fn history_rows(
     items: &[Suggestion],
     partial: &str,
     cwd: Option<&std::path::Path>,
+    path_arg: bool,
 ) -> Vec<Suggestion> {
     use nerv_engine::history::token_key;
     let have: std::collections::HashSet<&str> =
@@ -1008,7 +1015,7 @@ fn history_rows(
         .into_iter()
         // The disk is asked last and lazily: a stat for the few best
         // words, not for every word the history holds.
-        .filter(|(_, t)| applies_here(t, cwd))
+        .filter(|(_, t)| applies_here(t, cwd, path_arg))
         .take(HISTORY_ROWS)
         .map(|(_, t)| Suggestion {
             insertion: t.word.clone(),
@@ -1029,20 +1036,29 @@ fn is_relative_path(word: &str) -> bool {
 
 /// Whether a history word still means something in `cwd`.
 ///
-/// A word written as a folder (`build/`, `/tmp/out/`) must be one now:
-/// the source of an `mv` or `rm -r` that went through is gone, even
-/// where it was typed. Only the trailing `/` is trusted to say "folder" —
-/// `feature/x` or `org/image` may be a branch or an image, and a file
-/// typed before it exists (`touch new/x`) is a path too. `~/…` is not
-/// checked (the shell expands it, this does not), nor a word with a `:`
-/// (a URL, a remote path such as `host:backup/`).
+/// A word that is a path must name something now: the source of an `mv`
+/// or `rm -r` that went through is gone, even where it was typed. Two
+/// things say "path":
+/// - the spec, for the argument at the cursor (`path_arg`): every word
+///   there is one, whatever it looks like (`mv old-name`);
+/// - a trailing `/` (`build/`, `/tmp/out/`), which must be a folder.
+///   Anywhere else `feature/x` or `org/image` may be a branch or an
+///   image, and is not checked.
+///
+/// Never checked: an option (`-v`), `~/…` and a glob (the shell expands
+/// them, this does not), a word with a `:` (a URL, `host:backup/`).
 ///
 /// Any other relative path applies where it was typed or where it exists.
-fn applies_here(t: &nerv_engine::history::TokenStat, cwd: Option<&std::path::Path>) -> bool {
+fn applies_here(
+    t: &nerv_engine::history::TokenStat,
+    cwd: Option<&std::path::Path>,
+    path_arg: bool,
+) -> bool {
     let word = t.word.as_str();
-    let local_folder = word.ends_with('/') && !word.starts_with('~') && !word.contains(':');
+    let local = !word.starts_with(['~', '-']) && !word.contains([':', '*', '?', '[', '{']);
     match cwd {
-        Some(dir) if local_folder => dir.join(word).is_dir(),
+        Some(dir) if local && word.ends_with('/') => dir.join(word).is_dir(),
+        Some(dir) if local && path_arg => dir.join(word).exists(),
         _ => t.here > 0 || !is_relative_path(word) || cwd.is_some_and(|d| d.join(word).exists()),
     }
 }
@@ -1555,7 +1571,13 @@ mod tests {
             run(&history, &format!("git checkout {w}"), "/");
         }
         let sig = history.token_signals(&completed_words("git checkout f"), "/", "");
-        let rows = history_rows(&sig, &[sugg("main")], partial_word("git checkout f"), None);
+        let rows = history_rows(
+            &sig,
+            &[sugg("main")],
+            partial_word("git checkout f"),
+            None,
+            false,
+        );
         let words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
         // Extends `f`, best first; `main` is already a spec row.
         assert_eq!(words, ["feature-x", "fix-y"]);
@@ -1564,7 +1586,7 @@ mod tests {
             rows[0].icon.as_deref(),
             Some(nerv_engine::complete::HISTORY_ICON)
         );
-        let all = history_rows(&sig, &[], "", None);
+        let all = history_rows(&sig, &[], "", None, false);
         // Quoted words, operators and redirections are never offered back.
         let bad = |w: &str| w.contains(['\'', ';', '&', '>', '|', '\\']);
         assert!(all.iter().all(|s| !bad(&s.insertion)), "{all:?}");
@@ -1607,7 +1629,7 @@ mod tests {
         run(&history, "vim src/typed-here.rs", &here);
         run(&history, "vim /etc/hosts", &other);
         let sig = history.token_signals(&["vim"], &here, "");
-        let rows = history_rows(&sig, &[], "", Some(&dir));
+        let rows = history_rows(&sig, &[], "", Some(&dir), false);
         let mut words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
         words.sort_unstable();
         assert_eq!(words, ["/etc/hosts", "src/real.rs", "src/typed-here.rs"]);
@@ -1626,7 +1648,7 @@ mod tests {
         run(&history, "mv knowledge-moved/ elsewhere/", &here);
         run(&history, "mv knowledge-kept/ elsewhere/", &here);
         let sig = history.token_signals(&["mv"], &here, "");
-        let rows = history_rows(&sig, &[], "kno", Some(tmp.path()));
+        let rows = history_rows(&sig, &[], "kno", Some(tmp.path()), false);
         let words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(words, ["knowledge-kept/"]);
     }
@@ -1643,7 +1665,7 @@ mod tests {
         run(&history, "sync https://example.com/", &here);
         run(&history, "sync ~/gone/", &here);
         let sig = history.token_signals(&["sync"], &here, "");
-        let rows = history_rows(&sig, &[], "", Some(tmp.path()));
+        let rows = history_rows(&sig, &[], "", Some(tmp.path()), false);
         let mut words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
         words.sort_unstable();
         assert_eq!(
@@ -1696,7 +1718,7 @@ mod tests {
         imported("yarn web:test");
         imported("yarn web:test");
         let sig = history.token_signals(&completed_words("yarn we"), "/", "");
-        let rows = history_rows(&sig, &[], partial_word("yarn we"), None);
+        let rows = history_rows(&sig, &[], partial_word("yarn we"), None, false);
         let mut words: Vec<&str> = rows.iter().map(|s| s.insertion.as_str()).collect();
         words.sort_unstable();
         assert_eq!(words, ["web:start", "web:test"]);
@@ -1737,6 +1759,81 @@ mod tests {
         };
         let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(words, ["commit", "checkout", "cherry"]);
+    }
+
+    /// Regression (2026-10-07): `mv ` listed files and folders typed
+    /// without a trailing `/` that had since been moved away. Where the
+    /// spec says the argument is a path, a history word is one too, so it
+    /// is offered only while it exists; an option is not a path.
+    #[test]
+    fn history_rows_drop_paths_that_are_gone_where_a_path_goes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("mv.json"),
+            r#"{"name":"mv","args":[{"name":"source","template":"filepaths","is_variadic":true}]}"#,
+        )
+        .expect("write spec");
+        std::fs::write(tmp.path().join("kept.txt"), "").unwrap();
+        let here = tmp.path().to_string_lossy().into_owned();
+        let registry = SpecRegistry::at_dir(tmp.path());
+        let history = HistoryStore::empty();
+        run(&history, "mv gone.txt elsewhere", &here);
+        run(&history, "mv gone-folder elsewhere", &here);
+        run(&history, "mv kept.txt elsewhere", &here);
+        run(&history, "mv -v x y", &here);
+        let resp = engine_complete(
+            &registry,
+            Ranking {
+                frecency: &FrecencyStore::empty(),
+                history: Some(&history),
+                prev: "",
+            },
+            None,
+            "mv ",
+            3,
+            Some(&here),
+            MatchMode::default(),
+        );
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected rows, got {resp:?}");
+        };
+        let mut words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
+        words.sort_unstable();
+        assert_eq!(words, ["-v", "kept.txt", "mv.json"]);
+    }
+
+    /// Where the spec does not say "path", a history word may be a branch
+    /// or a host: nothing on disk, still offered.
+    #[test]
+    fn history_rows_keep_words_where_no_path_goes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tmp.path().join("git.json"),
+            r#"{"name":"git","subcommands":[{"name":"checkout","args":[{"name":"branch"}]}]}"#,
+        )
+        .expect("write spec");
+        let here = tmp.path().to_string_lossy().into_owned();
+        let registry = SpecRegistry::at_dir(tmp.path());
+        let history = HistoryStore::empty();
+        run(&history, "git checkout feature-x", &here);
+        let resp = engine_complete(
+            &registry,
+            Ranking {
+                frecency: &FrecencyStore::empty(),
+                history: Some(&history),
+                prev: "",
+            },
+            None,
+            "git checkout ",
+            13,
+            Some(&here),
+            MatchMode::default(),
+        );
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected rows, got {resp:?}");
+        };
+        let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(words, ["feature-x"]);
     }
 
     /// Regression (2026-10-01): `cd ` listed `~` and `-` above a subfolder
