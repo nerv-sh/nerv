@@ -504,8 +504,18 @@ __nerv_show_popup() {
     # the slot — both keep the right border aligned. When a 2-cell glyph
     # straddles the boundary, (mr) keeps the whole glyph and overshoots
     # by 1; drop it and re-pad so the slot is exactly max_disp cells.
-    display="${(mr:$max_disp:)display}"
-    (( ${(m)#display} > max_disp )) && display="${(mr:$max_disp:)${display%?}}"
+    # A name that does not fit ends in `…`: cut silently, a folder that
+    # lost its trailing `/` reads as a file, and two long names that
+    # differ only at the end read as one.
+    if (( ${(m)#display} > max_disp && max_disp > 1 )); then
+      local cut_w=$(( max_disp - 1 ))
+      display="${(mr:$cut_w:)display}"
+      (( ${(m)#display} > cut_w )) && display="${(mr:$cut_w:)${display%?}}"
+      display+="…"
+    else
+      display="${(mr:$max_disp:)display}"
+      (( ${(m)#display} > max_disp )) && display="${(mr:$max_disp:)${display%?}}"
+    fi
     # Pull icon (4th field). Empty → blank space (slot reserved
     # for alignment). `$` placeholder previously cluttered cd / ls
     # lists where every row would say `$ foo/` with no signal.

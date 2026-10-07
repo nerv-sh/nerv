@@ -59,6 +59,23 @@ impl DaemonHandle {
         // developer's real `~/Library/Caches/nerv/misses.tsv`.
         let misses = tmp.path().join("misses.tsv");
         assert!(specs.exists(), "specs dir missing");
+        // Only a command on `$PATH` is tallied as a spec miss. These
+        // stand for real tools no fixture spec covers; they are never
+        // run (no derived layer under `NERV_SPECS_DIR`).
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).expect("bin dir");
+        for tool in ["zztool", "p10k"] {
+            use std::os::unix::fs::PermissionsExt;
+            let file = bin.join(tool);
+            std::fs::write(&file, "#!/bin/sh\n").expect("stub tool");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod stub tool");
+        }
+        let path_var = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
 
         let child = tokio::process::Command::new(nervd_bin())
             .env("NERV_SOCK", &sock)
@@ -71,6 +88,7 @@ impl DaemonHandle {
             // Never scan the developer\'s real PATH: command-name rows would
             // vary by machine.
             .env("NERV_PATH_SCAN", "0")
+            .env("PATH", &path_var)
             .env("NERV_LOG", "warn")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
@@ -379,8 +397,24 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
     let misses = daemon.misses.clone();
     let run = tokio::time::timeout(Duration::from_secs(5), async {
         let mut stream = daemon.connect().await;
+        // `nosuchbin` is not a command at all: nothing a spec could
+        // cover. `zztool` is on the daemon's PATH and has no spec.
         for cursor in [10usize, 11, 12] {
             let line = "nosuchbin sub".to_string();
+            round_trip(
+                &mut stream,
+                &Request::Complete {
+                    line: line[..cursor].to_string(),
+                    cursor,
+                    cwd: None,
+                    prev: None,
+                    typed: None,
+                },
+            )
+            .await;
+        }
+        for cursor in [7usize, 8, 9] {
+            let line = "zztool sub".to_string();
             round_trip(
                 &mut stream,
                 &Request::Complete {
@@ -414,7 +448,7 @@ async fn spec_miss_is_tallied_and_survives_graceful_shutdown() {
     let rows: Vec<&str> = text.lines().collect();
     assert_eq!(rows.len(), 1, "one row expected, got {text:?}");
     let mut fields = rows[0].split('\t');
-    assert_eq!(fields.next(), Some("nosuchbin"));
+    assert_eq!(fields.next(), Some("zztool"));
     assert_eq!(
         fields.next(),
         Some("3"),
@@ -800,8 +834,8 @@ async fn corrected_command_word_is_offered_and_not_tallied() {
         round_trip(
             &mut stream,
             &Request::Complete {
-                line: "nosuchbin ".into(),
-                cursor: 10,
+                line: "zztool ".into(),
+                cursor: 7,
                 cwd: None,
                 prev: None,
                 typed: None,
@@ -820,8 +854,8 @@ async fn corrected_command_word_is_offered_and_not_tallied() {
         .collect();
     assert_eq!(
         names,
-        ["nosuchbin"],
-        "only the uncorrectable word is a miss"
+        ["zztool"],
+        "only the command that exists and has no spec is a miss"
     );
 }
 

@@ -160,6 +160,36 @@ pub fn token_key(s: &str) -> &str {
     if t.is_empty() { s } else { t }
 }
 
+/// The first word of `s` as the shell reads it, and how many bytes of `s`
+/// it took: a backslash keeps the next character, so `My\ Folder/ x`
+/// starts with the word `My Folder/` (11 bytes). Quotes are not read —
+/// a quoted word keeps its quote and stops at the first space, as before.
+/// A lone trailing backslash stays in the word.
+pub fn leading_word(s: &str) -> (std::borrow::Cow<'_, str>, usize) {
+    use std::borrow::Cow;
+    let mut owned: Option<String> = None;
+    let mut chars = s.char_indices();
+    while let Some((i, c)) = chars.next() {
+        if c.is_whitespace() {
+            return (owned.map_or(Cow::Borrowed(&s[..i]), Cow::Owned), i);
+        }
+        match (c, chars.clone().next()) {
+            ('\\', Some((_, escaped))) => {
+                owned
+                    .get_or_insert_with(|| s[..i].to_string())
+                    .push(escaped);
+                chars.next();
+            }
+            _ => {
+                if let Some(o) = owned.as_mut() {
+                    o.push(c);
+                }
+            }
+        }
+    }
+    (owned.map_or(Cow::Borrowed(s), Cow::Owned), s.len())
+}
+
 /// What the history says about each word that followed a given line —
 /// the popup's directory and "you type this" signals. Keyed by
 /// [`token_key`].
@@ -405,6 +435,19 @@ impl HistoryStore {
     /// on frecency alone and collects the few a directory or sequence
     /// boost could lift above it; only those are fully scored.
     pub fn ghost(&self, typed: &str, cwd: &str, prev: &str) -> Option<String> {
+        self.ghost_where(typed, cwd, prev, |_| true)
+    }
+
+    /// [`Self::ghost`] among the commands `accept` lets through — the
+    /// caller's reasons a recorded line no longer applies (a path in it
+    /// that is gone). Asked once per candidate, before any scoring.
+    pub fn ghost_where(
+        &self,
+        typed: &str,
+        cwd: &str,
+        prev: &str,
+        accept: impl Fn(&str) -> bool,
+    ) -> Option<String> {
         if typed.is_empty() {
             return None;
         }
@@ -433,7 +476,7 @@ impl HistoryStore {
                 break;
             }
             let st = a.stats[id as usize];
-            if st.count == 0 || st.no_ghost || s.len() == typed.len() {
+            if st.count == 0 || st.no_ghost || s.len() == typed.len() || !accept(s) {
                 continue;
             }
             let key = st.key;
@@ -494,9 +537,14 @@ impl HistoryStore {
             let Some(rest) = norm.strip_prefix(prefix.as_str()) else {
                 break;
             };
-            let Some(next) = rest.split(' ').next().filter(|w| !w.is_empty()) else {
+            // Read as the shell does, so `My\ Folder/` is one word and is
+            // offered the way a row listed from disk is: unescaped (the
+            // widget quotes what it inserts).
+            let (next, _) = leading_word(rest);
+            if next.is_empty() {
                 continue;
-            };
+            }
+            let next = next.as_ref();
             let st = a.stats[*cmd as usize];
             let here = cwd.map_or(0, |c| a.dirs.get(&(*cmd, c)).copied().unwrap_or(0));
             // Most entries under a prefix share a few next words; look the
@@ -1360,6 +1408,37 @@ mod tests {
         }
         assert_eq!(store.predict("make", "/a").as_deref(), Some("make test"));
         assert_eq!(store.predict("make", "/b").as_deref(), Some("make run"));
+    }
+
+    #[test]
+    fn leading_word_reads_backslash_escapes() {
+        let word = |s| {
+            let (w, n) = leading_word(s);
+            (w.into_owned(), n)
+        };
+        assert_eq!(word("plain rest"), ("plain".to_string(), 5));
+        assert_eq!(word("My\\ Folder/ x"), ("My Folder/".to_string(), 11));
+        assert_eq!(word("한\\ 글 x"), ("한 글".to_string(), 8));
+        assert_eq!(word("end\\"), ("end\\".to_string(), 4));
+        assert_eq!(word(""), (String::new(), 0));
+        assert_eq!(word(" x"), (String::new(), 0));
+    }
+
+    #[test]
+    fn token_signals_keep_an_escaped_space_in_one_word() {
+        let h = HistoryStore::empty();
+        h.record(Entry {
+            ts: now_unix(),
+            exit: 0,
+            cwd: "/".into(),
+            prev: String::new(),
+            command: "mv My\\ Folder/ elsewhere".into(),
+            expanded: String::new(),
+        })
+        .unwrap();
+        let sig = h.token_signals(&["mv"], "/", "");
+        let words: Vec<&str> = sig.tokens.values().map(|t| t.word.as_str()).collect();
+        assert_eq!(words, ["My Folder/"]);
     }
 
     #[test]

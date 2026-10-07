@@ -1181,6 +1181,10 @@ pub struct CompleteResult {
     /// the shell's own completion instead (docs/spec-conversion-policy.md
     /// §6.4). Decided by where the file lives, never by empty rows.
     pub unspecced: bool,
+    /// The spec says the word at the cursor is a path ([`arg_takes_paths`]).
+    /// The daemon then holds a history word to the same standard as the
+    /// rows listed from disk: it has to exist.
+    pub path_arg: bool,
 }
 
 /// Run the full pipeline against `line` + `cursor` byte offset.
@@ -1216,6 +1220,7 @@ pub fn complete_in(
         return CompleteResult {
             token_complete: false,
             unspecced: false,
+            path_arg: false,
             items: vec![],
             reason: Some("inside quoted string".into()),
         };
@@ -1237,6 +1242,7 @@ pub fn complete_in(
         return CompleteResult {
             token_complete: false,
             unspecced: false,
+            path_arg: false,
             items: vec![],
             reason: Some("empty input".into()),
         };
@@ -1273,6 +1279,7 @@ pub fn complete_in(
             return CompleteResult {
                 token_complete: false,
                 unspecced: false,
+                path_arg: false,
                 items,
                 reason: None,
             };
@@ -1281,6 +1288,7 @@ pub fn complete_in(
         return CompleteResult {
             token_complete: false,
             unspecced: false,
+            path_arg: false,
             items: vec![],
             reason: Some(if done {
                 "command name complete".into()
@@ -1312,6 +1320,7 @@ pub fn complete_in(
             return CompleteResult {
                 token_complete: false,
                 unspecced,
+                path_arg: false,
                 items: vec![row],
                 reason: None,
             };
@@ -1319,6 +1328,7 @@ pub fn complete_in(
         return CompleteResult {
             token_complete: false,
             unspecced,
+            path_arg: false,
             items: vec![],
             reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
         };
@@ -1379,6 +1389,7 @@ pub fn complete_in(
                 return CompleteResult {
                     token_complete: false,
                     unspecced,
+                    path_arg: arg_takes_paths(arg, Some(opt)),
                     items,
                     reason: None,
                 };
@@ -1418,6 +1429,9 @@ pub fn complete_in(
                     return CompleteResult {
                         token_complete: false,
                         unspecced,
+                        // The row carries the flag with it (`--file x`):
+                        // not a word the history can be compared to.
+                        path_arg: false,
                         items,
                         reason: None,
                     };
@@ -1484,12 +1498,22 @@ pub fn complete_in(
     // matches (`status-v2`) remain. Empty prefix means the user is
     // browsing a fresh token (`git `), so keep everything.
     let (items, token_complete) = settle_typed_token(items, &prefix, mode);
+    // Only a plain positional slot: next to subcommands or option names
+    // a history word is as likely one of those.
+    let path_arg = !prefix_is_option
+        && !prefer_subcommands
+        && matches!(result.cursor_context, CursorContext::Arg)
+        && result
+            .subcommand_arg_index
+            .and_then(|i| current.args.get(i))
+            .is_some_and(|arg| arg_takes_paths(arg, None));
 
     CompleteResult {
         items,
         reason: None,
         token_complete,
         unspecced,
+        path_arg,
     }
 }
 
@@ -2104,6 +2128,37 @@ fn emit_arg_candidates(
         return vec![];
     };
     emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens)
+}
+
+/// Whether [`emit_candidates_for_arg`] lists this argument from disk:
+/// a `filepaths`/`folders` template or generator, or — when the spec
+/// gives it no source at all — a name that says path (`docker build
+/// <path>`, `--file`). An argument with another source besides is not
+/// one: `git checkout`'s `branch, file, tag or commit` lists branches,
+/// and falls back to files only when none matches.
+fn arg_takes_paths(
+    arg: &crate::spec_parser::Arg,
+    enclosing_opt: Option<&crate::spec_parser::Opt>,
+) -> bool {
+    use crate::spec_parser::{Generator, TemplateKind};
+    let listed = matches!(
+        arg.template,
+        Some(TemplateKind::Filepaths | TemplateKind::Folders)
+    ) || arg
+        .generators
+        .iter()
+        .any(|g| matches!(g, Generator::Filepaths { .. }));
+    let other_source = arg
+        .generators
+        .iter()
+        .any(|g| !matches!(g, Generator::Filepaths { .. }));
+    let unsourced =
+        arg.template.is_none() && arg.generators.is_empty() && arg.suggestions.is_empty();
+    (listed && !other_source)
+        || (unsourced
+            && infer_filepaths_kind(arg.name.as_deref())
+                .or_else(|| infer_filepaths_kind_from_opt_names(enclosing_opt))
+                .is_some())
 }
 
 /// `enclosing_opt` lets the caller pass the OPTION wrapping the arg
