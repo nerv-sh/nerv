@@ -110,6 +110,13 @@ pub fn complete_exit_code(token_complete: bool, unspecced: bool, compsys: bool) 
 /// spec cache is the wrong version. The widget shows a one-line hint.
 pub const EXIT_SCHEMA_MISMATCH: i32 = 3;
 
+/// Exit code of a still-loading empty reply: the spec parse or `--help`
+/// derivation lands on a later keystroke. The widget shows its grey
+/// one-line loading hint. An older widget reads any unknown non-zero
+/// code as "daemon down" (same caveat as [`EXIT_SCHEMA_MISMATCH`]) —
+/// transient while a new daemon meets an old widget after upgrading.
+pub const EXIT_SPEC_LOADING: i32 = 7;
+
 /// A rendered `_complete` reply.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct CompleteOutput {
@@ -145,6 +152,18 @@ pub fn complete_output(resp: Response, compsys: bool, ghost: bool) -> CompleteOu
         } if r.starts_with("spec schema mismatch") => {
             out.stderr = Some(format!("[nerv] {r}"));
             EXIT_SCHEMA_MISMATCH
+        }
+        // Still loading: no rows, but not a miss either. The code is
+        // the widget's only side channel — the reason string itself
+        // never crosses the wire, and no row field is added.
+        // A command with no written spec keeps the shell's own completion
+        // while its `--help` is read: that answer is ready now.
+        Response::Empty {
+            reason: Some(r),
+            unspecced,
+            ..
+        } if crate::loading_kind(r.as_str()).is_some() && !(unspecced && compsys) => {
+            EXIT_SPEC_LOADING
         }
         // No rows → no popup in zsh, unless the shell may answer.
         Response::Empty { unspecced, .. } => complete_exit_code(false, unspecced, compsys),
@@ -510,5 +529,49 @@ mod tests {
             false,
         );
         assert!(no_ghost.lines.is_empty());
+    }
+
+    /// M2: a still-loading empty exits with the loading code so the
+    /// widget can show its one-line hint; a settled miss stays 0.
+    #[test]
+    fn loading_empty_exits_with_the_loading_code() {
+        let loading = complete_output(
+            Response::Empty {
+                reason: Some(format!("{}spec", crate::LOADING_REASON_PREFIX)),
+                unspecced: false,
+                ghost: None,
+            },
+            true,
+            true,
+        );
+        assert_eq!(loading.code, EXIT_SPEC_LOADING);
+        assert!(loading.lines.is_empty());
+        assert!(loading.stderr.is_none());
+        let settled = complete_output(
+            Response::Empty {
+                reason: Some(format!("{}aws", crate::NO_SPEC_REASON_PREFIX)),
+                unspecced: false,
+                ghost: None,
+            },
+            true,
+            true,
+        );
+        assert_eq!(settled.code, 0);
+        // No written spec, and the widget can ask the shell: it does,
+        // rather than wait on `--help` with nothing on screen.
+        let derived = |compsys| {
+            complete_output(
+                Response::Empty {
+                    reason: Some(format!("{}derived", crate::LOADING_REASON_PREFIX)),
+                    unspecced: true,
+                    ghost: None,
+                },
+                compsys,
+                true,
+            )
+            .code
+        };
+        assert_eq!(derived(true), 5);
+        assert_eq!(derived(false), EXIT_SPEC_LOADING);
     }
 }

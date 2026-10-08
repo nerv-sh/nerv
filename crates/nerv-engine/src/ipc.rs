@@ -12,7 +12,8 @@ pub enum Request {
     Complete {
         /// The full left buffer (`$LBUFFER` in zsh) up to the cursor.
         line: String,
-        /// Byte offset of the cursor in `line`.
+        /// The cursor in `line`, counted in characters (zsh's `${#LBUFFER}`).
+        /// The daemon converts it to the byte offset the engine works in.
         cursor: usize,
         /// Client's working directory at request time. Used by
         /// filesystem-aware generators (e.g. `package.json` script

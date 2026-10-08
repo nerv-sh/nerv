@@ -95,6 +95,23 @@ def main():
     home = tempfile.mkdtemp(prefix="nerv-enter-")
     zdot = os.path.join(home, "zdot")
     os.makedirs(zdot, exist_ok=True)
+    # A real directory for the shell to (not) move into below.
+    os.makedirs(os.path.join(home, "work", "inner"), exist_ok=True)
+
+    # Directory cases below need a `cd` spec with STATIC rows (the shared
+    # fixtures have no `cd` spec, and filepath rows are timing- and
+    # filter-sensitive — static prefix rows are not).
+    import shutil as _shutil
+
+    specdir = os.path.join(home, "specs")
+    _shutil.copytree(SPECS, specdir)
+    with open(os.path.join(specdir, "cd.json"), "w") as f:
+        f.write(
+            '{"name": "cd", "description": "Change directory", '
+            '"subcommands": ['
+            '{"name": "work/", "description": "work dir"}, '
+            '{"name": "other", "description": "other dir"}]}'
+        )
     with open(os.path.join(zdot, ".zshrc"), "w") as f:
         f.write("PS1='%# '\n")
         f.write(f'eval "$({NERV} init zsh)"\n')
@@ -102,7 +119,7 @@ def main():
     env = dict(os.environ)
     env["HOME"] = home
     env["ZDOTDIR"] = zdot
-    env["NERV_SPECS_DIR"] = SPECS
+    env["NERV_SPECS_DIR"] = specdir
     env["TERM"] = "xterm-256color"
 
     log("starting nervd")
@@ -193,6 +210,47 @@ def main():
         tab_inserted = b"git checkout" in plain4 or b"heckout" in plain4
         log(f"case4 tab_inserted_checkout={tab_inserted}")
 
+        # --- Case 5: highlighted directory + Enter INSERTS without
+        # running. `cd w` highlights the static `work/` row; Enter must
+        # land it on the line and stay there — the shell must NOT cd.
+        master, proc = new_shell(env)
+        pump(master, 2.0)
+        os.write(master, b"cd " + home.encode() + b"\n")
+        pump(master, 1.0)  # shell cwd is now the temp HOME
+        os.write(master, b"cd w")
+        out5a = pump(master, 1.5)  # popup: `work/` highlighted (item 1)
+        rows_shown = b"work/" in strip_ansi(out5a)
+        os.write(master, b"\r")  # Enter — must insert only
+        pump(master, 1.0)
+        # Discard the line, then ask where we are. Ctrl-U (unix-line-
+        # discard), not Ctrl-C: a bare ETX never reaches the line editor
+        # reliably over this pty (probe3), while ^U always does.
+        os.write(master, b"\x15")  # discard the line, then ask where we are
+        pump(master, 0.5)
+        os.write(master, b"pwd\n")
+        out5 = pump(master, 1.5)
+        kill(master, proc)
+        plain5 = strip_ansi(out5)
+        stayed_home = home.encode() in plain5 and b"work" not in plain5.split(home.encode())[-1][:40]
+        log(f"case5 rows_shown={rows_shown} stayed_home={stayed_home}")
+
+        # --- Case 6: the sentinel row labels what Enter will do. At a
+        # segment boundary (`cd `) it reads `Enter: run`; after Tab moves
+        # the highlight onto an item (sentinel still drawn, dimmed) it
+        # reads `Enter: insert`. (A filtered partial hides the sentinel
+        # entirely, so navigation — not typing — is the observable
+        # `insert` state.)
+        master, proc = new_shell(env)
+        pump(master, 2.0)
+        os.write(master, b"cd ")
+        out6a = pump(master, 1.5)  # boundary popup, sentinel default
+        os.write(master, b"\t")  # Tab: cycle sentinel → first item
+        out6b = pump(master, 1.5)  # same box, item 1 highlighted
+        kill(master, proc)
+        label_run = b"Enter: run" in strip_ansi(out6a)
+        label_insert = b"Enter: insert" in strip_ansi(out6b)
+        log(f"case6 label_run={label_run} label_insert={label_insert}")
+
         if (
             exec_bare
             and not inserted_checkout
@@ -200,10 +258,15 @@ def main():
             and partial_selects_item
             and no_sentinel_on_partial
             and tab_inserted
+            and rows_shown
+            and stayed_home
+            and label_run
+            and label_insert
         ):
             log(
                 "PASS — sentinel executes; partial hides sentinel + selects "
-                "item 1; Tab inserts the highlighted item"
+                "item 1; Tab inserts the highlighted item; directory Enter "
+                "inserts without running; sentinel labels Enter: run/insert"
             )
             rc = 0
         else:
@@ -212,6 +275,10 @@ def main():
             log(f"  case2 tail: {out2[-300:]!r}")
             log(f"  case3 tail: {out3[-300:]!r}")
             log(f"  case4 tail: {out4[-300:]!r}")
+            log(f"  case5a tail: {out5a[-300:]!r}")
+            log(f"  case5 tail: {out5[-300:]!r}")
+            log(f"  case6a tail: {out6a[-300:]!r}")
+            log(f"  case6b tail: {out6b[-300:]!r}")
     finally:
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
 

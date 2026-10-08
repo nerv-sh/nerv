@@ -824,6 +824,23 @@ fn spec_stem_from_path(path: &Path) -> Option<String> {
 /// engine wrote — see [`no_spec_binary`].
 pub const NO_SPEC_REASON_PREFIX: &str = "no spec for ";
 
+/// Leading text of the `CompleteResult::reason` emitted when the spec
+/// for the typed command is still loading in the background — a
+/// written spec parsing, or a `--help` derivation. One owner like
+/// [`NO_SPEC_REASON_PREFIX`], deliberately NOT that prefix, so the
+/// daemon's miss tally ([`no_spec_binary`]) never matches it: the cold
+/// first keystroke is not a miss, and the widget can tell "loading,
+/// rows land on the next key" apart from settled silence.
+pub const LOADING_REASON_PREFIX: &str = "loading:";
+
+/// Recover the loading kind (`spec` | `derived` | `generator`) from a
+/// `loading:…` reason. `None` for every other reason. `generator` has
+/// no producer yet — async generator paths will report it; the tally
+/// and the widget already treat every `loading:*` alike.
+pub fn loading_kind(reason: &str) -> Option<&str> {
+    reason.strip_prefix(LOADING_REASON_PREFIX)
+}
+
 /// Icon on rows recalled from shell history (engine `History` template
 /// and the daemon's history rows). `!` is the shell's own history
 /// character (`!!`, `!git`); a row without one leaves a hole in the
@@ -1330,7 +1347,21 @@ pub fn complete_in(
             unspecced,
             path_arg: false,
             items: vec![],
-            reason: Some(format!("{NO_SPEC_REASON_PREFIX}{binary}")),
+            // Cold first keystroke: the parse or derivation this lookup
+            // spawned lands a key later. Report `loading:*` — never the
+            // `NO_SPEC_REASON_PREFIX` — so the miss tally stays clean
+            // and the widget shows its one-line loading hint.
+            reason: Some(if settled {
+                format!("{NO_SPEC_REASON_PREFIX}{binary}")
+            } else if !unspecced {
+                // Same probe as above (`unspecced` IS `!has_written_spec`
+                // for this binary): a written spec whose parse is still
+                // in flight. One probe, not two — the filesystem could
+                // change between them.
+                format!("{LOADING_REASON_PREFIX}spec")
+            } else {
+                format!("{LOADING_REASON_PREFIX}derived")
+            }),
         };
     };
     // An oversized spec keeps its big subcommands in their own files;
@@ -4596,6 +4627,37 @@ region = us-east-1
         assert_eq!(names, ["checkout", "commit"]);
     }
 
+    /// M1: the cursor in the middle completes the prefix before it —
+    /// `git co|--amend` (cursor 6) answers like `git co`, ignoring the
+    /// text after the cursor. The widget splices the remainder back.
+    #[test]
+    fn mid_line_cursor_completes_the_prefix_before_it() {
+        let end = complete("git co", 6, &registry_with(git_min()));
+        let mid = complete("git co --amend", 6, &registry_with(git_min()));
+        let end_names: Vec<_> = end.items.iter().map(|s| s.insertion.as_str()).collect();
+        let mid_names: Vec<_> = mid.items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(mid_names, end_names);
+        assert_eq!(mid_names, ["checkout", "commit"]);
+    }
+
+    /// M1: a byte cursor landing mid-glyph is clamped back to the
+    /// boundary before it. `git 한글` is 6 chars / 10 bytes; byte 6 splits
+    /// `한`, so the line completes as `git ` — every subcommand, not the
+    /// none that a `한` prefix would leave.
+    #[test]
+    fn mid_cjk_cursor_clamps_to_the_boundary_before_it() {
+        let line = "git 한글";
+        assert!(!line.is_char_boundary(6));
+        let reg = registry_with(git_min());
+        let clamped = complete(line, 6, &reg);
+        let at_space = complete("git ", 4, &reg);
+        let names = |items: &[Suggestion]| -> Vec<String> {
+            items.iter().map(|s| s.insertion.clone()).collect()
+        };
+        assert!(!at_space.items.is_empty());
+        assert_eq!(names(&clamped.items), names(&at_space.items));
+    }
+
     #[test]
     fn zoxide_ranks_name_prefix_then_substring_then_path() {
         // Rows come score-desc (frecency). The `enc` query:
@@ -6475,7 +6537,11 @@ region = us-east-1
         );
         assert!(r.is_loading("zpeh"));
         assert!(out.items.is_empty(), "{:?}", out.items);
-        assert_eq!(no_spec_binary(out.reason.as_deref().unwrap()), Some("zpeh"));
+        // M2: a loading word reports `loading:*`, not a settled miss —
+        // the miss tally (`no_spec_binary`) must not match it.
+        let reason = out.reason.expect("loading carries a reason");
+        assert_eq!(loading_kind(&reason), Some("derived"));
+        assert_eq!(no_spec_binary(&reason), None);
     }
 
     fn fuzzy_spec_dir(name: &str, subcommands: &[&str]) -> tempfile::TempDir {
@@ -6669,6 +6735,44 @@ region = us-east-1
         // tally would record noise under a bogus name.
         let empty = complete("", 0, &r).reason.expect("reason");
         assert_eq!(no_spec_binary(&empty), None);
+    }
+
+    /// M2: a still-loading empty never looks like a settled miss. No
+    /// `loading:*` reason may start with [`NO_SPEC_REASON_PREFIX`], or
+    /// the first cold keystroke lands in the miss tally as noise — and
+    /// the widget could not tell loading apart from a real miss.
+    #[test]
+    fn loading_reasons_stay_out_of_the_miss_tally_prefix() {
+        for kind in ["spec", "derived", "generator"] {
+            let reason = format!("{LOADING_REASON_PREFIX}{kind}");
+            assert_eq!(no_spec_binary(&reason), None);
+            assert_eq!(loading_kind(&reason), Some(kind));
+        }
+        assert_eq!(loading_kind("no spec for aws"), None);
+    }
+
+    /// M2: the cold first keystroke reports loading, not a miss. With a
+    /// parse in flight for a name no layer has a file for, the reason
+    /// is `loading:derived` — and still no correction guess.
+    #[test]
+    fn cold_first_keystroke_reports_loading_not_a_miss() {
+        let names = cmd_names();
+        let r = SpecRegistry::at_dir(&workspace_fixture_specs_dir());
+        r.inflight.lock().unwrap().insert("zpeh".into());
+        let line = "zpeh x";
+        let out = complete_in(
+            line,
+            line.len(),
+            &r,
+            None,
+            MatchMode::Prefix,
+            Some(&|| names.clone()),
+        );
+        assert!(r.is_loading("zpeh"));
+        assert!(out.items.is_empty(), "{:?}", out.items);
+        let reason = out.reason.expect("loading carries a reason");
+        assert_eq!(reason, format!("{LOADING_REASON_PREFIX}derived"));
+        assert_eq!(no_spec_binary(&reason), None);
     }
 
     #[test]
