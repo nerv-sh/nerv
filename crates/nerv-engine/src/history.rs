@@ -136,6 +136,10 @@ pub const PREDICT_MIN: u32 = 2;
 /// rule alone was right 23.6% of the times it showed; a third doubles
 /// that (48.6%) for 2.9 points fewer hits. docs/history-suggestions.md §4.
 pub const PREDICT_SHARE: u32 = 3;
+/// How many lines [`HistoryStore::ghost_where`] may ask its caller about
+/// before giving up. The caller's answer costs a stat, and a short prefix
+/// (`mv `) is extended by hundreds of recorded lines.
+pub const GHOST_ACCEPT_CAP: usize = 20;
 /// Recency decay constant of frecency: `exp(-age / 1 week)`.
 pub const DECAY_SECS: f64 = 7.0 * 24.0 * 3600.0;
 
@@ -440,7 +444,8 @@ impl HistoryStore {
 
     /// [`Self::ghost`] among the commands `accept` lets through — the
     /// caller's reasons a recorded line no longer applies (a path in it
-    /// that is gone). Asked once per candidate, before any scoring.
+    /// that is gone). Asked best line first, and of at most
+    /// [`GHOST_ACCEPT_CAP`] lines: past that there is no ghost.
     pub fn ghost_where(
         &self,
         typed: &str,
@@ -465,9 +470,8 @@ impl HistoryStore {
                     )
                 })
             };
-        // (key, last, id) of the best on frecency; boosted (boost, key, last, id).
-        let mut top: Option<(f64, u64, u32)> = None;
-        let mut boosted: Vec<(f64, f64, u64, u32)> = Vec::new();
+        // (boost, key, last, id) of every line that extends `typed`.
+        let mut candidates: Vec<(f64, f64, u64, u32)> = Vec::new();
         let range = a
             .ids
             .range::<str, _>((std::ops::Bound::Included(typed), std::ops::Bound::Unbounded));
@@ -476,12 +480,8 @@ impl HistoryStore {
                 break;
             }
             let st = a.stats[id as usize];
-            if st.count == 0 || st.no_ghost || s.len() == typed.len() || !accept(s) {
+            if st.count == 0 || st.no_ghost || s.len() == typed.len() {
                 continue;
-            }
-            let key = st.key;
-            if top.is_none_or(|(k, l, _)| (key, st.last) > (k, l)) {
-                top = Some((key, st.last, id));
             }
             let d = cwd.map_or(0.0, |c| {
                 ratio(a.dirs.get(&(id, c)).copied().unwrap_or(0), st.in_dirs)
@@ -489,18 +489,25 @@ impl HistoryStore {
             let boost = W_DIR * d
                 + W_SEQ * seq_term(&a.seq, &a.seq_max, prev_id, id)
                 + W_SEQ_HEAD * seq_term(&a.seq_head, &a.seq_head_max, head_id, id);
-            if boost > 0.0 {
-                boosted.push((boost, key, st.last, id));
-            }
+            candidates.push((boost, st.key, st.last, id));
         }
-        let (kmax, top_last, top_id) = top?;
-        let top_boost = boosted.iter().find(|b| b.3 == top_id).map_or(0.0, |b| b.0);
-        boosted
-            .iter()
-            .map(|&(boost, key, last, id)| (W_FRECENCY * (key - kmax).exp() + boost, last, id))
-            .chain(std::iter::once((W_FRECENCY + top_boost, top_last, top_id)))
-            .max_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)))
-            .map(|(_, _, id)| a.strings[id as usize].to_string())
+        // Best first, and `accept` — a stat per line in the daemon — is
+        // asked only of the line about to be returned. A refused line
+        // leaves the field, so the next is scored against what remains.
+        for _ in 0..GHOST_ACCEPT_CAP {
+            let kmax = candidates.iter().map(|c| c.1).fold(f64::MIN, f64::max);
+            let score = |c: &(f64, f64, u64, u32)| W_FRECENCY * (c.1 - kmax).exp() + c.0;
+            let best = (0..candidates.len()).max_by(|&x, &y| {
+                let (x, y) = (&candidates[x], &candidates[y]);
+                score(x).total_cmp(&score(y)).then(x.2.cmp(&y.2))
+            })?;
+            let line = &a.strings[candidates[best].3 as usize];
+            if accept(line) {
+                return Some(line.to_string());
+            }
+            candidates.swap_remove(best);
+        }
+        None
     }
 
     /// For the words already typed on the line (`["git"]` while completing
@@ -1249,6 +1256,37 @@ mod tests {
         assert_eq!(store.ghost("echo m", "/", ""), None);
         store.record(at("printf 'a\tb'", "/", "", NOW)).unwrap();
         assert_eq!(store.ghost("printf", "/", ""), None);
+    }
+
+    /// A refused line falls through to the next best, and the caller is
+    /// asked about a bounded number of lines however many extend the
+    /// prefix: each answer is a stat on the keystroke path.
+    #[test]
+    fn ghost_where_asks_only_the_best_lines() {
+        let store = HistoryStore::empty();
+        for i in 0..50 {
+            store
+                .record(at(&format!("mv file{i:02} x"), "/", "", NOW + i))
+                .unwrap();
+        }
+        let asked = std::cell::Cell::new(0usize);
+        let ask = |ok: &dyn Fn(&str) -> bool| {
+            asked.set(0);
+            store.ghost_where("mv ", "/", "", |l| {
+                asked.set(asked.get() + 1);
+                ok(l)
+            })
+        };
+        // The most recent line wins; one question.
+        assert_eq!(ask(&|_| true).as_deref(), Some("mv file49 x"));
+        assert_eq!(asked.get(), 1);
+        // Refusing the best three hands over the fourth.
+        let got = ask(&|l| l < "mv file47");
+        assert_eq!(got.as_deref(), Some("mv file46 x"));
+        assert_eq!(asked.get(), 4);
+        // Nothing applies: the cap stops the questions.
+        assert_eq!(ask(&|_| false), None);
+        assert_eq!(asked.get(), GHOST_ACCEPT_CAP);
     }
 
     #[test]
