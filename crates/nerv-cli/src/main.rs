@@ -627,7 +627,24 @@ fn build_doctor_report() -> DoctorReport {
     check_autosuggest(&mut r);
     check_schema_version(&mut r);
     check_pty_mode(&mut r);
+    check_compsys(&mut r, std::env::var("NERV_COMPSYS").ok().as_deref());
     r
+}
+
+/// The widget's fallback to zsh's own completion is on unless
+/// `NERV_COMPSYS=0`. Silent by default; when it is off the row says so,
+/// since a command without a spec then shows no rows at all and looks
+/// like a missing spec.
+fn check_compsys(r: &mut DoctorReport, value: Option<&str>) {
+    if value != Some("0") {
+        return;
+    }
+    r.push(
+        DoctorLevel::Ok,
+        "shell completion",
+        "fallback off (NERV_COMPSYS=0)".to_string(),
+        Some("unset NERV_COMPSYS to show zsh's completions for commands without a spec".into()),
+    );
 }
 
 /// Commands the daemon completed empty for want of a spec. Advisory
@@ -638,22 +655,65 @@ fn check_spec_misses(r: &mut DoctorReport) {
     let Some(path) = paths::misses_path() else {
         return;
     };
-    check_spec_misses_in(r, &path);
+    check_spec_misses_in(
+        r,
+        &path,
+        paths::derived_specs_dir().as_deref(),
+        paths::user_specs_dir().as_deref(),
+    );
 }
+
+/// Where the example overlay spec can be fetched from: it is in the
+/// repository, not in the installed package.
+const EXAMPLE_SPEC_URL: &str =
+    "https://raw.githubusercontent.com/nerv-sh/nerv/main/examples/specs/claude.json";
 
 /// Path-injected half of [`check_spec_misses`], so tests exercise the
 /// row without touching the real cache dir.
-fn check_spec_misses_in(r: &mut DoctorReport, path: &std::path::Path) {
+///
+/// A name that has since got a spec from its own `--help` is marked
+/// `(derived)`: its count is history, and an overlay is only worth
+/// writing to improve on what was scraped. The hint is one command for
+/// the first name that still has nothing — the example spec, saved under
+/// that name — or, when every name is covered, the derived file to copy.
+fn check_spec_misses_in(
+    r: &mut DoctorReport,
+    path: &std::path::Path,
+    derived: Option<&std::path::Path>,
+    overlay: Option<&std::path::Path>,
+) {
     let top = nerv_engine::misses::MissCounter::load(path).top_n(5);
     if top.is_empty() {
         return;
     }
+    let derived_file = |name: &str| {
+        let dir = derived?;
+        ["json", "json.gz"]
+            .iter()
+            .map(|ext| dir.join(format!("{name}.{ext}")))
+            .find(|p| p.is_file())
+    };
     let detail = top
         .iter()
-        .map(|(name, count)| format!("{name} {count}"))
+        .map(|(name, count)| match derived_file(name) {
+            Some(_) => format!("{name} {count} (derived)"),
+            None => format!("{name} {count}"),
+        })
         .collect::<Vec<_>>()
         .join(", ");
-    let hint = paths::user_specs_dir().map(|d| format!("add a spec in {}", d.display()));
+    let hint = overlay.map(
+        |dir| match top.iter().find(|(name, _)| derived_file(name).is_none()) {
+            Some((name, _)) => format!(
+                "run: curl -fsSL --create-dirs {EXAMPLE_SPEC_URL} -o '{}/{name}.json' — then edit it",
+                dir.display()
+            ),
+            None => format!(
+                "all covered by --help; to refine one, copy it from {} into {}",
+                derived.map_or_else(String::new, |d| d.display().to_string()),
+                dir.display()
+            ),
+        },
+    );
     r.push(DoctorLevel::Ok, "spec misses", detail, hint);
 }
 
@@ -2734,13 +2794,47 @@ mod tests {
         counter.flush_if_dirty();
 
         let mut r = DoctorReport::default();
-        check_spec_misses_in(&mut r, &path);
+        check_spec_misses_in(&mut r, &path, None, None);
         assert_eq!(
             doctor_labels(&r),
             [("spec misses".to_string(), "Ok".into())]
         );
         assert_eq!(r.entries[0].detail, "zeph 12, aic2 9");
+
+        // A name `--help` has since covered is marked, and the command
+        // in the hint is for the first name that still has nothing.
+        let dirs = std::env::temp_dir().join(format!("nerv-misses-dirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dirs);
+        let (derived, overlay) = (dirs.join("derived"), dirs.join("specs"));
+        std::fs::create_dir_all(&derived).unwrap();
+        std::fs::write(derived.join("zeph.json"), "{}").unwrap();
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path, Some(&derived), Some(&overlay));
+        assert_eq!(r.entries[0].detail, "zeph 12 (derived), aic2 9");
+        let hint = r.entries[0].hint.clone().expect("hint");
+        assert!(
+            hint.starts_with("run: curl -fsSL --create-dirs https://"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains(&format!("-o '{}/aic2.json'", overlay.display())),
+            "{hint}"
+        );
+
+        // Everything covered: point at the derived files instead.
+        std::fs::write(derived.join("aic2.json.gz"), "").unwrap();
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path, Some(&derived), Some(&overlay));
+        assert_eq!(r.entries[0].detail, "zeph 12 (derived), aic2 9 (derived)");
+        assert!(
+            r.entries[0]
+                .hint
+                .as_deref()
+                .unwrap()
+                .starts_with("all covered by --help")
+        );
         let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dirs);
     }
 
     #[test]
@@ -2836,6 +2930,17 @@ mod tests {
         let _ = std::fs::remove_file(lock);
     }
 
+    /// The fallback switch shows only when it is off.
+    #[test]
+    fn doctor_reports_the_compsys_fallback_only_when_off() {
+        let mut r = DoctorReport::default();
+        check_compsys(&mut r, None);
+        check_compsys(&mut r, Some("1"));
+        assert!(r.entries.is_empty());
+        check_compsys(&mut r, Some("0"));
+        assert_eq!(r.entries[0].detail, "fallback off (NERV_COMPSYS=0)");
+    }
+
     /// No recorded misses → no row (a fresh install's doctor output is
     /// unchanged).
     #[test]
@@ -2844,7 +2949,7 @@ mod tests {
             std::env::temp_dir().join(format!("nerv-misses-none-{}.tsv", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut r = DoctorReport::default();
-        check_spec_misses_in(&mut r, &path);
+        check_spec_misses_in(&mut r, &path, None, None);
         assert!(r.entries.is_empty());
     }
 

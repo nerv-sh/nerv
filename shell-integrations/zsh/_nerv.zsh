@@ -21,7 +21,17 @@ fi
 typeset -g __NERV_LOADED=1
 typeset -g __NERV_BIN="${NERV_BIN:-nerv}"
 typeset -g __NERV_PREV_LBUFFER=""
-typeset -gi __NERV_E1_SHOWN=0
+# The daemon as the last request found it: 1 while it does not answer.
+# __NERV_DOWN_AT is when that was last said on screen, __NERV_NOTICE is 1
+# while the "back" line is up (it leaves on the next key).
+typeset -gi __NERV_DOWN=0 __NERV_DOWN_AT=0 __NERV_NOTICE=0
+# A new shell starts the daemon in the background; a key typed before it
+# listens is not an outage. Nothing is said for the first seconds, and
+# nothing is latched, so a daemon that never came up is said after them.
+typeset -gi __NERV_LOADED_AT=0   # set once zsh/datetime is loaded
+__nerv_past_autostart() {
+  [[ ${NERV_AUTOSTART:-1} == 0 ]] || (( EPOCHSECONDS - __NERV_LOADED_AT >= 3 ))
+}
 typeset -gi __NERV_E5_SHOWN=0
 # 1 while the `…loading` one-line hint is on screen (cold spec parse or
 # derivation in flight). Cleared the moment rows or settled silence
@@ -135,7 +145,8 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 # explicitly so a minimal rc doesn't leave the table missing.
 zmodload -F zsh/parameter p:aliases 2>/dev/null
 # $EPOCHREALTIME times each compsys capture (__nerv_compsys_rows).
-zmodload -F zsh/datetime p:EPOCHREALTIME 2>/dev/null
+zmodload -F zsh/datetime p:EPOCHREALTIME p:EPOCHSECONDS 2>/dev/null
+__NERV_LOADED_AT=${EPOCHSECONDS:-0}
 
 # Autostart nervd in the background so a fresh install (or a reboot)
 # needs no manual `nerv start`. `nerv start` is idempotent — it probes
@@ -1278,19 +1289,37 @@ __nerv_complete() {
     # rc 3 = E5 spec schema mismatch (daemon up, cache wrong version);
     # rc 7 never reaches here (folded to loading above);
     # any other non-zero = E1 daemon not reachable.
+    #
+    # `zle -M`, not `zle -R`: a status line is wiped when the widget
+    # returns, so the hint was gone before it could be read.
     if (( rc == 3 )); then
       if (( ! __NERV_E5_SHOWN )); then
         __NERV_E5_SHOWN=1
-        zle -R "[nerv] spec mismatch — run: nerv doctor"
-        __NERV_ACTIVE=1
+        zle -M "[nerv] spec mismatch — run: nerv doctor"
       fi
-    elif (( ! __NERV_E1_SHOWN )); then
-      __NERV_E1_SHOWN=1
-      zle -R "[nerv] daemon not running — run: nerv start"
-      __NERV_ACTIVE=1
+    elif (( ! __NERV_DOWN )) && __nerv_past_autostart; then
+      # Said when the daemon goes down, not once per shell: a daemon that
+      # died again an hour later used to fail in silence. One that keeps
+      # dying is said once a minute.
+      __NERV_DOWN=1
+      if (( EPOCHSECONDS - __NERV_DOWN_AT >= 60 )); then
+        __NERV_DOWN_AT=$EPOCHSECONDS
+        __NERV_NOTICE=0
+        zle -M "[nerv] daemon not running — run: nerv start"
+      fi
     fi
     __nerv_clear_loading
     return
+  fi
+  if (( __NERV_DOWN )); then
+    # Completion is answering again; say so once, where the failure was
+    # said. With rows the popup's paint clears this line — the popup is
+    # the sign then.
+    __NERV_DOWN=0 __NERV_NOTICE=1
+    zle -M "[nerv] daemon is back"
+  elif (( __NERV_NOTICE )); then
+    __NERV_NOTICE=0
+    zle -M ""
   fi
   if [[ -n "${NERV_DEBUG:-}" ]]; then
     print -r -- "  complete: got $(print -r -- "$resp" | wc -l | tr -d ' ') lines" >> /tmp/nerv-debug.log
@@ -1660,7 +1689,7 @@ zle -N accept-line __nerv_line_finish
 # selected (browsing, SELECTED==0), Tab instead dives into the list
 # (moves to the first item) so a second Tab accepts it. Use arrows /
 # Shift-Tab to move the highlight without accepting. Outside a popup:
-# defer to zsh's expand-or-complete.
+# defer to whatever held Tab before nerv (__nerv_take_tab).
 #
 # Only checks __NERV_ITEMS, NOT __NERV_ACTIVE: cursor-movement keys
 # don't clear ITEMS but may leave ACTIVE stale, and we'd rather accept
@@ -1677,15 +1706,41 @@ __nerv_accept() {
     # No live popup. The user pressed Tab expecting completion to fire
     # (universal shell habit), or a prior keystroke's popup desynced away.
     # Re-run the query once — bypass the dedup guard so an unchanged
-    # LBUFFER still re-completes — and only defer to zsh's
-    # expand-or-complete when nerv genuinely has nothing (filenames, etc).
+    # LBUFFER still re-completes — and only defer to the key's previous
+    # owner when nerv genuinely has nothing (filenames, etc).
     __NERV_PREV_LBUFFER=$'\x00'
     __nerv_complete
-    (( ${#__NERV_ITEMS} > 0 )) || zle expand-or-complete
+    if (( ${#__NERV_ITEMS} == 0 )); then
+      # A plugin loaded after nerv may have kept nerv's widget as *its*
+      # fallback: handing the key back and forth would never end.
+      if (( __NERV_IN_TAB )); then
+        zle expand-or-complete
+      else
+        __NERV_IN_TAB=1
+        { zle "$__NERV_TAB_PREV" } always { __NERV_IN_TAB=0 }
+      fi
+    fi
   fi
 }
 zle -N __nerv_accept
-bindkey '^I' __nerv_accept
+
+# Tab belongs to nerv while a popup is up, and to whoever had it before
+# when nerv has nothing: zsh's own completion by default, or the widget
+# a plugin put there (fzf-tab, zsh-autocomplete). Taking the key without
+# remembering its owner silenced that plugin for good — nerv re-binds on
+# every prompt, so a plugin that binds once never got the key back.
+# Called at load and from the precmd rebind, so a plugin loaded late
+# (zinit turbo, zsh-defer) is noticed at the next prompt.
+typeset -g __NERV_TAB_PREV=expand-or-complete
+typeset -gi __NERV_IN_TAB=0
+__nerv_take_tab() {
+  local cur="$(bindkey -M main '^I' 2>/dev/null)"
+  cur=${cur##* }
+  [[ $cur == __nerv_accept ]] && return
+  (( ${+widgets[$cur]} )) && __NERV_TAB_PREV=$cur
+  bindkey -M main '^I' __nerv_accept 2>/dev/null
+}
+__nerv_take_tab
 
 # Shift-Tab: cycle UP. Falls back to reverse-menu-complete outside Nerv.
 __nerv_accept_back() {
@@ -1981,8 +2036,9 @@ __nerv_precmd_reset() {
 }
 
 __nerv_rebind() {
-  # Tab / Shift-Tab / Ctrl-G — last writer wins; reassert ours.
-  bindkey -M main '^I'    __nerv_accept       2>/dev/null
+  # Tab / Shift-Tab / Ctrl-G — last writer wins; reassert ours. Tab
+  # remembers the widget it takes the key from.
+  __nerv_take_tab
   bindkey -M main '^[[Z'  __nerv_accept_back  2>/dev/null
   bindkey -M main '^G'    __nerv_dismiss      2>/dev/null
   bindkey -M main ' '     __nerv_space        2>/dev/null

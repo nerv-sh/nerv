@@ -1271,14 +1271,16 @@ fn rank_by_frecency(
             0.0
         }
     };
+    // One lock for the whole popup, not one per row.
+    let accepts = frecency.scores(spec_name, items.iter().map(|s| s.insertion.as_str()));
     // (frecency, directory share, after prev, after head) per row.
     let raw: Vec<(f64, f64, f64, f64)> = items
         .iter()
-        .map(|s| {
+        .zip(accepts)
+        .map(|(s, accepts)| {
             if s.source_ranked {
                 return (0.0, 0.0, 0.0, 0.0);
             }
-            let accepts = frecency.score(spec_name, &s.insertion);
             let Some(t) = signals.and_then(|sig| sig.get(&s.insertion)) else {
                 return (accepts, 0.0, 0.0, 0.0);
             };

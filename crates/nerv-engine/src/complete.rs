@@ -1582,6 +1582,98 @@ fn extends_token(name: &str, token: &str) -> bool {
         .all(|t| name.next().is_some_and(|c| c.eq_ignore_ascii_case(&t)))
 }
 
+/// Word-boundary delimiters for fuzzy tiering: a match starting right
+/// after one of these (or at 0) outranks a mid-word contiguous hit.
+fn is_word_start(chars: &[char], pos: usize) -> bool {
+    if pos == 0 {
+        return true;
+    }
+    matches!(chars[pos - 1], '-' | '_' | '/' | '.' | ' ' | ':')
+}
+
+/// Fuzzy quality key for one `(name, query)` pair, best alignment wins.
+///
+/// Tiers mirror the plan (`starts_with` > word-boundary > contiguous >
+/// gap sum), each stable so emitter order survives ties:
+/// - 0: case-insensitive prefix (`extends_token`)
+/// - 1: contiguous substring starting at a word boundary
+/// - 2: contiguous substring anywhere else
+/// - 3: non-contiguous fuzzy — ordered by total skipped chars
+///   (gap sum), then by match start.
+///
+/// Works on `char`s, never byte offsets (CLAUDE.md §4, UTF-8): the
+/// query only has to appear in order, so byte slicing could split a
+/// multibyte glyph mid-row.
+fn fuzzy_score(name: &str, query: &str) -> (u8, usize, usize) {
+    if query.is_empty() {
+        return (0, 0, 0);
+    }
+    if extends_token(name, query) {
+        return (0, 0, 0);
+    }
+    let n: Vec<char> = name.chars().collect();
+    let q: Vec<char> = query.chars().collect();
+    if q.len() > n.len() {
+        return (3, usize::MAX, usize::MAX);
+    }
+    // Contiguous tiers: earliest word-boundary start wins over a plain
+    // earlier start elsewhere (boundary tier sorts first anyway).
+    let mut boundary_start: Option<usize> = None;
+    let mut plain_start: Option<usize> = None;
+    for s in 0..=n.len() - q.len() {
+        let hit = q
+            .iter()
+            .enumerate()
+            .all(|(j, qc)| n[s + j].eq_ignore_ascii_case(qc));
+        if hit {
+            if is_word_start(&n, s) {
+                boundary_start.get_or_insert(s);
+                break;
+            } else {
+                plain_start.get_or_insert(s);
+            }
+        }
+    }
+    match (boundary_start, plain_start) {
+        (Some(s), _) => return (1, 0, s),
+        (None, Some(s)) => return (2, 0, s),
+        _ => {}
+    }
+    // Fuzzy tier: DP over best (gap_sum, start) ending at each position.
+    // `prev[i]` = best cost to match query[..j] ending exactly at name[i].
+    let mut prev: Vec<Option<(usize, usize)>> = vec![None; n.len()];
+    for (i, nc) in n.iter().enumerate() {
+        if nc.eq_ignore_ascii_case(&q[0]) {
+            prev[i] = Some((0, i));
+        }
+    }
+    for qc in q.iter().skip(1) {
+        let mut cur: Vec<Option<(usize, usize)>> = vec![None; n.len()];
+        for (i, nc) in n.iter().enumerate() {
+            if !nc.eq_ignore_ascii_case(qc) {
+                continue;
+            }
+            let mut best: Option<(usize, usize)> = None;
+            for (k, slot) in prev.iter().enumerate().take(i) {
+                if let Some((cost, start)) = slot {
+                    let cand = (cost + (i - k - 1), *start);
+                    if best.is_none_or(|b| cand < b) {
+                        best = Some(cand);
+                    }
+                }
+            }
+            cur[i] = best;
+        }
+        prev = cur;
+    }
+    prev.into_iter()
+        .flatten()
+        .min()
+        .map_or((3, usize::MAX, usize::MAX), |(cost, start)| {
+            (3, cost, start)
+        })
+}
+
 /// What the row list means once the token is taken into account.
 ///
 /// Two rules, both keyed on the token the user typed:
@@ -1595,8 +1687,9 @@ fn extends_token(name: &str, token: &str) -> bool {
 ///    would insert `predev` instead of running the command. Rows that
 ///    *extend* the token (`dev:web`) are real next steps and stay.
 /// 2. Under fuzzy matching an extending row outranks one that only
-///    contains the letters, whatever the alphabet says. Stable, so each
-///    group keeps the order its emitter chose.
+///    contains the letters, whatever the alphabet says. Within each
+///    group rows score by [`fuzzy_score`] (prefix > word-boundary >
+///    contiguous > gap sum). Stable, so ties keep the emitter order.
 ///
 /// Both rules stand aside for rows a generator ranked itself (zoxide):
 /// there the insertion is a path and the token an abbreviation of it, so
@@ -1622,9 +1715,11 @@ fn settle_typed_token(
         items.retain(|s| extends_token(&s.insertion, token));
     }
     if mode == MatchMode::Fuzzy {
-        let (mut extending, contains): (Vec<_>, Vec<_>) = items
+        let (mut extending, mut contains): (Vec<_>, Vec<_>) = items
             .into_iter()
             .partition(|s| extends_token(&s.insertion, token));
+        extending.sort_by_cached_key(|s| fuzzy_score(&s.insertion, token));
+        contains.sort_by_cached_key(|s| fuzzy_score(&s.insertion, token));
         extending.extend(contains);
         items = extending;
     }
@@ -6728,6 +6823,84 @@ region = us-east-1
     fn rows_that_extend_the_token_rank_above_subsequence_matches() {
         let dir = fuzzy_spec_dir("pn", &["adev", "devx"]);
         assert_eq!(fuzzy_rows(&dir, "pn dev"), ["devx", "adev"]);
+    }
+
+    /// M4 slice 01: fuzzy ranks tighter matches above alpha order.
+    /// `cln` matches both `clean` (skips `ea`) and `clone` (skips `o`);
+    /// alpha puts `clean` first, but `clone` skips fewer letters overall,
+    /// so it must win. Same start, gap sum decides.
+    #[test]
+    fn fuzzy_ranks_tighter_match_above_alpha_order() {
+        let dir = fuzzy_spec_dir("git", &["clean", "clone"]);
+        assert_eq!(fuzzy_rows(&dir, "git cln"), ["clone", "clean"]);
+    }
+
+    /// M4 slice 01 (plan success criterion): `chk` must surface `checkout`
+    /// above `changelog`. `changelog` carries no `k`, so it cannot match
+    /// and must not bury the real hit.
+    #[test]
+    fn fuzzy_chk_surfaces_checkout_above_changelog() {
+        let dir = fuzzy_spec_dir("git", &["checkout", "changelog"]);
+        let rows = fuzzy_rows(&dir, "git chk");
+        assert_eq!(rows, ["checkout"]);
+    }
+
+    /// The ordering itself: both rows match `chk`, and the one that
+    /// sorts first by name skips more letters. Alpha order alone put
+    /// `chaback` on top.
+    #[test]
+    fn fuzzy_orders_two_matches_by_what_they_skip() {
+        let dir = fuzzy_spec_dir("git", &["chaback", "checkout"]);
+        assert_eq!(fuzzy_rows(&dir, "git chk"), ["checkout", "chaback"]);
+    }
+
+    /// Tier order: extends the token, then a whole run at a word start,
+    /// then a whole run anywhere, then scattered letters.
+    #[test]
+    fn fuzzy_score_tiers_are_ordered() {
+        assert_eq!(fuzzy_score("dev:web", "dev").0, 0);
+        assert_eq!(fuzzy_score("pre-dev", "dev").0, 1);
+        assert_eq!(fuzzy_score("adev", "dev").0, 2);
+        assert_eq!(fuzzy_score("dxexv", "dev").0, 3);
+        assert!(fuzzy_score("pre-dev", "dev") < fuzzy_score("adev", "dev"));
+        assert!(fuzzy_score("adev", "dev") < fuzzy_score("dxexv", "dev"));
+        // Within the scattered tier, fewer skipped letters first.
+        assert!(fuzzy_score("checkout", "chk") < fuzzy_score("chaback", "chk"));
+    }
+
+    /// M4 slice 01: a mixed response containing a generator-ranked row
+    /// keeps engine order (source_ranked early-return, no rescoring).
+    #[test]
+    fn fuzzy_scoring_leaves_mixed_source_ranked_order_alone() {
+        use crate::ipc::Suggestion;
+        let row = |insertion: &str, ranked: bool| Suggestion {
+            insertion: insertion.into(),
+            display: insertion.into(),
+            source_ranked: ranked,
+            ..Default::default()
+        };
+        let items = vec![
+            row("checkout", false),
+            row("/z/aaa", true),
+            row("commit", false),
+        ];
+        let (settled, complete) = settle_typed_token(items.clone(), "cot", MatchMode::Fuzzy);
+        assert_eq!(settled, items);
+        assert!(!complete);
+    }
+
+    /// M4 slice 01 (review focus): prefix users see no reorder — scoring
+    /// runs only under `Fuzzy`, so the default path stays alpha.
+    #[test]
+    fn prefix_mode_order_is_untouched_by_fuzzy_scoring() {
+        let dir = fuzzy_spec_dir("git", &["checkout", "commit"]);
+        let r = SpecRegistry::at_dir(dir.path());
+        let rows: Vec<String> = complete_in("git c", 5, &r, None, MatchMode::Prefix, None)
+            .items
+            .into_iter()
+            .map(|s| s.insertion)
+            .collect();
+        assert_eq!(rows, ["checkout", "commit"]);
     }
 
     /// The rules key on the token, not on the mode: a spec that asked
