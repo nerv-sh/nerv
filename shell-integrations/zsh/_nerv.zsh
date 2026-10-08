@@ -1281,7 +1281,7 @@ __nerv_complete() {
     if (( rc == 3 )); then
       if (( ! __NERV_E5_SHOWN )); then
         __NERV_E5_SHOWN=1
-        zle -R "[nerv] spec mismatch — run: brew reinstall nerv"
+        zle -R "[nerv] spec mismatch — run: nerv doctor"
         __NERV_ACTIVE=1
       fi
     elif (( ! __NERV_E1_SHOWN )); then

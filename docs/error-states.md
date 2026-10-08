@@ -193,7 +193,7 @@ THEN:
 
 ### 3.5 E5 — spec 버전 불일치 ✅ 구현 완료 (2026-06-07)
 
-> 구현: `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2`, `check_schema`). build-specs 가 `manifest.json` 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` → CLI bridge exit 3 → ZLE 회색 1줄 + `nerv doctor` red row. **missing manifest 는 관대** (pre-manifest 설치 호환). 테스트: manifest 5 unit + `schema_mismatch_disables_completion` e2e.
+> 구현: `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=3`, `check_schema`). build-specs 가 `manifest.json` 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` → CLI bridge exit 3 → ZLE 회색 1줄 + `nerv doctor` red row. **missing manifest 는 관대** (pre-manifest 설치 호환). 테스트: manifest 5 unit + `schema_mismatch_disables_completion` e2e.
 >
 > `nerv _complete` 의 exit code: 0 = 행 있음/없음 · 3 = E5 schema mismatch · **4 = 행 있음 + 친 토큰이 이미 후보 이름** (에러 아님 — 위젯이 sentinel 을 기본 선택, first-5-min §0.9) · **7 = 행 없음 + spec 로딩 중** (에러 아님 — 위젯이 `…loading` 1줄, 아래 §3.5b) · 그 외 = 데몬 없음(E1).
 
@@ -213,15 +213,13 @@ THEN:
 **사용자 화면** (stderr, 데몬 로그):
 
 ```
-[nerv] spec schema mismatch — daemon expects v2, found v1.
-       Run: brew reinstall nerv  (또는: nerv doctor)
-       Autocomplete disabled until resolved.
+[nerv] spec schema mismatch — daemon expects v3, found v2. Run: nerv doctor. Autocomplete disabled until resolved.
 ```
 
 추가로 ZLE 가 첫 키 입력 시 회색 1줄:
 
 ```
-[nerv] spec mismatch — run: brew reinstall nerv
+[nerv] spec mismatch — run: nerv doctor
 ```
 
 **규칙**:
