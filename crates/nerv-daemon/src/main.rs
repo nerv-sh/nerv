@@ -912,12 +912,12 @@ fn engine_complete_paths(
     // and runs from every directory, a folder only from this one, so a
     // folder never entered would otherwise sit under the constants.
     // Stable, so each group keeps its ranked order (`./`, `../` first).
-    // Cached key: one stat per row, not one per comparison.
-    result.items.sort_by_cached_key(|s| {
+    // The engine's folder icon says the row was read from the disk for
+    // this request, so no row is stat'ed again here; a spec's own `x/`
+    // row (`https://github.com/`) carries none and stays a constant.
+    result.items.sort_by_key(|s| {
         let history = history_words.contains(&s.insertion);
-        let folder_here = !history
-            && s.insertion.ends_with('/')
-            && cwd_path.is_some_and(|d| d.join(&s.insertion).is_dir());
+        let folder_here = !history && s.icon.as_deref() == Some(nerv_engine::complete::FOLDER_ICON);
         (history, !folder_here)
     });
     // Ranking already truncated to the transport cap (MAX_SUGGESTIONS).
@@ -2178,6 +2178,39 @@ mod tests {
         };
         let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(words, ["beta/", "alpha/", "gamma/", "-", "~"]);
+    }
+
+    /// A spec's own row that merely ends in `/` is a constant, not a
+    /// folder here: it stays under the folders the listing found.
+    #[test]
+    fn a_spec_row_ending_in_a_slash_is_not_a_folder_here() {
+        let specs = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            specs.path().join("cd.json"),
+            r#"{"name":"cd","args":[{"suggestions":[{"name":"https://github.com/"}],
+                "generators":[{"type":"filepaths","folders_only":true}]}]}"#,
+        )
+        .expect("write spec");
+        let cwd = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(cwd.path().join("zeta")).expect("mkdir");
+        let resp = engine_complete(
+            &SpecRegistry::at_dir(specs.path()),
+            Ranking {
+                frecency: &FrecencyStore::empty(),
+                history: None,
+                prev: "",
+            },
+            None,
+            "cd ",
+            3,
+            cwd.path().to_str(),
+            MatchMode::default(),
+        );
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected rows, got {resp:?}");
+        };
+        let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(words, ["zeta/", "https://github.com/"]);
     }
 
     /// The widget counts the cursor in characters. Read as bytes, the

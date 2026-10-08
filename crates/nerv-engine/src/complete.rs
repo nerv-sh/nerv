@@ -847,6 +847,11 @@ pub fn loading_kind(reason: &str) -> Option<&str> {
 /// popup's icon column next to spec rows that carry `$`.
 pub const HISTORY_ICON: &str = "!";
 
+/// Icon on directory rows read from the filesystem ([`filepaths_at`]).
+/// The daemon groups rows by it: a row that carries it is a folder that
+/// exists where the listing was read, without asking the disk again.
+pub const FOLDER_ICON: &str = "📁";
+
 /// Recover the command name from a "no spec for …" reason. `None` for
 /// every other reason (empty input, quoted string, schema mismatch).
 pub fn no_spec_binary(reason: &str) -> Option<&str> {
@@ -4246,7 +4251,7 @@ fn filepaths_at(
         let icon = if is_symlink {
             Some("🔗".to_string())
         } else if is_dir {
-            Some("📁".to_string())
+            Some(FOLDER_ICON.to_string())
         } else {
             Some("📄".to_string())
         };
@@ -4271,7 +4276,7 @@ fn filepaths_at(
                     format!("{dir_part}{name}/"),
                     format!("{name}/"),
                     Some(desc.to_string()),
-                    Some("📁".to_string()),
+                    Some(FOLDER_ICON.to_string()),
                 ),
                 None,
             ));
