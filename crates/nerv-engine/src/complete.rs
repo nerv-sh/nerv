@@ -1858,7 +1858,10 @@ fn mode_match(name: &str, query: &str, mode: MatchMode) -> bool {
             fuzzy_match_within(name, query, FUZZY_MAX_GAP)
         }
         // Prefix folds ASCII case like `ci_starts_with` (filepaths) and
-        // fuzzy already do: `git Ch` reaches `checkout`.
+        // fuzzy already do: `git Ch` reaches `checkout`. Not for options:
+        // `-a` and `-A` are different flags, and offering one for the
+        // other would have Enter replace what was typed.
+        _ if query.starts_with('-') => name.starts_with(query),
         _ => ci_starts_with(name, query),
     }
 }
@@ -7496,6 +7499,16 @@ region = us-east-1
         assert!(fuzzy_match_within("Checkout", "CHK", 4));
         assert!(fuzzy_match_within("anything", "", 4));
         assert!(!fuzzy_match_within("ab", "abc", 4));
+    }
+
+    /// Case is folded for words, never for options: `-A` is not `-a`.
+    #[test]
+    fn prefix_folds_case_for_words_but_not_for_options() {
+        assert!(mode_match("checkout", "Ch", MatchMode::Prefix));
+        assert!(mode_match("-a", "-a", MatchMode::Prefix));
+        assert!(!mode_match("-a", "-A", MatchMode::Prefix));
+        assert!(!mode_match("--all", "--AL", MatchMode::Prefix));
+        assert!(mode_match("--all", "--al", MatchMode::Prefix));
     }
 
     #[test]

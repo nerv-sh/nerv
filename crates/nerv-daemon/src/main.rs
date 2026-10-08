@@ -165,8 +165,21 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
+    // A throttled flush is only retried by the next record. Without this
+    // tick the last accept of a session stayed in memory until shutdown,
+    // and a kill or a crash lost it; now it is on disk within one tick.
+    let mut flush_tick = tokio::time::interval(STORE_FLUSH_TICK);
+    flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
+            _ = flush_tick.tick() => {
+                let (frecency, misses) = (frecency.clone(), misses.clone());
+                tokio::task::spawn_blocking(move || {
+                    frecency.flush_if_dirty();
+                    misses.flush_if_dirty();
+                });
+            }
             res = listener.accept() => {
                 match res {
                     Ok((stream, _addr)) => {
@@ -992,6 +1005,11 @@ fn last_word_start(typed: &str) -> usize {
         at += len;
     }
 }
+
+/// How often the daemon writes out what the usage stores still hold in
+/// memory (both no-ops when nothing changed). The stores throttle their
+/// own writes to the same interval.
+const STORE_FLUSH_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `line` up to `cursor`. The widget counts the cursor in characters
 /// (`${#send_line}`), so a byte slice would split `ls 한글` mid-character
