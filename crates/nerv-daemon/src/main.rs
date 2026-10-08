@@ -154,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
 
     let shared = Shared {
         registry,
-        frecency,
+        frecency: frecency.clone(),
         misses: misses.clone(),
         names,
         history,
@@ -182,10 +182,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Last chance to persist the tally: `flush_if_dirty` is throttled
+    // Last chance to persist the tallies: `flush_if_dirty` is throttled
     // (MIN_FLUSH_INTERVAL) so the counts from the final window are still
     // in memory here.
     misses.flush_now();
+    frecency.flush_now();
 
     let _ = tokio::fs::remove_file(&sock_path).await;
     let _ = tokio::fs::remove_file(&pid_path).await;
