@@ -128,7 +128,9 @@ token too; their names live in the daemon's memory only, never on disk.
 
 The popup opens as you type. Its first row, **Immediately execute**, is
 highlighted by default, so Enter still runs what you typed; the list only
-takes a key once you move into it.
+takes a key once you move into it. The row always names what Enter will do
+from the current highlight — `Enter: run` on itself, `Enter: insert` on an
+item.
 
 | Key | What it does |
 |---|---|
@@ -136,7 +138,7 @@ takes a key once you move into it.
 | <kbd>PageDown</kbd> / <kbd>PageUp</kbd> | Move a page at a time |
 | <kbd>Tab</kbd> | Insert the highlighted item and open the next level (a subcommand's flags, a flag's values). On *Immediately execute* it moves to the first item |
 | <kbd>Shift</kbd>+<kbd>Tab</kbd> | Move the highlight up |
-| <kbd>Enter</kbd> | On *Immediately execute*, run the line as typed. On an item, insert it; a folder is inserted and run in the same keypress |
+| <kbd>Enter</kbd> | On *Immediately execute*, run the line as typed. On an item, insert it and stay on the line — folders included, so a mis-highlight never `cd`s away; a second Enter runs the line |
 | <kbd>→</kbd> | Accept the grey ghost text |
 | <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>G</kbd> | Close the popup and its ghost text |
 

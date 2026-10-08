@@ -476,11 +476,14 @@ __nerv_show_popup() {
 
   # "Immediately execute" sentinel row (Fig parity) — drawn ONLY at a
   # segment boundary (browsing), where it's row 0 and highlighted by
-  # default (SELECTED==0). Hidden while the user filters a token. Content
-  # = `↩` + label, width-measured so the right border stays aligned even
-  # if the glyph renders as 2 cells. Enter here runs the line as typed.
+  # default (SELECTED==0). Hidden while the user filters a token. The
+  # label names what Enter does from the CURRENT selection — run on the
+  # sentinel, insert on an item — so the meaning is visible before the
+  # keypress. Width-measured so the right border stays aligned even if
+  # the glyph renders as 2 cells.
   if (( __NERV_HAS_SENTINEL )); then
-    local sent_txt="↩ Immediately execute"
+    local sent_txt="↩ Immediately execute — Enter: run"
+    (( __NERV_SELECTED != 0 )) && sent_txt="↩ Immediately execute — Enter: insert"
     local sent_w=${(m)#sent_txt}
     # Narrow window: truncate the label on a cell boundary so the
     # sentinel row can't overflow the box either.
@@ -1577,29 +1580,24 @@ zle -N backward-delete-char __nerv_backward_delete
 # Enter: select if popup, else execute
 __nerv_line_finish() {
   # Enter inserts the highlighted item ONLY when a real item is selected
-  # (SELECTED >= 1). On the default "Immediately execute" sentinel
-  # (SELECTED == 0) — or with no popup — Enter runs the line as typed.
-  # This is the Fig model: `cd ` / `z ` + Enter execute the command;
-  # navigate down to a folder first to insert one.
+  # (SELECTED >= 1) — and never runs it, not even a directory: an
+  # arrowed-to `apps/` + Enter lands `cd apps/` on the line and stays,
+  # so a mis-highlight costs nothing (a second Enter runs the line).
+  # On the default "Immediately execute" sentinel (SELECTED == 0) — or
+  # with no popup — Enter runs the line as typed. This is the Fig model:
+  # `cd ` / `z ` + Enter execute the command; navigate to pick one.
   if (( __NERV_ACTIVE && __NERV_SELECTED >= 1 && ${#__NERV_ITEMS} > 0 )); then
-    # Model: Enter runs, Tab drills. When the highlighted item is a
-    # directory (insertion ends in `/` — `../`, `cli/`, `src/`, …),
-    # picking it with Enter means "go there": insert it AND run the line
-    # in the same keypress, no second Enter. To descend further into
-    # subdirectories instead, use Tab — it inserts and re-opens the
-    # popup at the next level. Non-directory items (subcommands, flags,
-    # branches) stay insert-only: running e.g. bare `git checkout` on
-    # Enter would fire an incomplete command.
-    local __idx=$__NERV_SELECTED
-    (( __idx > ${#__NERV_ITEMS} )) && __idx=1
-    local __ins="${__NERV_ITEMS[$__idx]%%	*}"
+    # Insert-only, then re-query so the next level pops up at once
+    # (same chain as Tab's accept path below). Bypass the dedup guard.
+    # Non-directory items behave exactly as before; directories used to
+    # insert AND run here — that immediate `cd` on a mis-highlight is
+    # what insert-only removes. Exceptions stay: a lone command-word
+    # correction rewrites its span (no frecency either way), and a
+    # fully-typed token (rc 4) keeps the sentinel default, so Enter on
+    # it still runs what was typed.
     __nerv_insert_selected
-    if [[ "$__ins" == */ ]]; then
-      __NERV_PREV_LBUFFER=""
-      __NERV_SELECTED=0
-      __NERV_ITEMS=()
-      zle .accept-line
-    fi
+    __NERV_PREV_LBUFFER=$'\x00'
+    __nerv_complete
   else
     (( __NERV_ACTIVE )) && { __NERV_ACTIVE=0; zle -R ""; }
     # A stale `…loading` hint must not outlive the line it belonged to.
