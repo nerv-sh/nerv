@@ -165,6 +165,7 @@ prompt> git c█           │ ← 사용자 입력 라인     │
 
 - 일반적으로 ANSI 표준 준수도가 더 높음 → 큰 이슈 없음.
 - *공통*: 사용자가 사용자 정의 keybinding 으로 Tab/Esc 를 가로챘다면 Nerv 가 받지 못함. 회피 가이드 문서.
+- *vi-mode / KEYTIMEOUT*: Nerv 는 `KEYTIMEOUT` 이 zsh 기본값(40)일 때만 `1` 로 낮추고 원값을 `__NERV_KEYTIMEOUT_ORIG` 에 보관한다 (`__nerv_restore_keytimeout` 으로 복원). Esc 는 팝업·예측이 떠 있으면 닫기만 하고, 없으면 viins 에서 `vi-cmd-mode` 로 넘긴다.
 - *Kitty*: 사용자 정의 graphics protocol 활성 시에도 영향 없도록 OSC 미사용 원칙 유지.
 
 ### 5.4 위치 계산 일반 원칙
