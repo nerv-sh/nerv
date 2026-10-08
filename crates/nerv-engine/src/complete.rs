@@ -2583,15 +2583,15 @@ fn emit_candidates_for_arg(
                     source: Some(source),
                     ..
                 } => {
-                    // Tier C: spin up a fresh QuickJS sandbox per call,
-                    // run the captured closure with the live token list,
-                    // and surface returned strings. Soft-fail on any
-                    // error (parse / throw / timeout / non-array) —
-                    // the dispatcher just falls through to the next
-                    // generator or the smart fallback.
+                    // Tier C: run the captured closure in a QuickJS
+                    // sandbox with the live token list (memoized per
+                    // source/tokens/cwd), and surface returned strings.
+                    // Soft-fail on any error (parse / throw / timeout /
+                    // non-array) — the dispatcher just falls through to
+                    // the next generator or the smart fallback.
                     let token_strs: Vec<String> = tokens.iter().map(|a| a.text.clone()).collect();
                     if let Some(cands) =
-                        crate::tier_c::execute_custom_source(source, &token_strs, cwd)
+                        crate::tier_c::execute_custom_source_cached(source, &token_strs, cwd)
                     {
                         // Path / URL-style generators (aws `s3://…`, file
                         // paths) return candidates for the segment AFTER the
