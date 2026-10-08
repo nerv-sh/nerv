@@ -1353,7 +1353,11 @@ pub fn complete_in(
             // and the widget shows its one-line loading hint.
             reason: Some(if settled {
                 format!("{NO_SPEC_REASON_PREFIX}{binary}")
-            } else if registry.has_written_spec(binary) {
+            } else if !unspecced {
+                // Same probe as above (`unspecced` IS `!has_written_spec`
+                // for this binary): a written spec whose parse is still
+                // in flight. One probe, not two — the filesystem could
+                // change between them.
                 format!("{LOADING_REASON_PREFIX}spec")
             } else {
                 format!("{LOADING_REASON_PREFIX}derived")

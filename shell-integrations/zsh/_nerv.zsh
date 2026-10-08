@@ -154,6 +154,12 @@ __nerv_clear_state_vars() {
   __NERV_RESERVED=0
   __NERV_PAINTED=""
   __NERV_ITEMS=()
+  # The loading hint is popup-state too: any path that drops the popup
+  # must not leave a stale `…loading` behind. (The visible status line
+  # itself is cleared with `zle -R ""` where a widget runs; traps and
+  # precmd can't, so they only drop the flag and the next keystroke
+  # clears or overwrites the line.)
+  __NERV_LOADING_SHOWN=0
 }
 
 __nerv_reset_state() {
@@ -482,8 +488,9 @@ __nerv_show_popup() {
   # keypress. Width-measured so the right border stays aligned even if
   # the glyph renders as 2 cells.
   if (( __NERV_HAS_SENTINEL )); then
-    local sent_txt="↩ Immediately execute — Enter: run"
-    (( __NERV_SELECTED != 0 )) && sent_txt="↩ Immediately execute — Enter: insert"
+    local sent_act=run
+    (( __NERV_SELECTED != 0 )) && sent_act=insert
+    local sent_txt="↩ Immediately execute — Enter: $sent_act"
     local sent_w=${(m)#sent_txt}
     # Narrow window: truncate the label on a cell boundary so the
     # sentinel row can't overflow the box either.
@@ -1577,6 +1584,18 @@ zle -A backward-delete-char __nerv_orig_backward_delete_char 2>/dev/null
 __nerv_backward_delete() { zle __nerv_orig_backward_delete_char "$@"; __nerv_complete; }
 zle -N backward-delete-char __nerv_backward_delete
 
+# Insert the highlight, then re-run completion so the next level pops up
+# at once (a subcommand's flags, a flag's values, a folder's contents) —
+# the user shouldn't have to type a throwaway character to see the next
+# step. Bypasses the dedup guard. No-op popup-wise when nothing follows.
+# Single owner for the insert + dedup-bypass + requery idiom (Enter and
+# Tab share it).
+__nerv_insert_and_requery() {
+  __nerv_insert_selected
+  __NERV_PREV_LBUFFER=$'\x00'
+  __nerv_complete
+}
+
 # Enter: select if popup, else execute
 __nerv_line_finish() {
   # Enter inserts the highlighted item ONLY when a real item is selected
@@ -1595,9 +1614,7 @@ __nerv_line_finish() {
     # correction rewrites its span (no frecency either way), and a
     # fully-typed token (rc 4) keeps the sentinel default, so Enter on
     # it still runs what was typed.
-    __nerv_insert_selected
-    __NERV_PREV_LBUFFER=$'\x00'
-    __nerv_complete
+    __nerv_insert_and_requery
   else
     (( __NERV_ACTIVE )) && { __NERV_ACTIVE=0; zle -R ""; }
     # A stale `…loading` hint must not outlive the line it belonged to.
@@ -1625,13 +1642,7 @@ zle -N accept-line __nerv_line_finish
 __nerv_accept() {
   if (( ${#__NERV_ITEMS} > 0 )); then
     if (( __NERV_SELECTED >= 1 )); then
-      __nerv_insert_selected
-      # Chain: after accepting a flag (`--profile `) or subcommand, re-run
-      # completion so its argument list (the profiles) pops up immediately —
-      # the user shouldn't have to type a throwaway character to see the next
-      # step. Bypass the dedup guard. No-op popup-wise when nothing follows.
-      __NERV_PREV_LBUFFER=$'\x00'
-      __nerv_complete
+      __nerv_insert_and_requery
     else
       __nerv_cycle_next
       __nerv_show_popup "${__NERV_ITEMS[@]}"
