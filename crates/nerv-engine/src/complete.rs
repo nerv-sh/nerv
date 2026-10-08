@@ -4305,11 +4305,12 @@ fn filepaths_at(
         let b_exact = b.1.starts_with(filter);
         b_exact.cmp(&a_exact).then_with(|| a.1.cmp(&b.1))
     });
+    let mut summarized = 0;
     Some(
         out.into_iter()
-            .enumerate()
-            .map(|(idx, (mut row, dir))| {
-                if let Some(dir) = dir.filter(|_| idx < DIR_SUMMARY_ROWS) {
+            .map(|(mut row, dir)| {
+                if let Some(dir) = dir.filter(|_| summarized < DIR_SUMMARY_ROWS) {
+                    summarized += 1;
                     row.2 = Some(dir_summary(&dir));
                 }
                 row
@@ -4318,10 +4319,13 @@ fn filepaths_at(
     )
 }
 
-/// How many leading rows of a listing get a directory's item count
-/// ([`dir_summary`], one `read_dir` each); the rest say `dir`. Twice the
-/// popup's window of 8: the first page down still shows counts, and a
-/// folder with hundreds of subfolders costs the same as one with sixteen.
+/// How many leading directories of a listing get an item count
+/// ([`dir_summary`], one `read_dir` each); the rest say `dir`. Directories
+/// are counted, not rows: the daemon lifts folders above files, so the
+/// ones that lead the popup are the first directories, wherever files
+/// sort. Twice the popup's window of 8: the first page down still shows
+/// counts, and a folder with hundreds of subfolders costs the same as one
+/// with sixteen.
 const DIR_SUMMARY_ROWS: usize = 16;
 
 /// ASCII case-insensitive prefix test for filename completion. Non-ASCII
@@ -8450,6 +8454,20 @@ region = us-east-1
         assert_eq!(descs.len(), DIR_SUMMARY_ROWS + 4);
         assert!(descs[..DIR_SUMMARY_ROWS].iter().all(|d| *d == "1 item"));
         assert!(descs[DIR_SUMMARY_ROWS..].iter().all(|d| *d == "dir"));
+    }
+
+    /// Files that sort ahead of the folders do not use up the counts:
+    /// the daemon shows folders first.
+    #[test]
+    fn files_sorting_first_do_not_use_up_the_summaries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..DIR_SUMMARY_ROWS + 4 {
+            std::fs::write(tmp.path().join(format!("A{i:02}")), "").unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("zdir")).unwrap();
+        let rows = filepaths_at(Some(tmp.path()), "", false).unwrap();
+        let zdir = rows.iter().find(|r| r.0 == "zdir/").expect("zdir row");
+        assert_eq!(zdir.2.as_deref(), Some("empty"));
     }
 
     #[test]
