@@ -27,7 +27,6 @@ import argparse
 import fcntl
 import os
 import pty
-import re
 import select
 import shutil
 import signal
@@ -52,7 +51,6 @@ COLS, ROWS = 100, 20
 
 TYPED = "git c"                # fixture git spec: checkout, commit
 ITEMS = 2                      # box rows = items + 4: borders, separator, footer
-FOOTER = re.compile(r"\[\d+(/\d+)?\]")    # [i/n], or [n] while the sentinel row is selected
 BOX = set("╭╮╰╯│├┤")
 
 
@@ -76,21 +74,23 @@ def box_rows(lines):
 
 
 def popup_up(lines):
-    """The whole `git c` box is on screen: every row, and the [i/n] footer."""
+    """The whole `git c` box is on screen: every row between its borders.
+    (The ZLE footer carries a counter only when the list scrolls, so the
+    row count and the two borders are what say the box is complete.)"""
     rows = box_rows(lines)
-    return len(rows) == ITEMS + 4 and any(FOOTER.search(l) for l in rows)
+    return (len(rows) == ITEMS + 4 and "╭" in rows[0] and "╰" in rows[-1])
 
 
 def box_whole(lines, min_items):
     """A complete box of at least `min_items` rows: contiguous, top and
-    bottom borders, separator and footer. Row counts differ by path (ZLE
+    bottom borders and the separator above the footer. Row counts differ by path (ZLE
     adds an "↩ Immediately execute" row after a trailing space)."""
     idx = [i for i, l in enumerate(lines) if any(ch in BOX for ch in l)]
     if not idx or idx != list(range(idx[0], idx[-1] + 1)):
         return False
     rows = [lines[i] for i in idx]
     return ("╭" in rows[0] and "╰" in rows[-1] and any("├" in r for r in rows)
-            and any(FOOTER.search(r) for r in rows) and len(rows) - 4 >= min_items)
+            and len(rows) - 4 >= min_items)
 
 
 def wait_for(pane, pred, timeout=6.0):
@@ -139,8 +139,9 @@ def shell_cmd(path, env=""):
 
 
 class Harness:
-    def __init__(self, path):
+    def __init__(self, path, chrome=False):
         self.path = path
+        self.chrome = chrome
         self.home, self.env, self.prompt = make_env(path)
 
     def start(self):
@@ -161,10 +162,14 @@ class Harness:
                         "-s", SESSION, "-x", str(COLS), "-y", str(ROWS), "sleep 3600"],
                        env=self.env, check=True)
         tmux("set", "-g", "default-size", f"{COLS}x{ROWS}")
-        tmux("set", "-g", "status", "off")
-        # An attached client would otherwise resize the window to its own
-        # pty, which is a SIGWINCH the detach/attach case must not send.
-        tmux("set", "-g", "window-size", "manual")
+        if self.chrome:
+            # The options users actually run with: a status line, a border
+            # row per pane, and extended (CSI u) keys.
+            tmux("set", "-g", "status", "on")
+            tmux("set", "-g", "pane-border-status", "top")
+            tmux("set", "-g", "extended-keys", "on")
+        else:
+            tmux("set", "-g", "status", "off")
 
     def stop(self):
         tmux("kill-server", check=False)
@@ -175,6 +180,11 @@ class Harness:
         """A fresh window running the shell under test; returns its pane id."""
         pane = tmux("new-window", "-t", SESSION, "-P", "-F", "#{pane_id}",
                     shell_cmd(self.path, env)).strip()
+        # An attached client would otherwise resize the window to its own
+        # pty, which is a SIGWINCH the detach/attach case must not send.
+        # Per window: a global `window-size manual` crashes tmux 3.5a on
+        # the next clientless `new-window`.
+        tmux("set", "-w", "-t", pane, "window-size", "manual")
         self.ready(pane)
         return pane
 
@@ -465,6 +475,8 @@ PATH_SCENARIOS = {
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--path", choices=("zle", "pty"), required=True)
+    ap.add_argument("--chrome", action="store_true",
+                    help="status on + pane-border-status top + extended-keys on")
     args = ap.parse_args()
 
     need = [NERV] + ([NERV_PTY] if args.path == "pty" else [])
@@ -486,7 +498,7 @@ def main():
     signal.signal(signal.SIGTERM, bail)
     signal.signal(signal.SIGHUP, bail)
 
-    h = Harness(args.path)
+    h = Harness(args.path, chrome=args.chrome)
     failed = []
     try:
         h.start()
@@ -501,7 +513,8 @@ def main():
     if failed:
         log(f"FAIL — {', '.join(failed)}")
         return 1
-    log(f"PASS — {len(scenarios)} scenarios on the {args.path} path")
+    chrome = " with tmux chrome" if args.chrome else ""
+    log(f"PASS — {len(scenarios)} scenarios on the {args.path} path{chrome}")
     return 0
 
 
