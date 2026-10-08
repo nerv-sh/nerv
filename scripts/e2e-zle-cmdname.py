@@ -80,6 +80,92 @@ def pump(fd, seconds):
     return out
 
 
+def vi_session(env, home):
+    """vi-mode Esc. `bindkey -v` before the init block makes nerv's Esc
+    binding land in viins: with a popup up Esc only closes it (insert mode
+    stays), without one Esc must still reach normal mode."""
+    log("vi session: bindkey -v before init")
+    failures = []
+    zdot = os.path.join(home, "zdot-vi")
+    os.makedirs(zdot, exist_ok=True)
+    dump = os.path.join(home, "buffer-vi")
+    with open(os.path.join(zdot, ".zshrc"), "w") as f:
+        f.write("PS1='%# '\n")
+        f.write("bindkey -v\n")
+        f.write(f"__dump() {{ print -rn -- \"$BUFFER\" > {dump}; }}\n")
+        f.write("zle -N __dump\n")
+        f.write("bindkey -M viins '^X^B' __dump; bindkey -M vicmd '^X^B' __dump\n")
+        f.write(f"PATH={os.path.join(home, 'emptybin')}\n")
+        f.write(f'eval "$({NERV} init zsh)"\n')
+    env3 = dict(env)
+    env3["ZDOTDIR"] = zdot
+    subprocess.run([NERV, "start"], env=env3, capture_output=True)
+    time.sleep(1.0)
+    master3 = None
+    proc3 = None
+
+    def buffer_after(keys):
+        if os.path.exists(dump):
+            os.remove(dump)
+        for k in keys:
+            os.write(master3, k)
+            pump(master3, 0.6)
+        os.write(master3, b"\x18\x02")
+        pump(master3, 0.6)
+        got = open(dump).read() if os.path.exists(dump) else None
+        os.write(master3, b"\x03")  # fresh line for the next case
+        pump(master3, 0.6)
+        return got
+
+    try:
+        master3, s3 = pty.openpty()
+        fcntl.ioctl(s3, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        proc3 = subprocess.Popen(
+            ["/bin/zsh"],
+            preexec_fn=_session_leader,
+            stdin=s3,
+            stdout=s3,
+            stderr=s3,
+            env=env3,
+            close_fds=True,
+        )
+        os.close(s3)
+        pump(master3, 2.0)
+
+        # Popup up: Esc closes it and insert mode stays, so `Z` is typed.
+        os.write(master3, b"pn de")
+        shown = strip_ansi(pump(master3, 1.5)).decode(errors="replace")
+        if "dev:web" not in shown:
+            failures.append("vi: 'pn de' drew no popup — the Esc-closes check is vacuous")
+        buf = buffer_after([b"\x1b", b"Z"])
+        if buf != "pn deZ":
+            failures.append(f"vi: Esc over a popup left insert mode: {buf!r}")
+        log(f"vi popup+Esc+Z: buffer={buf!r}")
+
+        # No popup (^G dismissed it): Esc reaches normal mode, so `0iX`
+        # inserts at the line start instead of being typed.
+        buf = buffer_after([b"pn dev", b"\x07", b"\x1b", b"0", b"i", b"X"])
+        if buf != "Xpn dev":
+            failures.append(f"vi: Esc did not reach normal mode: {buf!r}")
+        log(f"vi Esc+0iX: buffer={buf!r}")
+
+        os.write(master3, b"exit\n")
+        time.sleep(0.3)
+    except OSError as e:
+        failures.append(f"pty error (vi session): {e}")
+    finally:
+        if proc3 is not None:
+            proc3.send_signal(signal.SIGTERM)
+            try:
+                proc3.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc3.kill()
+        if master3 is not None:
+            os.close(master3)
+        subprocess.run([NERV, "stop"], env=env3, capture_output=True)
+    return failures
+
+
 def main():
     if not os.path.exists(NERV):
         log(f"missing binary: {NERV} — run `cargo build -p nerv-cli`")
@@ -574,6 +660,8 @@ def main():
         if master2 is not None:
             os.close(master2)
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
+
+    failures += vi_session(env, home)
 
     # No widget may leak shell diagnostics onto the terminal — a second
     # `local` on an existing variable prints `NAME=value` (v0.1.12 did this
