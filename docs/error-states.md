@@ -365,6 +365,10 @@ THEN: 첫 키 뒤 화면에 `…loading` 이 남아 있고, 다음 키에 행이
   단어(`nosuchbin`)와 spec 없는 실제 바이너리(PATH 에 있음)는 그대로 센다 — 후자가
   overlay spec 을 쓸 진짜 대상이다. 도입 전(v0.1.11 이하)에 쌓인 오타 행은 자동 정리하지
   않는다 (`rm ~/Library/Caches/nerv/misses.tsv`).
+- **PATH 목록이 최신이 아니면 교정하지 않는다.** 데몬 부팅 직후 첫 PATH 스캔이 끝나기
+  전이나 PATH 디렉터리가 바뀐 뒤 재스캔이 끝나기 전에는, 목록에 없는 단어가 방금 설치한
+  실제 명령일 수 있다 (`pnpm` 을 `npm` 오타로 읽던 경우). 그 동안 `did you mean` 행은
+  나오지 않고, 스캔이 끝난 다음 키부터 정상으로 돌아온다 (`CommandNames::path_pending`).
 - **스큐가 남긴 shell 이름 행은 프루닝된다 — v1.8.** 버전 스큐(§3.6.7) 기간의 데몬은
   shell 함수·alias 이름 소스가 없어, shell 이 실제로 완성하는 단어(`p10k`)가 miss 로
   집계될 수 있다. 등록된 shell 이름을 아는 새 데몬이 그런 행을 지운다 — shell 이 스스로
