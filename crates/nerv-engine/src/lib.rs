@@ -36,7 +36,10 @@ pub mod misses;
 #[cfg(feature = "quickjs")]
 pub mod tier_c;
 
-pub use complete::{CompleteResult, SpecRegistry, complete, complete_in, no_spec_binary};
+pub use complete::{
+    CompleteResult, LOADING_REASON_PREFIX, NO_SPEC_REASON_PREFIX, SpecRegistry, complete,
+    complete_in, loading_kind, no_spec_binary,
+};
 pub use config::{Config, DerivedConfig, MatchMode, MatchingConfig};
 pub use frecency::FrecencyStore;
 pub use history::HistoryStore;

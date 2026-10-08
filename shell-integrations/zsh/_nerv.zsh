@@ -23,6 +23,10 @@ typeset -g __NERV_BIN="${NERV_BIN:-nerv}"
 typeset -g __NERV_PREV_LBUFFER=""
 typeset -gi __NERV_E1_SHOWN=0
 typeset -gi __NERV_E5_SHOWN=0
+# 1 while the `…loading` one-line hint is on screen (cold spec parse or
+# derivation in flight). Cleared the moment rows or settled silence
+# arrive, so the stale hint never outlives the load.
+typeset -gi __NERV_LOADING_SHOWN=0
 # Selection index into the popup. 0 = the "Immediately execute" sentinel
 # row (Fig parity): default-highlighted, and Enter on it runs the line as
 # typed instead of inserting a suggestion. 1..N index the real items.
@@ -1224,11 +1228,14 @@ __nerv_complete() {
   # rc 4-6 are successes (`complete_exit_code` in nerv-cli): 4 = the typed
   # token already names one of the candidates (see the default selection
   # below), 5 = no hand-written spec covers the command, 6 = both.
-  local token_complete=0 unspecced=0
+  # rc 7 = the spec is still loading (cold first keystroke): no rows,
+  # but not a miss either — the widget shows its one-line loading hint.
+  local token_complete=0 unspecced=0 loading=0
   case $rc in
     4) token_complete=1; rc=0 ;;
     5) unspecced=1; rc=0 ;;
     6) token_complete=1; unspecced=1; rc=0 ;;
+    7) loading=1; rc=0 ;;
   esac
   if (( rc != 0 )); then
     # The history ghost never needed the engine, so a dead or
@@ -1240,6 +1247,7 @@ __nerv_complete() {
       print -r -- "  complete: BIN call FAILED rc=$rc" >> /tmp/nerv-debug.log
     fi
     # rc 3 = E5 spec schema mismatch (daemon up, cache wrong version);
+    # rc 7 never reaches here (folded to loading above);
     # any other non-zero = E1 daemon not reachable.
     if (( rc == 3 )); then
       if (( ! __NERV_E5_SHOWN )); then
@@ -1252,6 +1260,7 @@ __nerv_complete() {
       zle -R "[nerv] daemon not running — run: nerv start"
       __NERV_ACTIVE=1
     fi
+    __NERV_LOADING_SHOWN=0
     return
   fi
   if [[ -n "${NERV_DEBUG:-}" ]]; then
@@ -1306,8 +1315,21 @@ __nerv_complete() {
     # No spec completions, but a history suggestion may still apply.
     __nerv_hide_popup
     [[ -n "$hist_ghost" ]] && __nerv_ghost "$hist_ghost"
+    # Cold first keystroke: the spec parse or derivation lands on the
+    # next key. A grey one-line hint tells "loading" apart from a
+    # settled miss (same channel as the E1/E5 hints). Shown on every
+    # loading keystroke, cleared the moment anything else arrives —
+    # rows overwrite the status themselves, settled silence clears it.
+    if (( loading )); then
+      zle -R "…loading"
+      __NERV_LOADING_SHOWN=1
+    elif (( __NERV_LOADING_SHOWN )); then
+      __NERV_LOADING_SHOWN=0
+      zle -R ""
+    fi
     return
   fi
+  __NERV_LOADING_SHOWN=0
 
   # Shell-name rows arrive with the engine's generic description. An
   # alias knows its expansion locally ($aliases is already loaded for
@@ -1580,6 +1602,8 @@ __nerv_line_finish() {
     fi
   else
     (( __NERV_ACTIVE )) && { __NERV_ACTIVE=0; zle -R ""; }
+    # A stale `…loading` hint must not outlive the line it belonged to.
+    (( __NERV_LOADING_SHOWN )) && { __NERV_LOADING_SHOWN=0; zle -R ""; }
     __NERV_PREV_LBUFFER=""
     __NERV_SELECTED=0
     __NERV_ITEMS=()
@@ -1890,6 +1914,7 @@ __nerv_precmd_reset() {
   __NERV_ITEMS=()
   __NERV_SELECTED=0
   __NERV_PREV_LBUFFER=""
+  __NERV_LOADING_SHOWN=0
   # A new prompt means the last command may have changed what completes
   # (a new branch, a killed process): nothing captured before it is reused.
   # The ranked ghost was ranked after a different previous command.

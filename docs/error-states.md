@@ -195,7 +195,7 @@ THEN:
 
 > 구현: `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2`, `check_schema`). build-specs 가 `manifest.json` 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` → CLI bridge exit 3 → ZLE 회색 1줄 + `nerv doctor` red row. **missing manifest 는 관대** (pre-manifest 설치 호환). 테스트: manifest 5 unit + `schema_mismatch_disables_completion` e2e.
 >
-> `nerv _complete` 의 exit code: 0 = 행 있음/없음 · 3 = E5 schema mismatch · **4 = 행 있음 + 친 토큰이 이미 후보 이름** (에러 아님 — 위젯이 sentinel 을 기본 선택, first-5-min §0.9) · 그 외 = 데몬 없음(E1).
+> `nerv _complete` 의 exit code: 0 = 행 있음/없음 · 3 = E5 schema mismatch · **4 = 행 있음 + 친 토큰이 이미 후보 이름** (에러 아님 — 위젯이 sentinel 을 기본 선택, first-5-min §0.9) · **7 = 행 없음 + spec 로딩 중** (에러 아님 — 위젯이 `…loading` 1줄, 아래 §3.5b) · 그 외 = 데몬 없음(E1).
 
 **감지**:
 
@@ -240,6 +240,48 @@ THEN:
   - stderr / log 위 메시지
   - ZLE 회색 1줄 1회
   - nerv doctor 가 "spec schema mismatch" 항목 표시 (red)
+```
+
+---
+
+### 3.5b — cold 첫 키 `…loading` (에러 아님 — 정상)
+
+큰 spec (`aws` 7.4MB) 의 첫 키는 백그라운드 파스가 끝나기 전이라 행이 없다.
+빈 화면이 "고장"으로 보이는 것을 막기 위해, 로딩 중 empty 는 settled miss 와 다른
+reason + exit code 로 답한다. E1/E5 와 달리 조치도 latch 도 없다 — 다음 키에 행이 온다.
+
+**감지**:
+
+- `complete_in` 의 lookup miss + `SpecRegistry::is_loading(binary)` (파스 또는 `--help` derivation in flight).
+- reason 은 `loading:spec` (쓴 spec 파싱 중) / `loading:derived` (`--help` 유도 중).
+  `NO_SPEC_REASON_PREFIX` (`no spec for …`) 로 시작하지 않으므로 miss tally 가 절대 잡지 않는다
+  (데몬의 `is_loading` 가드와 이중 보장). `loading:generator` 는 예약 — 비동기 generator 경로용, producer 없음.
+- wire 필드 추가 없음: `complete_output` 이 loading empty 를 exit **7** (`EXIT_SPEC_LOADING`) 로 내보낸다.
+  소켓·fork 두 경로 모두 코드로만 전달된다.
+
+**사용자 화면** (입력 라인 *아래* 회색 1줄, E1/E5 와 같은 채널):
+
+```
+…loading
+```
+
+**규칙**:
+
+- 매 로딩 키마다 표시 (E1/E5 의 세션 1회 latch 없음 — transient 상태라서).
+- 행이 오거나 settled empty 가 오면 즉시 해소: 팝업 예약 blank 가 덮거나 `zle -R ""`.
+- Enter·새 프롬프트 시 잔상 제거 (`__NERV_LOADING_SHOWN` 플래그 가드).
+- history ghost 는 그대로 유지 (E1/E5 와 동일 — 엔진과 무관한 가치는 잃지 않는다).
+- 80자·회색·영문 (§4 톤).
+
+**테스트**:
+
+```
+GIVEN: inflight 에 이름을 넣은 registry (unit) — 실 cold 파스 재현 대신
+WHEN: `zpeh x` 완성 요청
+THEN:
+  - 행 0개 + reason `loading:derived` + 교정 행 없음
+  - `no_spec_binary(reason)` = None (tally 미집계)
+  - `complete_output` code = 7
 ```
 
 ---
