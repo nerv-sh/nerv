@@ -68,10 +68,7 @@ async fn main() -> anyhow::Result<()> {
                     "spec schema mismatch — daemon expects v{}, found v{found}",
                     manifest::SUPPORTED_SCHEMA_VERSION
                 );
-                error!(
-                    "{reason}. Run: brew reinstall nerv (or: nerv doctor). \
-                 Autocomplete disabled until resolved."
-                );
+                error!("{reason}. Run: nerv doctor. Autocomplete disabled until resolved.");
                 Some(reason)
             }
             _ => None,
