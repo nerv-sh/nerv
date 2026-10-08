@@ -407,6 +407,20 @@ THEN: 첫 키 뒤 화면에 `…loading` 이 남아 있고, 다음 키에 행이
   없는 바이너리 행은 진짜 overlay 대상이라 건드리지 않고, 재작성은 같은 temp+rename
   원자 경로를 쓴다.
 
+### 3.6.3b storage 행
+
+`frecency.tsv`·`misses.tsv` 에 기록이 있으면 `nerv doctor` 가 행 수와 상한을 한 줄로 보인다
+(`history` 행은 `N commands (cap 100000)`):
+
+```
+  ✓ storage             frecency 518/2000, misses 24/200
+                        → full ones drop their least used rows; to empty one: nerv stop, delete it from ~/Library/Caches/nerv, nerv start
+```
+
+- 항상 OK 등급 — 가득 차도 고장이 아니다 (각자 스스로 비운다). 둘 다 0건이면 행 없음.
+- 비우는 명령은 없다 (CLI 표면 동결). 경로 = 수동 삭제 + 재시작. 세 저장소의 상한 표 =
+  `history-suggestions.md` §2.
+
 ### 3.6.4 derived specs 안내 (soft notice)
 
 파생 spec (spec-conversion-policy §6.2) 이 하나라도 있으면 `nerv doctor` 가 표시:
@@ -550,3 +564,4 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 *v1.6 — `_complete` exit 4 (행 + 토큰 완성, 에러 아님) 명시 (2026-09-17). 5종 카탈로그 무변경.*
 *v1.7 — §3.6.7 데몬/CLI 버전 스큐 경고 신설 (2026-09-21). 실행 중 데몬 pong 의 `version` ≠ CLI 면 warning 행 1개 + `nerv stop && nerv start` 조치. version 필드 없는 pong 은 무경고, 같은 버전은 행 없음 (신규 설치 출력 불변). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
 *v1.8 — §3.6.3 shell 이름 행 프루닝 조항 신설 (2026-09-21). 등록된 shell 함수·alias 이름을 아는 데몬이 스큐 기간에 쌓인 해당 miss 행을 shell 이름 등록 시점에 원자 재작성으로 정리한다. 판정 소스가 등록 요청으로 들어오므로 트리거는 그 한 곳, PATH 실재 바이너리 행은 보존. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
+*v1.9 — §3.6.3b storage 행 신설 (2026-10-08): frecency·misses 행 수/상한 + 수동 비우기 경로. `history` 행에 상한 표기.*

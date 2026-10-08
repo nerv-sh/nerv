@@ -62,6 +62,20 @@ already exists with looser permissions is tightened back to `0600`.
 - **Uninstall.** `nerv uninstall` removes the file along with the rest of the cache directory (`uninstall-spec.md` §2).
 - **Deleting it.** To clear the history, delete the file and restart the daemon (`nerv stop && nerv start`).
 
+**The three stores, and their caps.** Everything nerv remembers about use is
+one of three files in `~/Library/Caches/nerv/`. Each is bounded, each drops
+rows on its own, and none has a command to empty it:
+
+| File | Holds | Cap | When full |
+|---|---|---|---|
+| `history.tsv` | executed commands | 100,000 rows | rewritten once, newest 80,000 kept |
+| `frecency.tsv` | accepted suggestions | 2,000 rows | the lowest-scoring row makes room |
+| `misses.tsv` | commands with no spec | 200 names | the least-recorded name makes room |
+
+`nerv doctor` shows how full they are (`history` and `storage` rows). To
+empty one: `nerv stop`, delete the file, `nerv start`. The daemon holds each
+in memory, so deleting a file under a running daemon forgets nothing.
+
 **What the daemon keeps in memory.** It holds three aggregates, built at load
 and updated on every record:
 
