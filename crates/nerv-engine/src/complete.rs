@@ -4209,7 +4209,9 @@ fn filepaths_at(
     };
     let resolved = resolve_filepaths_root(cwd, dir_part)?;
     let entries = std::fs::read_dir(&resolved).ok()?;
-    let mut out: Vec<FilepathRow> = Vec::new();
+    // Each row with, for a plain directory, the path its summary is read
+    // from once the order is known.
+    let mut out: Vec<(FilepathRow, Option<std::path::PathBuf>)> = Vec::new();
     for e in entries.flatten() {
         let name_os = e.file_name();
         let Some(name) = name_os.to_str() else {
@@ -4231,7 +4233,12 @@ fn filepaths_at(
         let insertion = format!("{dir_part}{name}{trailing}");
         let display = format!("{name}{trailing}");
         let is_symlink = ft.map(|t| t.is_symlink()).unwrap_or(false);
-        let desc = filepaths_desc(&e, is_dir, is_symlink);
+        let summarized = is_dir && !is_symlink;
+        let desc = if summarized {
+            Some("dir".to_string())
+        } else {
+            filepaths_desc(&e, is_symlink)
+        };
         // Per-row icon: 🔗 for symlinks (checked first; a symlink
         // pointing at a dir still gets the link glyph), 📁 for
         // dirs, 📄 for regular files. All 4-byte UTF-8, pass
@@ -4243,7 +4250,10 @@ fn filepaths_at(
         } else {
             Some("📄".to_string())
         };
-        out.push((insertion, display, desc, icon));
+        out.push((
+            (insertion, display, desc, icon),
+            summarized.then(|| e.path()),
+        ));
     }
     // Offer `.` and `..` once the user has typed a leading dot —
     // `open .`, `idea .`, `cd ..`. read_dir never yields these two, and
@@ -4257,10 +4267,13 @@ fn filepaths_at(
                 continue;
             }
             out.push((
-                format!("{dir_part}{name}/"),
-                format!("{name}/"),
-                Some(desc.to_string()),
-                Some("📁".to_string()),
+                (
+                    format!("{dir_part}{name}/"),
+                    format!("{name}/"),
+                    Some(desc.to_string()),
+                    Some("📁".to_string()),
+                ),
+                None,
             ));
         }
     }
@@ -4268,13 +4281,29 @@ fn filepaths_at(
     // case-insensitive), but rank exact-case prefix hits first — `DE`
     // floats `DEEP_LINKING.md` above `deep-linking/`, and `de` the
     // reverse — then alphabetical within each group.
-    out.sort_by(|a, b| {
+    out.sort_by(|(a, _), (b, _)| {
         let a_exact = a.1.starts_with(filter);
         let b_exact = b.1.starts_with(filter);
         b_exact.cmp(&a_exact).then_with(|| a.1.cmp(&b.1))
     });
-    Some(out)
+    Some(
+        out.into_iter()
+            .enumerate()
+            .map(|(idx, (mut row, dir))| {
+                if let Some(dir) = dir.filter(|_| idx < DIR_SUMMARY_ROWS) {
+                    row.2 = Some(dir_summary(&dir));
+                }
+                row
+            })
+            .collect(),
+    )
 }
+
+/// How many leading rows of a listing get a directory's item count
+/// ([`dir_summary`], one `read_dir` each); the rest say `dir`. Twice the
+/// popup's window of 8: the first page down still shows counts, and a
+/// folder with hundreds of subfolders costs the same as one with sixteen.
+const DIR_SUMMARY_ROWS: usize = 16;
 
 /// ASCII case-insensitive prefix test for filename completion. Non-ASCII
 /// bytes compare exactly, so UTF-8 names stay correct; only ASCII letters
@@ -4284,19 +4313,14 @@ fn ci_starts_with(name: &str, filter: &str) -> bool {
     nb.len() >= fb.len() && nb.iter().zip(fb).all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
-fn filepaths_desc(entry: &std::fs::DirEntry, is_dir: bool, is_symlink: bool) -> Option<String> {
+/// The description of a row that is not a plain directory — those are
+/// summarized by [`filepaths_at`] once it knows which rows lead.
+fn filepaths_desc(entry: &std::fs::DirEntry, is_symlink: bool) -> Option<String> {
     if is_symlink {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             return Some(format!("→ {}", target.display()));
         }
         return Some("symlink".into());
-    }
-    if is_dir {
-        // Smart fallback for cd / z: every row would otherwise just
-        // say "dir" — uninformative. Show item count when cheap
-        // (~50µs per read_dir on typical sizes). Skip on read error
-        // (perm denied / unreadable) and fall back to "dir".
-        return Some(dir_summary(&entry.path()));
     }
     let meta = entry.metadata().ok()?;
     Some(human_size(meta.len()))
@@ -8386,6 +8410,23 @@ region = us-east-1
             &tokens,
         );
         assert_eq!(cmd, vec!["aws", "lambda", "list-layer-versions"]);
+    }
+
+    /// Only the leading rows read their directory: a folder of many
+    /// subfolders must not cost a `read_dir` per row on every keystroke.
+    #[test]
+    fn only_leading_directory_rows_are_summarized() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..DIR_SUMMARY_ROWS + 4 {
+            let sub = tmp.path().join(format!("d{i:02}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("f"), "").unwrap();
+        }
+        let rows = filepaths_at(Some(tmp.path()), "", true).unwrap();
+        let descs: Vec<&str> = rows.iter().map(|r| r.2.as_deref().unwrap()).collect();
+        assert_eq!(descs.len(), DIR_SUMMARY_ROWS + 4);
+        assert!(descs[..DIR_SUMMARY_ROWS].iter().all(|d| *d == "1 item"));
+        assert!(descs[DIR_SUMMARY_ROWS..].iter().all(|d| *d == "dir"));
     }
 
     #[test]
