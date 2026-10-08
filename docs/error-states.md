@@ -350,9 +350,16 @@ THEN: 첫 키 뒤 화면에 `…loading` 이 남아 있고, 다음 키에 행이
 가장 많이 빈 명령 최대 5개를 한 줄로 표시:
 
 ```
-  ✓ spec misses         zeph 12, aic2 9, aicommit2 4
-                        → add a spec in ~/.config/nerv/specs
+  ✓ spec misses         zeph 12 (derived), aic2 9, aicommit2 4
+                        → run: curl -fsSL https://raw.githubusercontent.com/nerv-sh/nerv/main/examples/specs/claude.json -o ~/.config/nerv/specs/aic2.json — then edit it
 ```
+
+- **`(derived)`**: 그 이름은 집계 뒤에 `--help` 파생 spec (§3.6.4) 이 생겼다 — 횟수는 과거 기록이고,
+  overlay 는 파생 결과를 손으로 다듬고 싶을 때만 쓸 대상이다.
+- **힌트는 바로 실행할 수 있는 한 줄**이다: 아직 아무 spec 도 없는 첫 이름에 대해, 예제 overlay
+  spec 을 그 이름으로 받아 두는 명령. 예제는 저장소에만 있고 설치 패키지에는 없어서 URL 로 받는다
+  (`nerv` 자체는 네트워크를 쓰지 않는다 — 명령을 보여 줄 뿐). 전부 파생으로 덮였으면 파생 디렉터리에서
+  복사하라는 안내로 바뀐다. 새 CLI 명령·플래그는 없다 (PLAN §9 동결).
 
 - **실행할 수 있는 명령만 센다**: 명령 단어가 데몬의 `$PATH` 에 있는 실행 파일일 때만 집계한다.
   붙여 넣은 코드(`const x = …`)나 난타(`asdasd`)도 명령 단어로 들어오지만 spec 이 빠진 게
