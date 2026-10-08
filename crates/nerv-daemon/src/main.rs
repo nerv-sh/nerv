@@ -694,12 +694,14 @@ impl NameCache {
     }
 
     fn names(&self, registry: &SpecRegistry, frecency: &FrecencyStore) -> CommandNames {
+        let (path, pending) = self.path.names();
         CommandNames::from_shared(
             frecency.spec_names(),
             self.stems(registry),
-            self.path.names(),
+            path,
             self.shell_names(),
         )
+        .with_path_pending(pending)
     }
 
     /// The registered shell names, as a shared list. Locking is only
@@ -744,12 +746,13 @@ impl NameCache {
 }
 
 impl PathCache {
-    /// Names from the last completed scan. Touches the disk only to
-    /// stat each `PATH` directory; a moved stamp schedules a rescan
-    /// instead of running one here.
-    fn names(self: &Arc<Self>) -> Arc<Vec<String>> {
+    /// Names from the last completed scan, and whether a newer one is
+    /// owed — none has finished yet, or a directory changed since. Touches
+    /// the disk only to stat each `PATH` directory; a moved stamp
+    /// schedules a rescan instead of running one here.
+    fn names(self: &Arc<Self>) -> (Arc<Vec<String>>, bool) {
         if self.dirs.is_empty() {
-            return Arc::default();
+            return (Arc::default(), false);
         }
         let stamp = self.stamps();
         let (names, fresh) = {
@@ -759,7 +762,7 @@ impl PathCache {
         if !fresh {
             self.schedule_rescan();
         }
-        names
+        (names, !fresh)
     }
 
     fn schedule_rescan(self: &Arc<Self>) {
@@ -1463,12 +1466,18 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         exe(tmp.path(), "zeph");
         let cache = path_cache(tmp.path());
+        let (names, pending) = cache.names();
         assert!(
-            cache.names().is_empty(),
+            names.is_empty(),
             "asking for names must not walk PATH inline"
         );
+        // …and says so: until the scan lands a word missing from the list
+        // is not yet a typo (`pnpm` → `did you mean npm` right after boot).
+        assert!(pending);
         cache.rescan();
-        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
+        let (names, pending) = cache.names();
+        assert_eq!(*names, vec!["zeph".to_string()]);
+        assert!(!pending);
     }
 
     /// A newly installed binary has to show up without a daemon
@@ -1479,13 +1488,13 @@ mod tests {
         exe(tmp.path(), "zeph");
         let cache = path_cache(tmp.path());
         cache.rescan();
-        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
+        assert_eq!(*cache.names().0, vec!["zeph".to_string()]);
 
         exe(tmp.path(), "aicommit2");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             // The first call schedules; later ones observe the result.
-            let names = cache.names();
+            let (names, _) = cache.names();
             if names.len() == 2 {
                 assert_eq!(*names, vec!["aicommit2".to_string(), "zeph".to_string()]);
                 break;
@@ -1517,7 +1526,8 @@ mod tests {
     fn a_pathless_cache_stays_empty() {
         let cache: Arc<PathCache> = Arc::new(PathCache::default());
         cache.schedule_rescan();
-        assert!(cache.names().is_empty());
+        let (names, pending) = cache.names();
+        assert!(names.is_empty() && !pending);
     }
 
     /// PATH is the third source of the list the engine matches against;

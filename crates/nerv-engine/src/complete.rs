@@ -891,6 +891,10 @@ pub struct CommandNames {
     /// like the other two: the daemon swaps an `Arc` in place, and a
     /// first-token keystroke must not clone a few thousand names.
     shell: Arc<Vec<String>>,
+    /// The `PATH` list is not the current one: no scan has finished, or
+    /// a directory changed since. A word missing from it may still be a
+    /// real command, so nothing is called a typo until the scan lands.
+    path_pending: bool,
 }
 
 impl CommandNames {
@@ -913,7 +917,14 @@ impl CommandNames {
             stems,
             path,
             shell,
+            path_pending: false,
         }
+    }
+
+    /// Mark the `PATH` list as stale or not yet read (see the field).
+    pub fn with_path_pending(mut self, pending: bool) -> Self {
+        self.path_pending = pending;
+        self
     }
 
     /// True when `name` is a command we know — the signal that the user
@@ -1069,6 +1080,9 @@ pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggesti
 /// a stem (`pnpm` against `npm`) can draw a correction it would not
 /// draw a moment later.
 pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str> {
+    if names.path_pending {
+        return None;
+    }
     let input: Vec<char> = input.chars().collect();
     let budget = typo_distance_budget(input.len())?;
     let mut best: Option<(usize, &str)> = None;
@@ -6384,6 +6398,10 @@ region = us-east-1
     fn transposed_letters_are_one_edit_away() {
         let names = CommandNames::from_parts(vec![], vec!["yarn".into()], vec![]);
         assert_eq!(did_you_mean("yanr", &names), Some("yarn"));
+        // Until the PATH scan lands, `yanr` could be a binary nobody has
+        // listed yet (`pnpm` read as a typo of `npm` right after boot).
+        let pending = names.clone().with_path_pending(true);
+        assert_eq!(did_you_mean("yanr", &pending), None);
     }
 
     /// A correction only makes sense when prefix matching came up
