@@ -305,7 +305,8 @@ __nerv_cursor_col() {
   # the cursor cell so the box edge sits beneath the input rather than a
   # column or two to its right (the leading " " inside the box accounts
   # for the rest of the visual offset).
-  local col=$(( ${#p} + ${#LBUFFER} - 1 ))
+  # Cells, not characters (`m`): a Hangul or CJK character is two wide.
+  local col=$(( ${(m)#p} + ${(m)#LBUFFER} - 1 ))
   (( col < 1 )) && col=1
   # Guard against prompts whose %-expansion doesn't yield a clean
   # last-line width. powerlevel10k (and similar) draw a full-width
@@ -318,9 +319,9 @@ __nerv_cursor_col() {
   # multiline themes that trigger this). A left box is always usable;
   # a right-clamped one is not.
   local cols=${COLUMNS:-80}
-  __NERV_PROMPT_W=${#p}
+  __NERV_PROMPT_W=${(m)#p}
   if (( col > cols - 20 )); then
-    col=$(( 1 + ${#LBUFFER} ))
+    col=$(( 1 + ${(m)#LBUFFER} ))
     __NERV_PROMPT_W=2
     (( col > cols - 20 )) && col=1
   fi
@@ -2067,7 +2068,34 @@ __nerv_claim() {
   fi
   zle -N $1 $2 2>/dev/null
 }
+# One line, once per terminal, when the terminal names itself and the name
+# is outside the matrix (docs/terminal-compat.md §1). Nothing is said when
+# it does not name itself: Alacritty and Kitty set no TERM_PROGRAM, and
+# inside tmux the outer terminal is not visible from here.
+typeset -gi __NERV_TERMINAL_WAITED=0
+__nerv_terminal_notice() {
+  # powerlevel10k's instant prompt treats anything printed before its
+  # first real prompt as a fault; under it the line waits one prompt.
+  if (( ${+functions[p10k]} && ! __NERV_TERMINAL_WAITED )); then
+    __NERV_TERMINAL_WAITED=1
+    return
+  fi
+  add-zsh-hook -d precmd __nerv_terminal_notice
+  local name=$TERM_PROGRAM
+  [[ -z $name && $TERMINAL_EMULATOR == JetBrains* ]] && name=JetBrains
+  case $name in
+    (''|iTerm.app|Apple_Terminal|WezTerm|tmux|alacritty|kitty) return ;;
+  esac
+  local seen=$HOME/Library/Caches/nerv/terminal-seen
+  local -a told=()
+  [[ -r $seen ]] && told=("${(@f)$(<$seen)}")
+  (( ${told[(Ie)$name]} )) && return
+  print -ru2 -- "[nerv] $name is outside the tested terminals, the popup may draw wrong — report: github.com/nerv-sh/nerv/issues"
+  # Without the folder (no daemon has run yet) the notice would repeat.
+  { mkdir -p -- ${seen:h} && print -r -- $name >> $seen } 2>/dev/null
+}
 autoload -Uz add-zsh-hook 2>/dev/null && {
+  add-zsh-hook precmd __nerv_terminal_notice
   add-zsh-hook precmd __nerv_ghost_owner
   add-zsh-hook precmd __nerv_precmd_reset
   add-zsh-hook precmd __nerv_rebind

@@ -37,7 +37,7 @@ use crate::frecency::now_unix;
 /// typo'd command name is recorded exactly like a real one. On
 /// overflow the least-recorded entry is dropped (ties broken by the
 /// older timestamp), which keeps the commands the user actually types.
-const MAX_ENTRIES: usize = 200;
+pub const MAX_ENTRIES: usize = 200;
 
 /// Shortest gap between two on-disk writes. Every keystroke against a
 /// spec-less command is a `record`, so an unthrottled flush would

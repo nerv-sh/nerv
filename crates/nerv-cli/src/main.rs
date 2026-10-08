@@ -624,6 +624,7 @@ fn build_doctor_report() -> DoctorReport {
     check_specs(&mut r);
     check_spec_misses(&mut r);
     check_history(&mut r);
+    check_storage(&mut r);
     check_autosuggest(&mut r);
     check_schema_version(&mut r);
     check_pty_mode(&mut r);
@@ -747,13 +748,43 @@ fn check_history_in(r: &mut DoctorReport, path: &std::path::Path) {
     let detail = if n == 0 {
         "none recorded yet".to_string()
     } else {
-        format!("{n} commands")
+        format!("{n} commands (cap {})", nerv_engine::history::ROW_CAP)
     };
     r.push(
         DoctorLevel::Ok,
         "history",
         detail,
         Some(format!("{}", path.display())),
+    );
+}
+
+/// How full the two capped tallies are. Both drop rows on their own when
+/// full, so this is never a fault: the row says where the files are and
+/// how to empty one, which no command does.
+fn check_storage(r: &mut DoctorReport) {
+    if let Some(dir) = paths::cache_dir() {
+        check_storage_in(r, &dir);
+    }
+}
+
+fn check_storage_in(r: &mut DoctorReport, dir: &std::path::Path) {
+    let frecency = nerv_engine::FrecencyStore::load(&dir.join(paths::FRECENCY_NAME)).len();
+    let misses = nerv_engine::misses::MissCounter::load(&dir.join(paths::MISSES_NAME)).len();
+    if frecency == 0 && misses == 0 {
+        return;
+    }
+    r.push(
+        DoctorLevel::Ok,
+        "storage",
+        format!(
+            "frecency {frecency}/{}, misses {misses}/{}",
+            nerv_engine::frecency::MAX_ENTRIES,
+            nerv_engine::misses::MAX_ENTRIES
+        ),
+        Some(format!(
+            "full ones drop their least used rows; to empty one: nerv stop, delete it from {}, nerv start",
+            dir.display()
+        )),
     );
 }
 
@@ -2458,6 +2489,30 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
     }
 
+    #[test]
+    fn storage_row_counts_rows_against_their_caps() {
+        let dir = std::env::temp_dir().join(format!("nerv-storage-doc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut r = DoctorReport::default();
+        check_storage_in(&mut r, &dir);
+        assert!(r.entries.is_empty(), "nothing recorded: no row");
+
+        std::fs::write(
+            dir.join(paths::FRECENCY_NAME),
+            "git\tcheckout\t3\t1\ngit\tcommit\t2\t1\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(paths::MISSES_NAME), "zeph\t4\t1\n").unwrap();
+        let mut r = DoctorReport::default();
+        check_storage_in(&mut r, &dir);
+        assert_eq!(r.entries[0].detail, "frecency 2/2000, misses 1/200");
+        assert!(matches!(r.entries[0].level, DoctorLevel::Ok));
+        let hint = r.entries[0].hint.as_deref().unwrap();
+        assert!(hint.contains(dir.to_str().unwrap()), "{hint}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Version skew between daemon and CLI → exactly one Warn row whose
     /// hint is the restart command.
     #[test]
@@ -2736,8 +2791,8 @@ mod tests {
         assert!(body.contains("function fish_prompt"));
         // Same gating requirement as bash.
         assert!(body.contains("Shell=fish"));
-        // fish-syntax re-exec.
-        assert!(body.contains("exec $__nerv_pty_bin -- $SHELL"));
+        // fish-syntax re-exec of this fish, not the login $SHELL.
+        assert!(body.contains("exec \"$__nerv_pty_bin\" -- \"$__nerv_self_shell\""));
         assert!(!body.contains("__NERV_LOADED"));
     }
 
@@ -2916,7 +2971,7 @@ mod tests {
         }
         let mut r = DoctorReport::default();
         check_history_in(&mut r, &path);
-        assert_eq!(r.entries[0].detail, "2 commands");
+        assert_eq!(r.entries[0].detail, "2 commands (cap 100000)");
 
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();

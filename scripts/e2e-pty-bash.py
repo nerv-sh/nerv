@@ -104,6 +104,12 @@ def main():
 
         startup = drain(master, 2.0)
         log(f"startup bytes: {len(startup)}  OSC697={b'697' in startup}")
+        # Startup variant (slice 01): rc sourcing runs commands before the
+        # first prompt — the gated DEBUG trap must stay quiet for all of
+        # them. Any PreExec here would wedge the shadow term in
+        # "executing" state and kill the ghost below.
+        startup_quiet = b"PreExec" not in startup
+        log(f"startup quiet (no early PreExec): {startup_quiet}")
 
         # 1. Ghost: partial command → dim remainder.
         os.write(master, TYPED.encode())
@@ -155,7 +161,7 @@ def main():
         preexec_ok = b"\x1b]697;PreExec\x07" in submit
         log(f"preexec on submit: {preexec_ok}")
 
-        if ghost_ok and frec_ok and popup_ok and nav_ok and preexec_ok:
+        if ghost_ok and frec_ok and popup_ok and nav_ok and preexec_ok and startup_quiet:
             log("PASS — bash PTY ghost + accept/frecency + popup + nav + preexec")
             rc = 0
         else:

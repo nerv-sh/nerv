@@ -121,6 +121,12 @@ def main():
 
         startup = drain(master, 2.5, answer=True)
         log(f"startup bytes: {len(startup)}  OSC697={b'697' in startup}")
+        # Capability-query variant (slice 01): fish 4.x probes the terminal
+        # before its first prompt — answering those probes must not look
+        # like a submitted command. No PreExec may appear before the first
+        # fish_prompt event fires.
+        startup_quiet = b"PreExec" not in startup
+        log(f"startup quiet (no early PreExec): {startup_quiet}")
 
         # 1. Ghost.
         os.write(master, TYPED.encode())
@@ -168,7 +174,7 @@ def main():
         preexec_ok = b"\x1b]697;PreExec\x07" in submit
         log(f"preexec on submit: {preexec_ok}")
 
-        if ghost_ok and frec_ok and popup_ok and nav_ok and preexec_ok:
+        if ghost_ok and frec_ok and popup_ok and nav_ok and preexec_ok and startup_quiet:
             log("PASS — fish PTY ghost + accept/frecency + popup + nav + preexec")
             rc = 0
         else:

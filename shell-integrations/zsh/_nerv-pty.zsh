@@ -75,25 +75,48 @@ if [[ ! -t 0 || ! -t 1 ]]; then
   return 0
 fi
 
+# Only meaningful when the user opted in via NERV_PTY=1 (mirrors the
+# bash/fish top-level guards). The `nerv init` emitter sources this file
+# instead of `_nerv.zsh` in that case, but a direct source without the
+# opt-in must stay a no-op — never re-exec a shell the user didn't ask
+# to wrap. Checked AFTER the inner-shell branch above: the marker path
+# must run whenever we're the wrapped shell, regardless of NERV_PTY.
+if [[ -z "${NERV_PTY-}" ]]; then
+  return 0
+fi
+
+# Don't shim non-interactive shells (scripts, pipes) — only a real
+# interactive shell benefits, and re-execing a script shell would
+# break it. Mirrors the bash `$-` and fish `status is-interactive`
+# checks.
+[[ -o interactive ]] || return 0
+
 # Locate the nerv-pty binary. Prefer NERV_PTY_BIN override (used
 # by `nerv init zsh --shell-script` when nerv was launched from a
 # non-PATH location like a CI worktree). Fall back to PATH lookup.
 typeset -g __NERV_PTY_BIN="${NERV_PTY_BIN:-nerv-pty}"
 if ! command -v "$__NERV_PTY_BIN" >/dev/null 2>&1; then
-  print -u2 -- "[nerv] NERV_PTY=1 set but nerv-pty binary not found — falling back to no shim."
-  print -u2 -- "[nerv] Install nerv-pty (it ships with nerv >= 0.2) or unset NERV_PTY."
+  print -u2 -- "[nerv] NERV_PTY=1 but nerv-pty not found — falling back to no shim (unset NERV_PTY or install nerv-pty)."
   return 0
 fi
 
 # Autostart nervd before handing over — the shim's ghost/popup talk to
 # the same UDS. `nerv start` is idempotent (socket probe), so this is a
 # quiet no-op when a daemon already serves. The CLI lives next to
-# nerv-pty; fall back to PATH.
-typeset -g __NERV_CLI="${__NERV_PTY_BIN:h}/nerv"
-[[ -x "$__NERV_CLI" ]] || __NERV_CLI=nerv
-( "$__NERV_CLI" start >/dev/null 2>&1 & ) 2>/dev/null
+# nerv-pty; fall back to PATH. NERV_AUTOSTART=0 opts out, same as
+# _nerv.zsh.
+if [[ "${NERV_AUTOSTART:-1}" != "0" ]]; then
+  typeset -g __NERV_CLI="${__NERV_PTY_BIN:h}/nerv"
+  [[ -x "$__NERV_CLI" ]] || __NERV_CLI=nerv
+  ( "$__NERV_CLI" start >/dev/null 2>&1 & ) 2>/dev/null
+fi
 
 # Hand the shell over to nerv-pty. The wrapper opens a PTY, sets
 # NERV_PTY_SESSION_ID, and execs zsh again under itself — that
 # inner zsh hits the re-entry guard above and skips this block.
-exec "$__NERV_PTY_BIN" -- "$SHELL" "$@"
+# Re-exec zsh, not the login `$SHELL`: a bash-login user who runs
+# `zsh` must land back in zsh. zsh exposes no path to its own binary,
+# so keep `$SHELL` when it is a zsh and otherwise resolve zsh on PATH.
+typeset -g __NERV_SELF_SHELL="$SHELL"
+[[ "${SHELL:t}" == zsh ]] || __NERV_SELF_SHELL="${commands[zsh]:-zsh}"
+exec "$__NERV_PTY_BIN" -- "$__NERV_SELF_SHELL" "$@"
