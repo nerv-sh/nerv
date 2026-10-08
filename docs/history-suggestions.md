@@ -177,7 +177,7 @@ costs nothing.
 The popup's rows come from the spec engine. History only decides their
 order. For a row the daemon looks at two signals.
 
-**Picks.** How often and how recently you picked the row from the popup (`frecency.tsv`).
+**Picks.** How often and how recently you picked the row from the popup (`frecency.tsv`). The file keeps at most 2,000 rows (`frecency::MAX_ENTRIES`): past that the lowest-scored row makes room for a new pick. It is written at most once every five seconds, and once more when the daemon shuts down.
 
 **Runs.** How often and how recently the recorded commands had that word in
 that place:
