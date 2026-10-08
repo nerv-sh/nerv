@@ -2822,15 +2822,35 @@ static GENERATOR_INFLIGHT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<GeneratorCacheKey>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
+type RawScriptCacheMap =
+    HashMap<Vec<String>, (std::time::Instant, std::time::Duration, Option<String>)>;
 
 /// Process-wide cache for `ScriptWithJsonPath` raw stdout, keyed by script
-/// argv. Fixed 5s TTL and the same size / eviction policy as
-/// [`GENERATOR_CACHE`] (which alone earns a longer TTL per entry — see
-/// `GenEntry`); separate because the value is the verbatim blob (not
-/// post-processed lines).
+/// argv. Hits keep the fixed 5s TTL; misses (spawn failure, timeout,
+/// empty output) are negative entries whose TTL is earned from the
+/// measured compute via [`GenEntry::ttl_for`] — a fast failure costs 5s,
+/// only an overrun earns 60s. Same size / eviction policy as
+/// [`GENERATOR_CACHE`]; separate because the value is the verbatim blob
+/// (not post-processed lines).
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Insert a raw-script `outcome` (hit or memoized miss) under `key`,
+/// evicting the oldest entry past the size cap.
+fn store_script_raw(key: Vec<String>, outcome: Option<String>, ttl: std::time::Duration) {
+    if let Ok(mut cache) = SCRIPT_RAW_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), ttl, outcome));
+    }
+}
 
 /// Insert `outcome` (a hit or a memoized miss) into [`GENERATOR_CACHE`]
 /// under `key`, evicting the oldest entry past the size cap.
@@ -3155,37 +3175,40 @@ fn cached_script_raw(script: &[String]) -> Option<String> {
     }
     let key = script.to_vec();
     if let Ok(cache) = SCRIPT_RAW_CACHE.lock() {
-        if let Some((stamp, blob)) = cache.get(&key) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return Some(blob.clone());
+        if let Some((stamp, ttl, blob)) = cache.get(&key) {
+            if stamp.elapsed() < *ttl {
+                return blob.clone();
             }
         }
     }
+    let started = std::time::Instant::now();
     let bin = script.first()?;
-    let child = Command::new(bin)
+    let child = match Command::new(bin)
         .args(&script[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    let buf = spawn_with_timeout(child, 65_536)?;
+    {
+        Ok(child) => child,
+        Err(_) => {
+            store_script_raw(key, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
+    let buf = match spawn_with_timeout(child, 65_536) {
+        Some(buf) => buf,
+        None => {
+            store_script_raw(key, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
     if buf.is_empty() {
+        store_script_raw(key, None, GenEntry::ttl_for(started.elapsed()));
         return None;
     }
     let blob = String::from_utf8_lossy(&buf).into_owned();
-    if let Ok(mut cache) = SCRIPT_RAW_CACHE.lock() {
-        if cache.len() >= GENERATOR_CACHE_MAX {
-            if let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (t, _))| *t)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest);
-            }
-        }
-        cache.insert(key, (std::time::Instant::now(), blob.clone()));
-    }
+    store_script_raw(key, Some(blob.clone()), GENERATOR_CACHE_TTL);
     Some(blob)
 }
 
@@ -3539,7 +3562,11 @@ fn cargo_targets(
 }
 
 /// Per-cwd cache for `cargo metadata` raw output. Keyed by cwd
-/// (canonicalized), TTL 5s. Lives separately from
+/// (canonicalized). Hits keep the fixed 5s TTL so a workspace refresh
+/// (new member added) is never hidden for a minute; misses (spawn
+/// failure, timeout, empty output) are negative entries whose TTL is
+/// earned from the measured compute via [`GenEntry::ttl_for`].
+/// Lives separately from
 /// [`GENERATOR_CACHE`] because that cache splits stdout by lines
 /// and routes `{`-prefixed payloads through `extract_json_candidates`
 /// — both transforms would destroy the nested
@@ -3548,48 +3575,72 @@ fn cargo_targets(
 /// Bounded with the same LRU policy as `GENERATOR_CACHE`
 /// ([`GENERATOR_CACHE_MAX`] entries, oldest-evicted on overflow)
 /// so a long-running daemon that the user `cd`s through dozens of
-/// cargo workspaces doesn't leak. Fixed 5s TTL — it has not earned
-/// `GenEntry`'s measured TTL yet; do that if a workspace's `cargo
-/// metadata` shows up re-running in the background.
-static CARGO_METADATA_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, String)>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// cargo workspaces doesn't leak.
+type CargoMetadataCacheMap =
+    HashMap<std::path::PathBuf, (std::time::Instant, std::time::Duration, Option<String>)>;
+
+static CARGO_METADATA_CACHE: std::sync::LazyLock<std::sync::Mutex<CargoMetadataCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Insert a cargo-metadata `outcome` (hit or memoized miss) under `canon`,
+/// evicting the oldest entry past the size cap.
+fn store_cargo_metadata(
+    canon: std::path::PathBuf,
+    outcome: Option<String>,
+    ttl: std::time::Duration,
+) {
+    if let Ok(mut cache) = CARGO_METADATA_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(canon, (std::time::Instant::now(), ttl, outcome));
+    }
+}
 
 fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
     use std::process::{Command, Stdio};
     let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     if let Ok(cache) = CARGO_METADATA_CACHE.lock() {
-        if let Some((stamp, blob)) = cache.get(&canon) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return Some(blob.clone());
+        if let Some((stamp, ttl, blob)) = cache.get(&canon) {
+            if stamp.elapsed() < *ttl {
+                return blob.clone();
             }
         }
     }
-    let child = Command::new("cargo")
+    let started = std::time::Instant::now();
+    let child = match Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(&canon)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    let buf = spawn_with_timeout(child, 65_536)?;
+    {
+        Ok(child) => child,
+        Err(_) => {
+            store_cargo_metadata(canon, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
+    let buf = match spawn_with_timeout(child, 65_536) {
+        Some(buf) => buf,
+        None => {
+            store_cargo_metadata(canon, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
     if buf.is_empty() {
+        store_cargo_metadata(canon, None, GenEntry::ttl_for(started.elapsed()));
         return None;
     }
     let blob = String::from_utf8_lossy(&buf).into_owned();
-    if let Ok(mut cache) = CARGO_METADATA_CACHE.lock() {
-        if cache.len() >= GENERATOR_CACHE_MAX {
-            if let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (t, _))| *t)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest);
-            }
-        }
-        cache.insert(canon, (std::time::Instant::now(), blob.clone()));
-    }
+    store_cargo_metadata(canon, Some(blob.clone()), GENERATOR_CACHE_TTL);
     Some(blob)
 }
 
@@ -7522,6 +7573,57 @@ region = us-east-1
         assert!(!matches_filter("checkout", "Hk", None, MatchMode::Prefix));
         // Shorter name than query still fails.
         assert!(!matches_filter("ch", "Che", None, MatchMode::Prefix));
+    }
+
+    /// S-batch slice 02: a script that cannot spawn is a negative cache
+    /// entry — the second call returns from cache without spawning.
+    #[test]
+    fn script_raw_caches_spawn_failures() {
+        let script = vec!["nerv-nonexistent-binary-xyz".to_string()];
+        assert_eq!(cached_script_raw(&script), None);
+        assert_eq!(cached_script_raw(&script), None);
+        let cache = SCRIPT_RAW_CACHE.lock().unwrap();
+        let (_, ttl, outcome) = cache.get(&script).expect("negative entry stored");
+        assert_eq!(*outcome, None);
+        // A fast failure earns the short TTL, never the 60s slow one.
+        assert_eq!(*ttl, GENERATOR_CACHE_TTL);
+    }
+
+    /// S-batch slice 02: outside a workspace `cargo metadata` fails, and
+    /// the failure must not re-spawn on every keystroke.
+    #[test]
+    fn cargo_metadata_caches_failures_outside_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(cached_cargo_metadata(dir.path()), None);
+        assert_eq!(cached_cargo_metadata(dir.path()), None);
+        let canon = dir.path().canonicalize().unwrap();
+        let cache = CARGO_METADATA_CACHE.lock().unwrap();
+        let (_, _, outcome) = cache.get(&canon).expect("negative entry stored");
+        assert_eq!(*outcome, None);
+    }
+
+    /// S-batch slice 02 (review focus S2): TTL ownership — a fast compute
+    /// earns the short window, only an overrun earns 60s. Fast failures
+    /// therefore cannot hide a `cargo metadata` refresh for a minute.
+    #[test]
+    fn ttl_for_earns_slow_ttl_only_on_overrun() {
+        use std::time::Duration;
+        assert_eq!(
+            GenEntry::ttl_for(Duration::from_millis(0)),
+            GENERATOR_CACHE_TTL
+        );
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT - Duration::from_millis(1)),
+            GENERATOR_CACHE_TTL
+        );
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT),
+            GENERATOR_CACHE_TTL_SLOW
+        );
+        assert_eq!(
+            GenEntry::ttl_for(Duration::from_secs(10)),
+            GENERATOR_CACHE_TTL_SLOW
+        );
     }
 
     #[test]
