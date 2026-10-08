@@ -61,8 +61,11 @@ if set -q NERV_PTY_SESSION_ID
     end
 else if set -q NERV_PTY
     # ---- Top-level: re-exec under nerv-pty -------------------------------
-    # Only shim a real interactive TTY; leave scripts/pipes alone.
-    if status is-interactive
+    # Only shim a real interactive TTY; leave scripts/pipes alone. stdin
+    # AND stdout must be TTYs so a piped stdin keeps flowing through the
+    # pipe instead of being swallowed by the wrapper. Mirrors the zsh
+    # `-t 0/-t 1` and bash `-t 0/-t 1` guards.
+    if status is-interactive; and test -t 0; and test -t 1
         set -l __nerv_pty_bin nerv-pty
         if set -q NERV_PTY_BIN
             set __nerv_pty_bin $NERV_PTY_BIN
@@ -71,17 +74,24 @@ else if set -q NERV_PTY
             # Autostart nervd before handing over — the shim talks to
             # the same UDS. `nerv start` is idempotent (socket probe):
             # quiet no-op when a daemon already serves. The CLI lives
-            # next to nerv-pty; fall back to PATH.
-            set -l __nerv_cli (dirname $__nerv_pty_bin)/nerv
-            if not test -x $__nerv_cli
-                set __nerv_cli nerv
+            # next to nerv-pty; fall back to PATH. NERV_AUTOSTART=0 opts
+            # out, same as _nerv.zsh.
+            if test "$NERV_AUTOSTART" != 0
+                set -l __nerv_cli (dirname $__nerv_pty_bin)/nerv
+                if not test -x $__nerv_cli
+                    set __nerv_cli nerv
+                end
+                $__nerv_cli start >/dev/null 2>&1 &
+                disown 2>/dev/null
             end
-            $__nerv_cli start >/dev/null 2>&1 &
-            disown 2>/dev/null
-            exec $__nerv_pty_bin -- $SHELL
+            # Extra shell args ride along (mirrors zsh `"$@"` / bash `"$@"`).
+            # Re-exec this fish, not the login $SHELL: a zsh-login user
+            # who runs `fish` must land back in fish.
+            set -l __nerv_self_shell (status fish-path 2>/dev/null)
+            or set __nerv_self_shell fish
+            exec "$__nerv_pty_bin" -- "$__nerv_self_shell" $argv
         else
-            echo "[nerv] NERV_PTY=1 set but nerv-pty binary not found — falling back to no shim." >&2
-            echo "[nerv] Install nerv-pty (it ships with nerv >= 0.2) or unset NERV_PTY." >&2
+            echo "[nerv] NERV_PTY=1 but nerv-pty not found — falling back to no shim (unset NERV_PTY or install nerv-pty)." >&2
         end
     end
 end

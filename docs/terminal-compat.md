@@ -246,7 +246,7 @@ edit-buffer 인터셉트 방식이 ZLE widget → PTY 가로채기로 바뀐다.
 | 입력 라인 위치 추론 | zsh `LBUFFER` | `nerv-term` (← alacritty_terminal) screen state — 정확 |
 | prompt 경계 감지 | 없음 | precmd/preexec OSC 697 markers (`_nerv-pty.{zsh,bash,fish}` 부트스트랩이 emit — `Shell=` 마커가 edit-buffer 게이트) |
 | 셸 지원 | zsh 만 | zsh + bash + fish (셋 다 출하됨 — bash/fish 는 ZLE 부재로 PTY 가 *유일* 경로) |
-| 바이너리 배치 | `~/.zshrc` source | `nerv-pty` 가 release tarball/Formula 동봉 — `nerv init` 이 sibling lookup 으로 `NERV_PTY_BIN` 자동 export, 부트스트랩이 `exec nerv-pty -- "$SHELL"` |
+| 바이너리 배치 | `~/.zshrc` source | `nerv-pty` 가 release tarball/Formula 동봉 — `nerv init` 이 sibling lookup 으로 `NERV_PTY_BIN` 자동 export, 부트스트랩이 `exec nerv-pty -- <지금 셸> "$@"` (login `$SHELL` 아님 — §6.5) |
 | 활성화 분기 | 기본 | `NERV_PTY=1` 환경변수 |
 | 코드서명 | 불필요 | **필수** (Apple Developer ID + notarization, M0-8 인프라 재활용) |
 
@@ -264,6 +264,42 @@ ZLE 와 figterm 은 **상호 배타** — `NERV_PTY=1` 감지 시 ZLE widget
 베스트에포트 3종 (WezTerm/Alacritty/Kitty) 은 alacritty_terminal
 의 screen state 정확도 덕분에 M1 에서 *보장* 등급 격상 검토 (M1
 10주차 dogfooding 결과 기준).
+
+### 6.5 키맵·삽입 의미 계약 (ZLE vs PTY)
+
+같은 `nervd` 가 같은 행을 돌려줘도 키가 하는 일은 경로마다 다르다.
+이 표가 정본이다 — 키 동작을 바꾸는 변경은 이 표를 함께 고친다.
+PTY 3종 (zsh·bash·fish) 은 같은 `nerv-pty` 바이너리가 키를 가로채므로
+서로 동일하다. 키맵 통일은 별도 결정 대상이며, 지금은 차이를 고정·공개만 한다.
+
+| 키 | ZLE (zsh 기본) | PTY (`NERV_PTY=1`, zsh·bash·fish) |
+|----|----------------|-----------------------------------|
+| Enter | 하이라이트된 항목이 있으면 **삽입** (디렉터리 `…/` 는 삽입 + 실행), sentinel·팝업 없음이면 입력한 줄 실행 | **항상 셸로 통과** — 입력한 줄 그대로 실행, 팝업 선택은 삽입되지 않음 |
+| Tab | 선택 항목 **삽입** 후 다음 단계 팝업 재오픈, sentinel 이면 첫 항목으로 이동, 팝업 없으면 재질의 → zsh `expand-or-complete` | 팝업이 떠 있으면 **다음 항목으로 이동만** (ghost 가 선택을 따라감), 아니면 셸로 통과 |
+| Shift-Tab / ↑ / ↓ | 이전·다음 이동 (끝에서 순환) | 이전·다음 이동 |
+| PageUp / PageDown | 한 창씩 이동 | 한 창씩 이동 (클램프, 순환 없음) |
+| → (Right) | ghost 수락 | ghost 수락 + frecency 기록. 교정 힌트가 떠 있으면 **교정 적용** |
+| Esc / Ctrl-G | 팝업 닫기 | Esc 만 — 오버레이 닫기 |
+
+**명령 단어 교정** (`zpeh li` → `zeph`): ZLE 는 zsh 에 alias·함수·builtin
+여부를 직접 물어 거른 뒤 팝업 행으로 보여주고 Tab/Enter 로 적용한다.
+PTY 는 셸의 이름표를 볼 수 없어 (`nerv-pty::correction` 의 정적
+builtin 표만) 사용자 alias·함수를 오타로 읽을 수 있다 — 그래서
+커서 뒤 faint `  did you mean <word>` 힌트로만 그리고 Right 로 **명시
+적용**한다. 오탐 비용을 힌트 1줄에 묶는 의도된 차이다.
+
+**부트스트랩 대칭** (`_nerv-pty.{zsh,bash,fish}`, `scripts/e2e-pty-guards.py` 가 고정):
+
+- `NERV_PTY=1` 없이 source 되면 아무것도 하지 않는다 (ZLE 와 상호 배타 유지).
+- 대화형 셸 + stdin·stdout 모두 TTY 일 때만 감싼다 — 파이프·스크립트는 그대로.
+- `nerv-pty` 를 못 찾으면 stderr **1줄** (`[nerv] NERV_PTY=1 but nerv-pty not found — …`) 후 셸 유지.
+- 감싸는 셸은 **지금 source 한 셸** (zsh=`$SHELL` 이 zsh 면 그것 아니면 PATH 의 zsh, bash=`$BASH`, fish=`status fish-path`) — login `$SHELL` 이 zsh 인 사용자가 `bash` 를 띄워도 bash 로 돌아온다. 셸 인자는 그대로 전달.
+- `NERV_AUTOSTART=0` 이면 `nerv start` 를 건너뛴다 (ZLE `_nerv.zsh` 와 동일).
+
+**설정 env**: `NERV_AUTOSTART` 만 양쪽 공통이다. `NERV_POPUP_THEME` ·
+`NERV_AUTOSUGGEST` · `NERV_PREDICT` · `NERV_COMPSYS` · `NERV_SOCKET` ·
+`NERV_DEBUG` 는 **ZLE 전용** — PTY 경로는 읽지 않는다 (PTY 쪽 노출은
+키맵 통일과 함께 후속 결정).
 
 ## 7. 검증 방법론
 
@@ -342,3 +378,4 @@ M0 / 매 마이너 릴리즈마다 다음 체크리스트:
 *v1.2 — PLAN.md v0.6 정합. PRD §5.8 figterm opt-in 도입으로 §6.4 신설 (M1 nerv-pty path 와 ZLE path 의 차이 + 상호 배타 + Apple 서명 요건 + 베스트에포트 격상 검토). §1 매트릭스 자체는 변경 없음 (M0 기준 유지). 변경 트리거: figterm 의 M1 dogfooding 결과로 베스트에포트 → 보장 격상.*
 *v1.3 — §3.1 신설 (icon glyph width contract — `sanitize_icon` 이 unicode-width width==2 강제, ambiguous-width 거부). 위젯의 "non-ASCII = 2 cells" 가정을 엔진이 책임지는 contract 를 명시. 변경 트리거: 5th wire 필드 도입 (per-row width 명시 전송) 시 본 절 deprecate.*
 *v1.4 — §6.4 현행화: bash/fish PTY path 출하 반영 (fish "M1+1" 예정 → M1 출하). 부트스트랩 파일명 (`post.*`/`pre.sh` 구상 → `_nerv-pty.{zsh,bash,fish}` 실명), `NERV_PTY_BIN` sibling lookup, OSC 697 `Shell=` 마커 게이트, PTY e2e 3종 (`e2e-pty-{ghost,bash,fish}.py`) 명시. fish 4.x capability-query 주의 추가.*
+*v1.5 — §6.5 신설: ZLE vs PTY 키맵·삽입 의미 계약 1장 (Enter/Tab/→/Esc, 교정 적용 차이), PTY 부트스트랩 3종 대칭 규칙 (opt-in·TTY·1줄 에러·지금 셸 재exec·`NERV_AUTOSTART`), 설정 env 경로별 범위. §6.4 바이너리 배치 행의 `exec … "$SHELL"` 을 현행으로.*

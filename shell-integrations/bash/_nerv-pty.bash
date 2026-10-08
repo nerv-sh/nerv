@@ -93,29 +93,37 @@ if [[ -z "${NERV_PTY-}" ]]; then
 fi
 
 # Don't shim non-interactive shells (scripts, pipes) — only a real TTY
-# benefits and re-execing a script shell would break it.
+# benefits and re-execing a script shell would break it. stdin AND
+# stdout must be TTYs: a piped stdin (`echo cmd | bash -i`) must keep
+# flowing through the pipe, not get swallowed by the wrapper. Mirrors
+# the zsh `! -t 0 || ! -t 1` and fish `test -t` guards.
 case "$-" in
   *i*) ;;          # interactive — proceed
   *) return 0 ;;   # non-interactive — leave as-is
 esac
-[[ -t 1 ]] || return 0
+[[ -t 0 && -t 1 ]] || return 0
 
 # Locate the nerv-pty binary. Prefer the NERV_PTY_BIN override exported by
 # `nerv init bash`, then fall back to PATH.
 __NERV_PTY_BIN="${NERV_PTY_BIN:-nerv-pty}"
 if ! command -v "$__NERV_PTY_BIN" >/dev/null 2>&1; then
-  printf '%s\n' "[nerv] NERV_PTY=1 set but nerv-pty binary not found — falling back to no shim." >&2
-  printf '%s\n' "[nerv] Install nerv-pty (it ships with nerv >= 0.2) or unset NERV_PTY." >&2
+  printf '%s\n' "[nerv] NERV_PTY=1 but nerv-pty not found — falling back to no shim (unset NERV_PTY or install nerv-pty)." >&2
   return 0
 fi
 
 # Autostart nervd before handing over — the shim talks to the same UDS.
 # `nerv start` is idempotent (socket probe): quiet no-op when a daemon
 # already serves. The CLI lives next to nerv-pty; fall back to PATH.
-__NERV_CLI="${__NERV_PTY_BIN%/*}/nerv"
-[[ -x "$__NERV_CLI" ]] || __NERV_CLI=nerv
-( "$__NERV_CLI" start >/dev/null 2>&1 & ) 2>/dev/null
+if [[ "${NERV_AUTOSTART:-1}" != "0" ]]; then
+  __NERV_CLI="${__NERV_PTY_BIN%/*}/nerv"
+  [[ -x "$__NERV_CLI" ]] || __NERV_CLI=nerv
+  ( "$__NERV_CLI" start >/dev/null 2>&1 & ) 2>/dev/null
+fi
 
 # Hand control to nerv-pty, which sets NERV_PTY_SESSION_ID and re-execs
-# this shell under its shadow terminal.
-exec "$__NERV_PTY_BIN" -- "$SHELL"
+# this shell under its shadow terminal. Extra shell args (e.g. `--rcfile`
+# from a harness, or `-l`) ride along — dropping them would boot a
+# different shell than the user asked for. Mirrors zsh's `"$@"`.
+# `$BASH` (this bash's own binary), not the login `$SHELL`: a zsh-login
+# user who runs `bash` must land back in bash.
+exec "$__NERV_PTY_BIN" -- "${BASH:-bash}" "$@"

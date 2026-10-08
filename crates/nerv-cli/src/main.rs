@@ -2736,8 +2736,8 @@ mod tests {
         assert!(body.contains("function fish_prompt"));
         // Same gating requirement as bash.
         assert!(body.contains("Shell=fish"));
-        // fish-syntax re-exec.
-        assert!(body.contains("exec $__nerv_pty_bin -- $SHELL"));
+        // fish-syntax re-exec of this fish, not the login $SHELL.
+        assert!(body.contains("exec \"$__nerv_pty_bin\" -- \"$__nerv_self_shell\""));
         assert!(!body.contains("__NERV_LOADED"));
     }
 
