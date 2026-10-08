@@ -1838,7 +1838,9 @@ fn mode_match(name: &str, query: &str, mode: MatchMode) -> bool {
         MatchMode::Fuzzy if !is_dot_literal(query) && query.chars().count() >= 3 => {
             fuzzy_match_within(name, query, FUZZY_MAX_GAP)
         }
-        _ => name.starts_with(query),
+        // Prefix folds ASCII case like `ci_starts_with` (filepaths) and
+        // fuzzy already do: `git Ch` reaches `checkout`.
+        _ => ci_starts_with(name, query),
     }
 }
 
@@ -7510,6 +7512,16 @@ region = us-east-1
     fn matches_filter_prefix_is_default() {
         assert!(matches_filter("foobar", "foo", None, MatchMode::Prefix));
         assert!(!matches_filter("foobar", "bar", None, MatchMode::Prefix));
+    }
+
+    #[test]
+    fn matches_filter_prefix_is_case_insensitive() {
+        // S-batch slice 01: `git Ch` must reach `checkout` under Prefix.
+        assert!(matches_filter("checkout", "Ch", None, MatchMode::Prefix));
+        assert!(matches_filter("Checkout", "ch", None, MatchMode::Prefix));
+        assert!(!matches_filter("checkout", "Hk", None, MatchMode::Prefix));
+        // Shorter name than query still fails.
+        assert!(!matches_filter("ch", "Che", None, MatchMode::Prefix));
     }
 
     #[test]
