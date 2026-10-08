@@ -25,6 +25,13 @@ typeset -g __NERV_PREV_LBUFFER=""
 # __NERV_DOWN_AT is when that was last said on screen, __NERV_NOTICE is 1
 # while the "back" line is up (it leaves on the next key).
 typeset -gi __NERV_DOWN=0 __NERV_DOWN_AT=0 __NERV_NOTICE=0
+# A new shell starts the daemon in the background; a key typed before it
+# listens is not an outage. Nothing is said for the first seconds, and
+# nothing is latched, so a daemon that never came up is said after them.
+typeset -gi __NERV_LOADED_AT=0   # set once zsh/datetime is loaded
+__nerv_past_autostart() {
+  [[ ${NERV_AUTOSTART:-1} == 0 ]] || (( EPOCHSECONDS - __NERV_LOADED_AT >= 3 ))
+}
 typeset -gi __NERV_E5_SHOWN=0
 # 1 while the `…loading` one-line hint is on screen (cold spec parse or
 # derivation in flight). Cleared the moment rows or settled silence
@@ -139,6 +146,7 @@ typeset -gr __NERV_CLEAR_ESC=$'\e7\e[B\e[G\e[J\e8'
 zmodload -F zsh/parameter p:aliases 2>/dev/null
 # $EPOCHREALTIME times each compsys capture (__nerv_compsys_rows).
 zmodload -F zsh/datetime p:EPOCHREALTIME p:EPOCHSECONDS 2>/dev/null
+__NERV_LOADED_AT=${EPOCHSECONDS:-0}
 
 # Autostart nervd in the background so a fresh install (or a reboot)
 # needs no manual `nerv start`. `nerv start` is idempotent — it probes
@@ -1289,7 +1297,7 @@ __nerv_complete() {
         __NERV_E5_SHOWN=1
         zle -M "[nerv] spec mismatch — run: nerv doctor"
       fi
-    elif (( ! __NERV_DOWN )); then
+    elif (( ! __NERV_DOWN )) && __nerv_past_autostart; then
       # Said when the daemon goes down, not once per shell: a daemon that
       # died again an hour later used to fail in silence. One that keeps
       # dying is said once a minute.
@@ -1702,7 +1710,16 @@ __nerv_accept() {
     # owner when nerv genuinely has nothing (filenames, etc).
     __NERV_PREV_LBUFFER=$'\x00'
     __nerv_complete
-    (( ${#__NERV_ITEMS} > 0 )) || zle "$__NERV_TAB_PREV"
+    if (( ${#__NERV_ITEMS} == 0 )); then
+      # A plugin loaded after nerv may have kept nerv's widget as *its*
+      # fallback: handing the key back and forth would never end.
+      if (( __NERV_IN_TAB )); then
+        zle expand-or-complete
+      else
+        __NERV_IN_TAB=1
+        { zle "$__NERV_TAB_PREV" } always { __NERV_IN_TAB=0 }
+      fi
+    fi
   fi
 }
 zle -N __nerv_accept
@@ -1715,6 +1732,7 @@ zle -N __nerv_accept
 # Called at load and from the precmd rebind, so a plugin loaded late
 # (zinit turbo, zsh-defer) is noticed at the next prompt.
 typeset -g __NERV_TAB_PREV=expand-or-complete
+typeset -gi __NERV_IN_TAB=0
 __nerv_take_tab() {
   local cur="$(bindkey -M main '^I' 2>/dev/null)"
   cur=${cur##* }

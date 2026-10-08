@@ -704,7 +704,7 @@ fn check_spec_misses_in(
     let hint = overlay.map(
         |dir| match top.iter().find(|(name, _)| derived_file(name).is_none()) {
             Some((name, _)) => format!(
-                "run: curl -fsSL {EXAMPLE_SPEC_URL} -o {}/{name}.json — then edit it",
+                "run: curl -fsSL --create-dirs {EXAMPLE_SPEC_URL} -o {}/{name}.json — then edit it",
                 dir.display()
             ),
             None => format!(
@@ -2812,7 +2812,10 @@ mod tests {
         check_spec_misses_in(&mut r, &path, Some(&derived), Some(&overlay));
         assert_eq!(r.entries[0].detail, "zeph 12 (derived), aic2 9");
         let hint = r.entries[0].hint.clone().expect("hint");
-        assert!(hint.starts_with("run: curl -fsSL https://"), "{hint}");
+        assert!(
+            hint.starts_with("run: curl -fsSL --create-dirs https://"),
+            "{hint}"
+        );
         assert!(
             hint.contains(&format!("-o {}/aic2.json", overlay.display())),
             "{hint}"

@@ -10,6 +10,9 @@ Case 2 — same shell, nothing to complete → the rival's widget runs.
 Case 3 — rival bound late (after the first prompt, as zinit turbo or
   zsh-defer would): from the next prompt on it is the fallback.
 
+Case 4 — a late rival that chains to the widget it found on Tab (nerv's):
+  the key is not handed back and forth for ever.
+
 Run from repo root:  python3 scripts/e2e-zle-tabowner.py
 Requires: cargo-built debug binaries, zsh on PATH.
 """
@@ -124,6 +127,17 @@ def main():
         + "autoload -Uz add-zsh-hook; add-zsh-hook precmd late-bind\n",
     )
 
+    # A plugin that keeps "the original Tab widget" and calls it: loaded
+    # after nerv, that original is nerv's own.
+    chain = zdot(
+        "chain",
+        f'eval "$({NERV} init zsh)"\n'
+        + "chain-tab() { LBUFFER+=\"<RIVAL>\"; zle $CHAIN_ORIG }\nzle -N chain-tab\n"
+        + "late-bind() { CHAIN_ORIG=\"$(bindkey '^I')\"; CHAIN_ORIG=${CHAIN_ORIG##* }; bindkey '^I' chain-tab; "
+        + "add-zsh-hook -d precmd late-bind }\n"
+        + "autoload -Uz add-zsh-hook; add-zsh-hook precmd late-bind\n",
+    )
+
     env = dict(os.environ)
     env["HOME"] = home
     env["NERV_SPECS_DIR"] = SPECS
@@ -145,6 +159,10 @@ def main():
         env["ZDOTDIR"] = late
         got = buffer_after(env, home, [b"\r", b"git checkout zz", b"\t"])
         checks.append(("3 an owner bound late is picked up", got, "git checkout zz<RIVAL>"))
+
+        env["ZDOTDIR"] = chain
+        got = buffer_after(env, home, [b"\r", b"git checkout zz", b"\t"])
+        checks.append(("4 an owner that chains back to nerv ends", got, "git checkout zz<RIVAL>"))
     finally:
         subprocess.run([NERV, "stop"], env=env, capture_output=True)
         shutil.rmtree(home, ignore_errors=True)
@@ -154,7 +172,7 @@ def main():
         passed = got == want
         ok = ok and passed
         log(f"{'OK  ' if passed else 'FAIL'} {name}" + ("" if passed else f": {got!r} (want {want!r})"))
-    if ok and len(checks) == 3:
+    if ok and len(checks) == 4:
         log("PASS — Tab falls back to the widget that owned it")
         return 0
     log("FAIL")

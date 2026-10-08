@@ -50,6 +50,9 @@
 - **죽을 때마다 1회 표시**하고, 데몬이 응답하지 않는 동안에는 반복하지 않는다. 셸 수명에 1회가
   아니다 — 그러면 한 시간 뒤 다시 죽은 데몬이 침묵 속에 묻힌다. 계속 죽었다 살아나는 데몬은
   **1분에 1회**로 묶는다 (backoff).
+- **셸이 뜬 직후 3초는 침묵한다** (자동 기동이 켜져 있을 때). 새 셸은 데몬을 백그라운드로 띄우므로
+  bind 전에 친 키는 장애가 아니다. 그 동안은 아무것도 latch 하지 않아, 끝내 안 뜬 데몬은 3초 뒤
+  첫 키에 안내된다. `NERV_AUTOSTART=0` 이면 즉시 안내.
 - 줄은 `zle -M` 으로 그린다. `zle -R` 상태줄은 위젯이 끝나는 순간 zle 이 지워서 읽을 수 없었다.
   안내는 데몬이 응답하지 않는 동안 화면에 남는다.
 - ZLE 가 5초 동안 추가 connect 시도하지 않음 (재연결 폭주 방지).
@@ -189,6 +192,8 @@ THEN:
   팝업이 있으면 Tab 은 nerv 것이고, nerv 가 낼 행이 없으면 기억해 둔 위젯이 그대로 돈다 —
   fzf-tab·zsh-autocomplete 가 한 번 바인딩하고 영영 키를 잃던 것을 막는다. 늦게 로드되는
   플러그인(zinit turbo, zsh-defer)은 그 다음 프롬프트부터 폴백이 된다.
+  그 플러그인이 nerv 위젯을 *자기* 폴백으로 잡아 둔 경우(nerv 뒤에 로드) 키가 둘 사이를 끝없이
+  오가지 않도록, 넘겨준 키가 되돌아오면 `expand-or-complete` 로 끝낸다 (`__NERV_IN_TAB`).
   검증 = `scripts/e2e-zle-tabowner.py`.
 - zsh 자체 완성 폴백(spec 없는 명령의 팝업 행)을 끈 상태(`NERV_COMPSYS=0`)는 `nerv doctor` 의
   `shell completion` 행에 드러난다 — 기본(켜짐)일 때는 행이 없다.
@@ -351,7 +356,7 @@ THEN: 첫 키 뒤 화면에 `…loading` 이 남아 있고, 다음 키에 행이
 
 ```
   ✓ spec misses         zeph 12 (derived), aic2 9, aicommit2 4
-                        → run: curl -fsSL https://raw.githubusercontent.com/nerv-sh/nerv/main/examples/specs/claude.json -o ~/.config/nerv/specs/aic2.json — then edit it
+                        → run: curl -fsSL --create-dirs https://raw.githubusercontent.com/nerv-sh/nerv/main/examples/specs/claude.json -o ~/.config/nerv/specs/aic2.json — then edit it
 ```
 
 - **`(derived)`**: 그 이름은 집계 뒤에 `--help` 파생 spec (§3.6.4) 이 생겼다 — 횟수는 과거 기록이고,
