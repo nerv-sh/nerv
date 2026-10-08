@@ -847,6 +847,11 @@ pub fn loading_kind(reason: &str) -> Option<&str> {
 /// popup's icon column next to spec rows that carry `$`.
 pub const HISTORY_ICON: &str = "!";
 
+/// Icon on directory rows read from the filesystem ([`filepaths_at`]).
+/// The daemon groups rows by it: a row that carries it is a folder that
+/// exists where the listing was read, without asking the disk again.
+pub const FOLDER_ICON: &str = "📁";
+
 /// Recover the command name from a "no spec for …" reason. `None` for
 /// every other reason (empty input, quoted string, schema mismatch).
 pub fn no_spec_binary(reason: &str) -> Option<&str> {
@@ -886,6 +891,10 @@ pub struct CommandNames {
     /// like the other two: the daemon swaps an `Arc` in place, and a
     /// first-token keystroke must not clone a few thousand names.
     shell: Arc<Vec<String>>,
+    /// The `PATH` list is not the current one: no scan has finished, or
+    /// a directory changed since. A word missing from it may still be a
+    /// real command, so nothing is called a typo until the scan lands.
+    path_pending: bool,
 }
 
 impl CommandNames {
@@ -908,7 +917,14 @@ impl CommandNames {
             stems,
             path,
             shell,
+            path_pending: false,
         }
+    }
+
+    /// Mark the `PATH` list as stale or not yet read (see the field).
+    pub fn with_path_pending(mut self, pending: bool) -> Self {
+        self.path_pending = pending;
+        self
     }
 
     /// True when `name` is a command we know — the signal that the user
@@ -1064,6 +1080,9 @@ pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggesti
 /// a stem (`pnpm` against `npm`) can draw a correction it would not
 /// draw a moment later.
 pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str> {
+    if names.path_pending {
+        return None;
+    }
     let input: Vec<char> = input.chars().collect();
     let budget = typo_distance_budget(input.len())?;
     let mut best: Option<(usize, &str)> = None;
@@ -1838,7 +1857,12 @@ fn mode_match(name: &str, query: &str, mode: MatchMode) -> bool {
         MatchMode::Fuzzy if !is_dot_literal(query) && query.chars().count() >= 3 => {
             fuzzy_match_within(name, query, FUZZY_MAX_GAP)
         }
-        _ => name.starts_with(query),
+        // Prefix folds ASCII case like `ci_starts_with` (filepaths) and
+        // fuzzy already do: `git Ch` reaches `checkout`. Not for options:
+        // `-a` and `-A` are different flags, and offering one for the
+        // other would have Enter replace what was typed.
+        _ if query.starts_with('-') => name.starts_with(query),
+        _ => ci_starts_with(name, query),
     }
 }
 
@@ -2581,15 +2605,15 @@ fn emit_candidates_for_arg(
                     source: Some(source),
                     ..
                 } => {
-                    // Tier C: spin up a fresh QuickJS sandbox per call,
-                    // run the captured closure with the live token list,
-                    // and surface returned strings. Soft-fail on any
-                    // error (parse / throw / timeout / non-array) —
-                    // the dispatcher just falls through to the next
-                    // generator or the smart fallback.
+                    // Tier C: run the captured closure in a QuickJS
+                    // sandbox with the live token list (memoized per
+                    // source/tokens/cwd), and surface returned strings.
+                    // Soft-fail on any error (parse / throw / timeout /
+                    // non-array) — the dispatcher just falls through to
+                    // the next generator or the smart fallback.
                     let token_strs: Vec<String> = tokens.iter().map(|a| a.text.clone()).collect();
                     if let Some(cands) =
-                        crate::tier_c::execute_custom_source(source, &token_strs, cwd)
+                        crate::tier_c::execute_custom_source_cached(source, &token_strs, cwd)
                     {
                         // Path / URL-style generators (aws `s3://…`, file
                         // paths) return candidates for the segment AFTER the
@@ -2820,15 +2844,35 @@ static GENERATOR_INFLIGHT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<GeneratorCacheKey>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-type RawScriptCacheMap = HashMap<Vec<String>, (std::time::Instant, String)>;
+type RawScriptCacheMap =
+    HashMap<Vec<String>, (std::time::Instant, std::time::Duration, Option<String>)>;
 
 /// Process-wide cache for `ScriptWithJsonPath` raw stdout, keyed by script
-/// argv. Fixed 5s TTL and the same size / eviction policy as
-/// [`GENERATOR_CACHE`] (which alone earns a longer TTL per entry — see
-/// `GenEntry`); separate because the value is the verbatim blob (not
-/// post-processed lines).
+/// argv. Hits keep the fixed 5s TTL; misses (spawn failure, timeout,
+/// empty output) are negative entries whose TTL is earned from the
+/// measured compute via [`GenEntry::ttl_for`] — a fast failure costs 5s,
+/// only an overrun earns 60s. Same size / eviction policy as
+/// [`GENERATOR_CACHE`]; separate because the value is the verbatim blob
+/// (not post-processed lines).
 static SCRIPT_RAW_CACHE: std::sync::LazyLock<std::sync::Mutex<RawScriptCacheMap>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Insert a raw-script `outcome` (hit or memoized miss) under `key`,
+/// evicting the oldest entry past the size cap.
+fn store_script_raw(key: Vec<String>, outcome: Option<String>, ttl: std::time::Duration) {
+    if let Ok(mut cache) = SCRIPT_RAW_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), ttl, outcome));
+    }
+}
 
 /// Insert `outcome` (a hit or a memoized miss) into [`GENERATOR_CACHE`]
 /// under `key`, evicting the oldest entry past the size cap.
@@ -3153,37 +3197,40 @@ fn cached_script_raw(script: &[String]) -> Option<String> {
     }
     let key = script.to_vec();
     if let Ok(cache) = SCRIPT_RAW_CACHE.lock() {
-        if let Some((stamp, blob)) = cache.get(&key) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return Some(blob.clone());
+        if let Some((stamp, ttl, blob)) = cache.get(&key) {
+            if stamp.elapsed() < *ttl {
+                return blob.clone();
             }
         }
     }
+    let started = std::time::Instant::now();
     let bin = script.first()?;
-    let child = Command::new(bin)
+    let child = match Command::new(bin)
         .args(&script[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    let buf = spawn_with_timeout(child, 65_536)?;
+    {
+        Ok(child) => child,
+        Err(_) => {
+            store_script_raw(key, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
+    let buf = match spawn_with_timeout(child, 65_536) {
+        Some(buf) => buf,
+        None => {
+            store_script_raw(key, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
     if buf.is_empty() {
+        store_script_raw(key, None, GenEntry::ttl_for(started.elapsed()));
         return None;
     }
     let blob = String::from_utf8_lossy(&buf).into_owned();
-    if let Ok(mut cache) = SCRIPT_RAW_CACHE.lock() {
-        if cache.len() >= GENERATOR_CACHE_MAX {
-            if let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (t, _))| *t)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest);
-            }
-        }
-        cache.insert(key, (std::time::Instant::now(), blob.clone()));
-    }
+    store_script_raw(key, Some(blob.clone()), GENERATOR_CACHE_TTL);
     Some(blob)
 }
 
@@ -3537,7 +3584,11 @@ fn cargo_targets(
 }
 
 /// Per-cwd cache for `cargo metadata` raw output. Keyed by cwd
-/// (canonicalized), TTL 5s. Lives separately from
+/// (canonicalized). Hits keep the fixed 5s TTL so a workspace refresh
+/// (new member added) is never hidden for a minute; misses (spawn
+/// failure, timeout, empty output) are negative entries whose TTL is
+/// earned from the measured compute via [`GenEntry::ttl_for`].
+/// Lives separately from
 /// [`GENERATOR_CACHE`] because that cache splits stdout by lines
 /// and routes `{`-prefixed payloads through `extract_json_candidates`
 /// — both transforms would destroy the nested
@@ -3546,48 +3597,72 @@ fn cargo_targets(
 /// Bounded with the same LRU policy as `GENERATOR_CACHE`
 /// ([`GENERATOR_CACHE_MAX`] entries, oldest-evicted on overflow)
 /// so a long-running daemon that the user `cd`s through dozens of
-/// cargo workspaces doesn't leak. Fixed 5s TTL — it has not earned
-/// `GenEntry`'s measured TTL yet; do that if a workspace's `cargo
-/// metadata` shows up re-running in the background.
-static CARGO_METADATA_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<std::path::PathBuf, (std::time::Instant, String)>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+/// cargo workspaces doesn't leak.
+type CargoMetadataCacheMap =
+    HashMap<std::path::PathBuf, (std::time::Instant, std::time::Duration, Option<String>)>;
+
+static CARGO_METADATA_CACHE: std::sync::LazyLock<std::sync::Mutex<CargoMetadataCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Insert a cargo-metadata `outcome` (hit or memoized miss) under `canon`,
+/// evicting the oldest entry past the size cap.
+fn store_cargo_metadata(
+    canon: std::path::PathBuf,
+    outcome: Option<String>,
+    ttl: std::time::Duration,
+) {
+    if let Ok(mut cache) = CARGO_METADATA_CACHE.lock() {
+        if cache.len() >= GENERATOR_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(canon, (std::time::Instant::now(), ttl, outcome));
+    }
+}
 
 fn cached_cargo_metadata(cwd: &std::path::Path) -> Option<String> {
     use std::process::{Command, Stdio};
     let canon = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     if let Ok(cache) = CARGO_METADATA_CACHE.lock() {
-        if let Some((stamp, blob)) = cache.get(&canon) {
-            if stamp.elapsed() < GENERATOR_CACHE_TTL {
-                return Some(blob.clone());
+        if let Some((stamp, ttl, blob)) = cache.get(&canon) {
+            if stamp.elapsed() < *ttl {
+                return blob.clone();
             }
         }
     }
-    let child = Command::new("cargo")
+    let started = std::time::Instant::now();
+    let child = match Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--no-deps"])
         .current_dir(&canon)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
-    let buf = spawn_with_timeout(child, 65_536)?;
+    {
+        Ok(child) => child,
+        Err(_) => {
+            store_cargo_metadata(canon, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
+    let buf = match spawn_with_timeout(child, 65_536) {
+        Some(buf) => buf,
+        None => {
+            store_cargo_metadata(canon, None, GenEntry::ttl_for(started.elapsed()));
+            return None;
+        }
+    };
     if buf.is_empty() {
+        store_cargo_metadata(canon, None, GenEntry::ttl_for(started.elapsed()));
         return None;
     }
     let blob = String::from_utf8_lossy(&buf).into_owned();
-    if let Ok(mut cache) = CARGO_METADATA_CACHE.lock() {
-        if cache.len() >= GENERATOR_CACHE_MAX {
-            if let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, (t, _))| *t)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest);
-            }
-        }
-        cache.insert(canon, (std::time::Instant::now(), blob.clone()));
-    }
+    store_cargo_metadata(canon, Some(blob.clone()), GENERATOR_CACHE_TTL);
     Some(blob)
 }
 
@@ -4156,7 +4231,9 @@ fn filepaths_at(
     };
     let resolved = resolve_filepaths_root(cwd, dir_part)?;
     let entries = std::fs::read_dir(&resolved).ok()?;
-    let mut out: Vec<FilepathRow> = Vec::new();
+    // Each row with, for a plain directory, the path its summary is read
+    // from once the order is known.
+    let mut out: Vec<(FilepathRow, Option<std::path::PathBuf>)> = Vec::new();
     for e in entries.flatten() {
         let name_os = e.file_name();
         let Some(name) = name_os.to_str() else {
@@ -4178,7 +4255,12 @@ fn filepaths_at(
         let insertion = format!("{dir_part}{name}{trailing}");
         let display = format!("{name}{trailing}");
         let is_symlink = ft.map(|t| t.is_symlink()).unwrap_or(false);
-        let desc = filepaths_desc(&e, is_dir, is_symlink);
+        let summarized = is_dir && !is_symlink;
+        let desc = if summarized {
+            Some("dir".to_string())
+        } else {
+            filepaths_desc(&e, is_symlink)
+        };
         // Per-row icon: 🔗 for symlinks (checked first; a symlink
         // pointing at a dir still gets the link glyph), 📁 for
         // dirs, 📄 for regular files. All 4-byte UTF-8, pass
@@ -4186,11 +4268,14 @@ fn filepaths_at(
         let icon = if is_symlink {
             Some("🔗".to_string())
         } else if is_dir {
-            Some("📁".to_string())
+            Some(FOLDER_ICON.to_string())
         } else {
             Some("📄".to_string())
         };
-        out.push((insertion, display, desc, icon));
+        out.push((
+            (insertion, display, desc, icon),
+            summarized.then(|| e.path()),
+        ));
     }
     // Offer `.` and `..` once the user has typed a leading dot —
     // `open .`, `idea .`, `cd ..`. read_dir never yields these two, and
@@ -4204,10 +4289,13 @@ fn filepaths_at(
                 continue;
             }
             out.push((
-                format!("{dir_part}{name}/"),
-                format!("{name}/"),
-                Some(desc.to_string()),
-                Some("📁".to_string()),
+                (
+                    format!("{dir_part}{name}/"),
+                    format!("{name}/"),
+                    Some(desc.to_string()),
+                    Some(FOLDER_ICON.to_string()),
+                ),
+                None,
             ));
         }
     }
@@ -4215,13 +4303,33 @@ fn filepaths_at(
     // case-insensitive), but rank exact-case prefix hits first — `DE`
     // floats `DEEP_LINKING.md` above `deep-linking/`, and `de` the
     // reverse — then alphabetical within each group.
-    out.sort_by(|a, b| {
+    out.sort_by(|(a, _), (b, _)| {
         let a_exact = a.1.starts_with(filter);
         let b_exact = b.1.starts_with(filter);
         b_exact.cmp(&a_exact).then_with(|| a.1.cmp(&b.1))
     });
-    Some(out)
+    let mut summarized = 0;
+    Some(
+        out.into_iter()
+            .map(|(mut row, dir)| {
+                if let Some(dir) = dir.filter(|_| summarized < DIR_SUMMARY_ROWS) {
+                    summarized += 1;
+                    row.2 = Some(dir_summary(&dir));
+                }
+                row
+            })
+            .collect(),
+    )
 }
+
+/// How many leading directories of a listing get an item count
+/// ([`dir_summary`], one `read_dir` each); the rest say `dir`. Directories
+/// are counted, not rows: the daemon lifts folders above files, so the
+/// ones that lead the popup are the first directories, wherever files
+/// sort. Twice the popup's window of 8: the first page down still shows
+/// counts, and a folder with hundreds of subfolders costs the same as one
+/// with sixteen.
+const DIR_SUMMARY_ROWS: usize = 16;
 
 /// ASCII case-insensitive prefix test for filename completion. Non-ASCII
 /// bytes compare exactly, so UTF-8 names stay correct; only ASCII letters
@@ -4231,19 +4339,14 @@ fn ci_starts_with(name: &str, filter: &str) -> bool {
     nb.len() >= fb.len() && nb.iter().zip(fb).all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
-fn filepaths_desc(entry: &std::fs::DirEntry, is_dir: bool, is_symlink: bool) -> Option<String> {
+/// The description of a row that is not a plain directory — those are
+/// summarized by [`filepaths_at`] once it knows which rows lead.
+fn filepaths_desc(entry: &std::fs::DirEntry, is_symlink: bool) -> Option<String> {
     if is_symlink {
         if let Ok(target) = std::fs::read_link(entry.path()) {
             return Some(format!("→ {}", target.display()));
         }
         return Some("symlink".into());
-    }
-    if is_dir {
-        // Smart fallback for cd / z: every row would otherwise just
-        // say "dir" — uninformative. Show item count when cheap
-        // (~50µs per read_dir on typical sizes). Skip on read error
-        // (perm denied / unreadable) and fall back to "dir".
-        return Some(dir_summary(&entry.path()));
     }
     let meta = entry.metadata().ok()?;
     Some(human_size(meta.len()))
@@ -6302,6 +6405,10 @@ region = us-east-1
     fn transposed_letters_are_one_edit_away() {
         let names = CommandNames::from_parts(vec![], vec!["yarn".into()], vec![]);
         assert_eq!(did_you_mean("yanr", &names), Some("yarn"));
+        // Until the PATH scan lands, `yanr` could be a binary nobody has
+        // listed yet (`pnpm` read as a typo of `npm` right after boot).
+        let pending = names.clone().with_path_pending(true);
+        assert_eq!(did_you_mean("yanr", &pending), None);
     }
 
     /// A correction only makes sense when prefix matching came up
@@ -7394,6 +7501,16 @@ region = us-east-1
         assert!(!fuzzy_match_within("ab", "abc", 4));
     }
 
+    /// Case is folded for words, never for options: `-A` is not `-a`.
+    #[test]
+    fn prefix_folds_case_for_words_but_not_for_options() {
+        assert!(mode_match("checkout", "Ch", MatchMode::Prefix));
+        assert!(mode_match("-a", "-a", MatchMode::Prefix));
+        assert!(!mode_match("-a", "-A", MatchMode::Prefix));
+        assert!(!mode_match("--all", "--AL", MatchMode::Prefix));
+        assert!(mode_match("--all", "--al", MatchMode::Prefix));
+    }
+
     #[test]
     fn fuzzy_mode_rejects_sprawling_matches_zoxide_keeps_them() {
         assert!(mode_match("checkout", "chk", MatchMode::Fuzzy));
@@ -7510,6 +7627,67 @@ region = us-east-1
     fn matches_filter_prefix_is_default() {
         assert!(matches_filter("foobar", "foo", None, MatchMode::Prefix));
         assert!(!matches_filter("foobar", "bar", None, MatchMode::Prefix));
+    }
+
+    #[test]
+    fn matches_filter_prefix_is_case_insensitive() {
+        // S-batch slice 01: `git Ch` must reach `checkout` under Prefix.
+        assert!(matches_filter("checkout", "Ch", None, MatchMode::Prefix));
+        assert!(matches_filter("Checkout", "ch", None, MatchMode::Prefix));
+        assert!(!matches_filter("checkout", "Hk", None, MatchMode::Prefix));
+        // Shorter name than query still fails.
+        assert!(!matches_filter("ch", "Che", None, MatchMode::Prefix));
+    }
+
+    /// S-batch slice 02: a script that cannot spawn is a negative cache
+    /// entry — the second call returns from cache without spawning.
+    #[test]
+    fn script_raw_caches_spawn_failures() {
+        let script = vec!["nerv-nonexistent-binary-xyz".to_string()];
+        assert_eq!(cached_script_raw(&script), None);
+        assert_eq!(cached_script_raw(&script), None);
+        let cache = SCRIPT_RAW_CACHE.lock().unwrap();
+        let (_, ttl, outcome) = cache.get(&script).expect("negative entry stored");
+        assert_eq!(*outcome, None);
+        // A fast failure earns the short TTL, never the 60s slow one.
+        assert_eq!(*ttl, GENERATOR_CACHE_TTL);
+    }
+
+    /// S-batch slice 02: outside a workspace `cargo metadata` fails, and
+    /// the failure must not re-spawn on every keystroke.
+    #[test]
+    fn cargo_metadata_caches_failures_outside_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(cached_cargo_metadata(dir.path()), None);
+        assert_eq!(cached_cargo_metadata(dir.path()), None);
+        let canon = dir.path().canonicalize().unwrap();
+        let cache = CARGO_METADATA_CACHE.lock().unwrap();
+        let (_, _, outcome) = cache.get(&canon).expect("negative entry stored");
+        assert_eq!(*outcome, None);
+    }
+
+    /// S-batch slice 02 (review focus S2): TTL ownership — a fast compute
+    /// earns the short window, only an overrun earns 60s. Fast failures
+    /// therefore cannot hide a `cargo metadata` refresh for a minute.
+    #[test]
+    fn ttl_for_earns_slow_ttl_only_on_overrun() {
+        use std::time::Duration;
+        assert_eq!(
+            GenEntry::ttl_for(Duration::from_millis(0)),
+            GENERATOR_CACHE_TTL
+        );
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT - Duration::from_millis(1)),
+            GENERATOR_CACHE_TTL
+        );
+        assert_eq!(
+            GenEntry::ttl_for(GENERATOR_SYNC_WAIT),
+            GENERATOR_CACHE_TTL_SLOW
+        );
+        assert_eq!(
+            GenEntry::ttl_for(Duration::from_secs(10)),
+            GENERATOR_CACHE_TTL_SLOW
+        );
     }
 
     #[test]
@@ -8272,6 +8450,37 @@ region = us-east-1
             &tokens,
         );
         assert_eq!(cmd, vec!["aws", "lambda", "list-layer-versions"]);
+    }
+
+    /// Only the leading rows read their directory: a folder of many
+    /// subfolders must not cost a `read_dir` per row on every keystroke.
+    #[test]
+    fn only_leading_directory_rows_are_summarized() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..DIR_SUMMARY_ROWS + 4 {
+            let sub = tmp.path().join(format!("d{i:02}"));
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::write(sub.join("f"), "").unwrap();
+        }
+        let rows = filepaths_at(Some(tmp.path()), "", true).unwrap();
+        let descs: Vec<&str> = rows.iter().map(|r| r.2.as_deref().unwrap()).collect();
+        assert_eq!(descs.len(), DIR_SUMMARY_ROWS + 4);
+        assert!(descs[..DIR_SUMMARY_ROWS].iter().all(|d| *d == "1 item"));
+        assert!(descs[DIR_SUMMARY_ROWS..].iter().all(|d| *d == "dir"));
+    }
+
+    /// Files that sort ahead of the folders do not use up the counts:
+    /// the daemon shows folders first.
+    #[test]
+    fn files_sorting_first_do_not_use_up_the_summaries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..DIR_SUMMARY_ROWS + 4 {
+            std::fs::write(tmp.path().join(format!("A{i:02}")), "").unwrap();
+        }
+        std::fs::create_dir_all(tmp.path().join("zdir")).unwrap();
+        let rows = filepaths_at(Some(tmp.path()), "", false).unwrap();
+        let zdir = rows.iter().find(|r| r.0 == "zdir/").expect("zdir row");
+        assert_eq!(zdir.2.as_deref(), Some("empty"));
     }
 
     #[test]

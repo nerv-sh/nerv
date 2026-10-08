@@ -193,7 +193,7 @@ THEN:
 
 ### 3.5 E5 — spec 버전 불일치 ✅ 구현 완료 (2026-06-07)
 
-> 구현: `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=2`, `check_schema`). build-specs 가 `manifest.json` 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` → CLI bridge exit 3 → ZLE 회색 1줄 + `nerv doctor` red row. **missing manifest 는 관대** (pre-manifest 설치 호환). 테스트: manifest 5 unit + `schema_mismatch_disables_completion` e2e.
+> 구현: `nerv-engine::manifest` (`SUPPORTED_SCHEMA_VERSION=3`, `check_schema`). build-specs 가 `manifest.json` 작성 → daemon 부팅 시 비교, mismatch면 `error!` 로그 + Complete 전체 `Empty{reason}` → CLI bridge exit 3 → ZLE 회색 1줄 + `nerv doctor` red row. **missing manifest 는 관대** (pre-manifest 설치 호환). 테스트: manifest 5 unit + `schema_mismatch_disables_completion` e2e.
 >
 > `nerv _complete` 의 exit code: 0 = 행 있음/없음 · 3 = E5 schema mismatch · **4 = 행 있음 + 친 토큰이 이미 후보 이름** (에러 아님 — 위젯이 sentinel 을 기본 선택, first-5-min §0.9) · **7 = 행 없음 + spec 로딩 중** (에러 아님 — 위젯이 `…loading` 1줄, 아래 §3.5b) · 그 외 = 데몬 없음(E1).
 
@@ -213,15 +213,13 @@ THEN:
 **사용자 화면** (stderr, 데몬 로그):
 
 ```
-[nerv] spec schema mismatch — daemon expects v2, found v1.
-       Run: brew reinstall nerv  (또는: nerv doctor)
-       Autocomplete disabled until resolved.
+[nerv] spec schema mismatch — daemon expects v3, found v2. Run: nerv doctor. Autocomplete disabled until resolved.
 ```
 
 추가로 ZLE 가 첫 키 입력 시 회색 1줄:
 
 ```
-[nerv] spec mismatch — run: brew reinstall nerv
+[nerv] spec mismatch — run: nerv doctor
 ```
 
 **규칙**:
@@ -367,6 +365,10 @@ THEN: 첫 키 뒤 화면에 `…loading` 이 남아 있고, 다음 키에 행이
   단어(`nosuchbin`)와 spec 없는 실제 바이너리(PATH 에 있음)는 그대로 센다 — 후자가
   overlay spec 을 쓸 진짜 대상이다. 도입 전(v0.1.11 이하)에 쌓인 오타 행은 자동 정리하지
   않는다 (`rm ~/Library/Caches/nerv/misses.tsv`).
+- **PATH 목록이 최신이 아니면 교정하지 않는다.** 데몬 부팅 직후 첫 PATH 스캔이 끝나기
+  전이나 PATH 디렉터리가 바뀐 뒤 재스캔이 끝나기 전에는, 목록에 없는 단어가 방금 설치한
+  실제 명령일 수 있다 (`pnpm` 을 `npm` 오타로 읽던 경우). 그 동안 `did you mean` 행은
+  나오지 않고, 스캔이 끝난 다음 키부터 정상으로 돌아온다 (`CommandNames::path_pending`).
 - **스큐가 남긴 shell 이름 행은 프루닝된다 — v1.8.** 버전 스큐(§3.6.7) 기간의 데몬은
   shell 함수·alias 이름 소스가 없어, shell 이 실제로 완성하는 단어(`p10k`)가 miss 로
   집계될 수 있다. 등록된 shell 이름을 아는 새 데몬이 그런 행을 지운다 — shell 이 스스로

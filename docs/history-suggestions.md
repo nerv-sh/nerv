@@ -103,7 +103,10 @@ extends the typed text. The command-head term is nerv's own. Without it,
 candidate line continues it, is held to the same rule as a history row (§5,
 "History rows"): where the spec expects a path, or where the word ends in `/`,
 it has to exist. After `mv ` the ghost is the best line whose source is still
-here, and none when there is none. Only that one word is judged. Later words
+here, and none when there is none. The disk is asked best line first and about
+at most 20 lines (`GHOST_ACCEPT_CAP`), so a short prefix that hundreds of
+recorded lines extend costs a bounded number of stats per keystroke; past 20
+refusals there is no ghost. Only that one word is judged. Later words
 are not: a target that does not exist yet is how `mv a b` should look. While
 the command word itself is being typed (`cd`, no space yet) no argument is at
 the cursor and no spec has been read, so the word after it is judged on its
@@ -174,7 +177,7 @@ costs nothing.
 The popup's rows come from the spec engine. History only decides their
 order. For a row the daemon looks at two signals.
 
-**Picks.** How often and how recently you picked the row from the popup (`frecency.tsv`).
+**Picks.** How often and how recently you picked the row from the popup (`frecency.tsv`). The file keeps at most 2,000 rows (`frecency::MAX_ENTRIES`): past that the lowest-scored row makes room for a new pick. It is written at most once every five seconds, and once more when the daemon shuts down.
 
 **Runs.** How often and how recently the recorded commands had that word in
 that place:

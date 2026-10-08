@@ -68,10 +68,7 @@ async fn main() -> anyhow::Result<()> {
                     "spec schema mismatch — daemon expects v{}, found v{found}",
                     manifest::SUPPORTED_SCHEMA_VERSION
                 );
-                error!(
-                    "{reason}. Run: brew reinstall nerv (or: nerv doctor). \
-                 Autocomplete disabled until resolved."
-                );
+                error!("{reason}. Run: nerv doctor. Autocomplete disabled until resolved.");
                 Some(reason)
             }
             _ => None,
@@ -157,7 +154,7 @@ async fn main() -> anyhow::Result<()> {
 
     let shared = Shared {
         registry,
-        frecency,
+        frecency: frecency.clone(),
         misses: misses.clone(),
         names,
         history,
@@ -168,8 +165,21 @@ async fn main() -> anyhow::Result<()> {
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
 
+    // A throttled flush is only retried by the next record. Without this
+    // tick the last accept of a session stayed in memory until shutdown,
+    // and a kill or a crash lost it; now it is on disk within one tick.
+    let mut flush_tick = tokio::time::interval(STORE_FLUSH_TICK);
+    flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
+            _ = flush_tick.tick() => {
+                let (frecency, misses) = (frecency.clone(), misses.clone());
+                tokio::task::spawn_blocking(move || {
+                    frecency.flush_if_dirty();
+                    misses.flush_if_dirty();
+                });
+            }
             res = listener.accept() => {
                 match res {
                     Ok((stream, _addr)) => {
@@ -185,10 +195,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Last chance to persist the tally: `flush_if_dirty` is throttled
+    // Last chance to persist the tallies: `flush_if_dirty` is throttled
     // (MIN_FLUSH_INTERVAL) so the counts from the final window are still
     // in memory here.
     misses.flush_now();
+    frecency.flush_now();
 
     let _ = tokio::fs::remove_file(&sock_path).await;
     let _ = tokio::fs::remove_file(&pid_path).await;
@@ -697,12 +708,14 @@ impl NameCache {
     }
 
     fn names(&self, registry: &SpecRegistry, frecency: &FrecencyStore) -> CommandNames {
+        let (path, pending) = self.path.names();
         CommandNames::from_shared(
             frecency.spec_names(),
             self.stems(registry),
-            self.path.names(),
+            path,
             self.shell_names(),
         )
+        .with_path_pending(pending)
     }
 
     /// The registered shell names, as a shared list. Locking is only
@@ -747,12 +760,13 @@ impl NameCache {
 }
 
 impl PathCache {
-    /// Names from the last completed scan. Touches the disk only to
-    /// stat each `PATH` directory; a moved stamp schedules a rescan
-    /// instead of running one here.
-    fn names(self: &Arc<Self>) -> Arc<Vec<String>> {
+    /// Names from the last completed scan, and whether a newer one is
+    /// owed — none has finished yet, or a directory changed since. Touches
+    /// the disk only to stat each `PATH` directory; a moved stamp
+    /// schedules a rescan instead of running one here.
+    fn names(self: &Arc<Self>) -> (Arc<Vec<String>>, bool) {
         if self.dirs.is_empty() {
-            return Arc::default();
+            return (Arc::default(), false);
         }
         let stamp = self.stamps();
         let (names, fresh) = {
@@ -762,7 +776,7 @@ impl PathCache {
         if !fresh {
             self.schedule_rescan();
         }
-        names
+        (names, !fresh)
     }
 
     fn schedule_rescan(self: &Arc<Self>) {
@@ -915,12 +929,12 @@ fn engine_complete_paths(
     // and runs from every directory, a folder only from this one, so a
     // folder never entered would otherwise sit under the constants.
     // Stable, so each group keeps its ranked order (`./`, `../` first).
-    // Cached key: one stat per row, not one per comparison.
-    result.items.sort_by_cached_key(|s| {
+    // The engine's folder icon says the row was read from the disk for
+    // this request, so no row is stat'ed again here; a spec's own `x/`
+    // row (`https://github.com/`) carries none and stays a constant.
+    result.items.sort_by_key(|s| {
         let history = history_words.contains(&s.insertion);
-        let folder_here = !history
-            && s.insertion.ends_with('/')
-            && cwd_path.is_some_and(|d| d.join(&s.insertion).is_dir());
+        let folder_here = !history && s.icon.as_deref() == Some(nerv_engine::complete::FOLDER_ICON);
         (history, !folder_here)
     });
     // Ranking already truncated to the transport cap (MAX_SUGGESTIONS).
@@ -991,6 +1005,11 @@ fn last_word_start(typed: &str) -> usize {
         at += len;
     }
 }
+
+/// How often the daemon writes out what the usage stores still hold in
+/// memory (both no-ops when nothing changed). The stores throttle their
+/// own writes to the same interval.
+const STORE_FLUSH_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// `line` up to `cursor`. The widget counts the cursor in characters
 /// (`${#send_line}`), so a byte slice would split `ls 한글` mid-character
@@ -1466,12 +1485,18 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         exe(tmp.path(), "zeph");
         let cache = path_cache(tmp.path());
+        let (names, pending) = cache.names();
         assert!(
-            cache.names().is_empty(),
+            names.is_empty(),
             "asking for names must not walk PATH inline"
         );
+        // …and says so: until the scan lands a word missing from the list
+        // is not yet a typo (`pnpm` → `did you mean npm` right after boot).
+        assert!(pending);
         cache.rescan();
-        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
+        let (names, pending) = cache.names();
+        assert_eq!(*names, vec!["zeph".to_string()]);
+        assert!(!pending);
     }
 
     /// A newly installed binary has to show up without a daemon
@@ -1482,13 +1507,13 @@ mod tests {
         exe(tmp.path(), "zeph");
         let cache = path_cache(tmp.path());
         cache.rescan();
-        assert_eq!(*cache.names(), vec!["zeph".to_string()]);
+        assert_eq!(*cache.names().0, vec!["zeph".to_string()]);
 
         exe(tmp.path(), "aicommit2");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             // The first call schedules; later ones observe the result.
-            let names = cache.names();
+            let (names, _) = cache.names();
             if names.len() == 2 {
                 assert_eq!(*names, vec!["aicommit2".to_string(), "zeph".to_string()]);
                 break;
@@ -1520,7 +1545,8 @@ mod tests {
     fn a_pathless_cache_stays_empty() {
         let cache: Arc<PathCache> = Arc::new(PathCache::default());
         cache.schedule_rescan();
-        assert!(cache.names().is_empty());
+        let (names, pending) = cache.names();
+        assert!(names.is_empty() && !pending);
     }
 
     /// PATH is the third source of the list the engine matches against;
@@ -2181,6 +2207,39 @@ mod tests {
         };
         let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(words, ["beta/", "alpha/", "gamma/", "-", "~"]);
+    }
+
+    /// A spec's own row that merely ends in `/` is a constant, not a
+    /// folder here: it stays under the folders the listing found.
+    #[test]
+    fn a_spec_row_ending_in_a_slash_is_not_a_folder_here() {
+        let specs = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            specs.path().join("cd.json"),
+            r#"{"name":"cd","args":[{"suggestions":[{"name":"https://github.com/"}],
+                "generators":[{"type":"filepaths","folders_only":true}]}]}"#,
+        )
+        .expect("write spec");
+        let cwd = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(cwd.path().join("zeta")).expect("mkdir");
+        let resp = engine_complete(
+            &SpecRegistry::at_dir(specs.path()),
+            Ranking {
+                frecency: &FrecencyStore::empty(),
+                history: None,
+                prev: "",
+            },
+            None,
+            "cd ",
+            3,
+            cwd.path().to_str(),
+            MatchMode::default(),
+        );
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected rows, got {resp:?}");
+        };
+        let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(words, ["zeta/", "https://github.com/"]);
     }
 
     /// The widget counts the cursor in characters. Read as bytes, the

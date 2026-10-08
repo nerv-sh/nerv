@@ -50,6 +50,64 @@ pub fn execute_custom_source(
     execute_with_budget(source, tokens, cwd, DEFAULT_BUDGET)
 }
 
+/// [`execute_custom_source`] behind [`CUSTOM_CACHE`]: the generator
+/// dispatcher calls this so repeat requests for the same line skip the
+/// sandbox spin-up.
+pub fn execute_custom_source_cached(
+    source: &str,
+    tokens: &[String],
+    cwd: Option<&Path>,
+) -> Option<Vec<String>> {
+    memoize_custom(source, tokens, cwd, || {
+        execute_custom_source(source, tokens, cwd)
+    })
+}
+
+type CustomCacheKey = (u64, Vec<String>, Option<PathBuf>);
+type CustomCacheMap =
+    std::collections::HashMap<CustomCacheKey, (std::time::Instant, Option<Vec<String>>)>;
+
+/// Process-wide memo of closure results, keyed by (source hash, tokens,
+/// cwd). Every call otherwise builds a fresh sandbox and re-evaluates the
+/// closure. Misses (`None`) are memoized too, so a closure that burns its
+/// whole [`DEFAULT_BUDGET`] blocks once per TTL, not once per keystroke.
+/// Same TTL / size policy as [`SHELL_CACHE`].
+static CUSTOM_CACHE: std::sync::LazyLock<std::sync::Mutex<CustomCacheMap>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn memoize_custom(
+    source: &str,
+    tokens: &[String],
+    cwd: Option<&Path>,
+    exec: impl FnOnce() -> Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    let key: CustomCacheKey = (hasher.finish(), tokens.to_vec(), cwd.map(Path::to_path_buf));
+    if let Ok(cache) = CUSTOM_CACHE.lock() {
+        if let Some((stamp, out)) = cache.get(&key) {
+            if stamp.elapsed() < SHELL_CACHE_TTL {
+                return out.clone();
+            }
+        }
+    }
+    let out = exec();
+    if let Ok(mut cache) = CUSTOM_CACHE.lock() {
+        if cache.len() >= SHELL_CACHE_MAX {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(key, (std::time::Instant::now(), out.clone()));
+    }
+    out
+}
+
 /// Lower-level entry point that lets the caller dial the budget. Tests
 /// use this to assert the timeout path.
 pub fn execute_with_budget(
@@ -281,6 +339,47 @@ mod tests {
         let src = "fetch('https://example.com').then(r => [r])";
         let got = execute_custom_source(src, &[], None);
         assert_eq!(got, None);
+    }
+
+    /// S-batch slice 03: the same closure + tokens + cwd runs the sandbox
+    /// once inside the TTL; the repeat is served from the memo.
+    #[test]
+    fn custom_memo_runs_closure_once_per_key() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = AtomicUsize::new(0);
+        let src = "/* memo-once */ ['a']";
+        let tokens = vec!["tool".to_string(), "a".to_string()];
+        let exec = || {
+            runs.fetch_add(1, Ordering::SeqCst);
+            Some(vec!["a".to_string()])
+        };
+        assert_eq!(
+            memoize_custom(src, &tokens, None, exec),
+            Some(vec!["a".into()])
+        );
+        assert_eq!(
+            memoize_custom(src, &tokens, None, exec),
+            Some(vec!["a".into()])
+        );
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    /// S-batch slice 03 (review focus S3): `cwd` is part of the key, so
+    /// one directory's result never answers another's.
+    #[test]
+    fn custom_memo_keys_on_cwd() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let runs = AtomicUsize::new(0);
+        let src = "/* memo-cwd */ ['a']";
+        let tokens = vec!["tool".to_string()];
+        let exec = || {
+            runs.fetch_add(1, Ordering::SeqCst);
+            None
+        };
+        memoize_custom(src, &tokens, Some(Path::new("/tmp/nerv-a")), exec);
+        memoize_custom(src, &tokens, Some(Path::new("/tmp/nerv-b")), exec);
+        memoize_custom(src, &tokens, Some(Path::new("/tmp/nerv-a")), exec);
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
     #[test]

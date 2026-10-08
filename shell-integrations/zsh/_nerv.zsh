@@ -62,9 +62,12 @@ typeset -gA __NERV_COMPSYS_SEEN=() __NERV_COMPSYS_SLOW=()
 # Tighten KEYTIMEOUT so single-press Esc dismisses the popup
 # without zsh's default 0.4s wait for longer escape sequences.
 # 1 = 10ms — fast enough for human perception, still safe for
-# multi-byte arrow keys on local terminals. User can override
-# after the init block.
-KEYTIMEOUT=1
+# multi-byte arrow keys on local terminals. Only zsh's default (40)
+# is replaced: a value the user set before the init block is theirs.
+# __nerv_restore_keytimeout puts the original back.
+typeset -g __NERV_KEYTIMEOUT_ORIG=$KEYTIMEOUT
+(( KEYTIMEOUT == 40 )) && KEYTIMEOUT=1
+__nerv_restore_keytimeout() { KEYTIMEOUT=$__NERV_KEYTIMEOUT_ORIG; }
 typeset -gi __NERV_WIDTH=46
 
 # Popup palette, chosen once per shell. NERV_POPUP_THEME:
@@ -1278,7 +1281,7 @@ __nerv_complete() {
     if (( rc == 3 )); then
       if (( ! __NERV_E5_SHOWN )); then
         __NERV_E5_SHOWN=1
-        zle -R "[nerv] spec mismatch — run: brew reinstall nerv"
+        zle -R "[nerv] spec mismatch — run: nerv doctor"
         __NERV_ACTIVE=1
       fi
     elif (( ! __NERV_E1_SHOWN )); then
@@ -1920,10 +1923,11 @@ zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
 
 # Esc closes an active popup. When no popup is up, falls through to
-# zsh's usual Esc handling (send-break — same as the unbound default).
-# KEYTIMEOUT is set to 1 (10ms) at the top of this file so the
-# bare-Esc binding fires instantly without waiting for a longer
-# escape sequence like `\e[A`.
+# zsh's usual Esc handling: vi-cmd-mode in vi insert mode (`bindkey -v` before
+# the init block puts this binding there), send-break otherwise — same
+# as the unbound default. KEYTIMEOUT is lowered to 1 (10ms) at the top
+# of this file so the bare-Esc binding fires instantly without waiting
+# for a longer escape sequence like `\e[A`.
 __nerv_escape() {
   if (( __NERV_ACTIVE )); then
     __nerv_hide_popup
@@ -1935,6 +1939,9 @@ __nerv_escape() {
   elif [[ -n $POSTDISPLAY && $POSTDISPLAY == "$__NERV_PREDICTED" ]]; then
     # A showing prediction is dismissed for this line, like ^G.
     POSTDISPLAY='' __NERV_PREDICTED=''
+  elif [[ $KEYMAP == viins || ( $KEYMAP == main && $(bindkey -lL main) == *viins* ) ]]; then
+    # `bindkey -v` aliases main to viins, and $KEYMAP then reads `main`.
+    zle .vi-cmd-mode
   else
     zle .send-break 2>/dev/null || true
   fi
