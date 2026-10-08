@@ -154,16 +154,14 @@ __nerv_clear_state_vars() {
   __NERV_RESERVED=0
   __NERV_PAINTED=""
   __NERV_ITEMS=()
-  # The loading hint is popup-state too: any path that drops the popup
-  # must not leave a stale `…loading` behind. (The visible status line
-  # itself is cleared with `zle -R ""` where a widget runs; traps and
-  # precmd can't, so they only drop the flag and the next keystroke
-  # clears or overwrites the line.)
-  __NERV_LOADING_SHOWN=0
 }
 
+# The loading hint goes with the popup: any widget path that drops one
+# drops the other. (Not in __nerv_clear_state_vars — a trap cannot call
+# `zle -M`, and the flag has to survive until a widget can.)
 __nerv_reset_state() {
   __nerv_clear_state_vars
+  __nerv_clear_loading
   zle -R ""
 }
 
@@ -713,6 +711,10 @@ __nerv_hide_popup() {
   # remnants persist where the blank lines used to be.
   printf '%s' "$__NERV_CLEAR_ESC"
   __nerv_reset_state
+  # The clear erases everything under the cursor row, and with text
+  # after the cursor that includes the rows a wrapped line continues on.
+  # zle believes they are still drawn; only a full redraw brings them back.
+  [[ -n $RBUFFER ]] && zle reset-prompt 2>/dev/null
 }
 
 __nerv_insert_selected() {
@@ -763,11 +765,17 @@ __nerv_insert_selected() {
   (( wstart > 1 )) && pre="${before[1,wstart-1]}"
 
   # Strip leading partial word from `after` (rest of the same word
-  # when cursor is mid-token).
+  # when cursor is mid-token) — but only when the insertion spells that
+  # rest: `che|ckout` + `checkout`. Text that merely touches the cursor
+  # is another word (`git commit --am|-m "x"`, the cursor parked at the
+  # start of `-m`), and stays.
   local post="$after"
   if [[ -n "$after" && "$after[1]" != ' ' && "$after[1]" != $'\t' ]]; then
     local rest="${after%%[[:space:]]*}"
-    post="${after#$rest}"
+    if [[ ${(L)insertion} == "${(L)before[wstart,-1]}${(L)rest}"* \
+          || ${(L)insertion} == *"${(L)rest}" ]]; then
+      post="${after#$rest}"
+    fi
   fi
 
   # Trailing separator: a completed token gets a space so the next arg
@@ -1151,6 +1159,13 @@ __nerv_sock_call() {
   __nerv_sock_read $__NERV_SEQ $bound
 }
 
+# Take the `…loading` hint off the screen once anything else answers.
+__nerv_clear_loading() {
+  (( __NERV_LOADING_SHOWN )) || return 0
+  __NERV_LOADING_SHOWN=0
+  zle -M ""
+}
+
 __nerv_complete() {
   if [[ -n "${NERV_DEBUG:-}" ]]; then
     print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS} CURSOR=$CURSOR" >> /tmp/nerv-debug.log
@@ -1169,6 +1184,7 @@ __nerv_complete() {
   __NERV_RANKED_FOR=$LBUFFER __NERV_RANKED="" __NERV_PREFILLED=""
 
   if [[ -z "${LBUFFER// /}" ]]; then
+    __nerv_clear_loading
     __nerv_hide_popup
     # Back to an empty line: the prompt's prediction returns. Written even
     # when zsh-autosuggestions owns the ghost: it never paints an empty
@@ -1270,7 +1286,7 @@ __nerv_complete() {
       zle -R "[nerv] daemon not running — run: nerv start"
       __NERV_ACTIVE=1
     fi
-    __NERV_LOADING_SHOWN=0
+    __nerv_clear_loading
     return
   fi
   if [[ -n "${NERV_DEBUG:-}" ]]; then
@@ -1330,16 +1346,17 @@ __nerv_complete() {
     # settled miss (same channel as the E1/E5 hints). Shown on every
     # loading keystroke, cleared the moment anything else arrives —
     # rows overwrite the status themselves, settled silence clears it.
+    # `zle -M`, not `zle -R`: a status line is gone when the widget
+    # returns, a message stays until the next one.
     if (( loading )); then
-      zle -R "…loading"
+      zle -M "…loading"
       __NERV_LOADING_SHOWN=1
-    elif (( __NERV_LOADING_SHOWN )); then
-      __NERV_LOADING_SHOWN=0
-      zle -R ""
+    else
+      __nerv_clear_loading
     fi
     return
   fi
-  __NERV_LOADING_SHOWN=0
+  __nerv_clear_loading
 
   # Shell-name rows arrive with the engine's generic description. An
   # alias knows its expansion locally ($aliases is already loaded for
@@ -1420,7 +1437,7 @@ __nerv_complete() {
   local max=${ZSH_AUTOSUGGEST_BUFFER_MAX_SIZE-}
   if (( __NERV_GHOST_OFF && ! __NERV_YIELD && $+functions[_zsh_autosuggest_fetch] \
         && ! ${+_ZSH_AUTOSUGGEST_DISABLED} )) \
-     && [[ -z $max || ${#BUFFER} -le $max ]]; then
+     && [[ -z $RBUFFER ]] && [[ -z $max || ${#BUFFER} -le $max ]]; then
     local pre=$hist_ghost
     if [[ -z $pre ]] && (( ${${(@)=ZSH_AUTOSUGGEST_STRATEGY}[(Ie)history]} )); then
       __nerv_history_ghost force
@@ -1450,7 +1467,12 @@ typeset -g __NERV_PREFILLED=""
 # __nerv_repaint_after_autosuggest.
 typeset -g __NERV_PAINTED=""
 typeset -ga __NERV_RESERVED_ROWS=()
-__nerv_ghost() { (( __NERV_GHOST_OFF )) || POSTDISPLAY=$1; }
+# POSTDISPLAY is drawn after the whole buffer, so with text after the
+# cursor a ghost would read as glued to that text: none is shown.
+__nerv_ghost() {
+  (( __NERV_GHOST_OFF )) && return
+  [[ -n $RBUFFER ]] && POSTDISPLAY='' || POSTDISPLAY=$1
+}
 __nerv_ghost_owner() {
   (( __NERV_GHOST_CHECKED )) && return
   __NERV_GHOST_CHECKED=1
@@ -1541,6 +1563,7 @@ __nerv_set_ghost() {
   (( __NERV_GHOST_OFF )) && return
   POSTDISPLAY=''
   (( ${#__NERV_ITEMS} == 0 )) && return
+  [[ -n $RBUFFER ]] && return
   # Bail when nothing typed yet for the current word — keeps the
   # prompt line quiet while the user surveys the popup.
   [[ "$LBUFFER" == *' ' || "$LBUFFER" == *$'\t' ]] && return
@@ -1618,7 +1641,7 @@ __nerv_line_finish() {
   else
     (( __NERV_ACTIVE )) && { __NERV_ACTIVE=0; zle -R ""; }
     # A stale `…loading` hint must not outlive the line it belonged to.
-    (( __NERV_LOADING_SHOWN )) && { __NERV_LOADING_SHOWN=0; zle -R ""; }
+    __nerv_clear_loading
     __NERV_PREV_LBUFFER=""
     __NERV_SELECTED=0
     __NERV_ITEMS=()
@@ -1688,6 +1711,7 @@ __nerv_select_down() {
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle down-line-or-history
+    __NERV_PREV_LBUFFER=$LBUFFER
   fi
 }
 zle -N __nerv_select_down
@@ -1698,6 +1722,7 @@ __nerv_select_up() {
     __nerv_show_popup "${__NERV_ITEMS[@]}"
   else
     zle up-line-or-history
+    __NERV_PREV_LBUFFER=$LBUFFER
   fi
 }
 zle -N __nerv_select_up
@@ -1774,8 +1799,15 @@ bindkey $'\eOC' __nerv_accept_ghost
 # a redraw that changed nothing (repaints, selection navigation, ghost
 # styling) returns before any IPC. A query fires only when LBUFFER
 # differs from the last completed one — exactly cursor moves and
-# unwrapped edits (history recall, paste). Typing already completed via
+# unwrapped edits (a kill, a paste). Typing already completed via
 # `self-insert` first, so its redraw is a no-op here.
+#
+# A line brought back from the history is the exception: it is a whole
+# command, not a word being typed. A popup over it would take the next
+# Up (cycling rows instead of older history) and Enter (inserting a row
+# instead of running the line). nerv's own arrow widgets mark the
+# recalled line seen; the pattern below covers history widgets nerv
+# does not wrap (Ctrl-R, fzf, atuin, the *-search family).
 
 __nerv_pre_redraw() {
   # __nerv_complete's first check (`LBUFFER == PREV → return`) is the
@@ -1783,6 +1815,11 @@ __nerv_pre_redraw() {
   # nothing, and only a moved cursor (or an unwrapped edit) gets a
   # fresh query. Dismiss/Esc mark the current LBUFFER seen
   # (`PREV=LBUFFER`, not a popup) so a dismissed line stays dismissed.
+  if [[ $LBUFFER != "$__NERV_PREV_LBUFFER" \
+        && $LASTWIDGET == *(history|-or-search|beginning-search|atuin)* ]]; then
+    __nerv_hide_popup
+    __NERV_PREV_LBUFFER=$LBUFFER
+  fi
   __nerv_complete
 
   # Paint the inline ghost (POSTDISPLAY) a muted grey — like fish /

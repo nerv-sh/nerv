@@ -156,9 +156,15 @@ pub fn complete_output(resp: Response, compsys: bool, ghost: bool) -> CompleteOu
         // Still loading: no rows, but not a miss either. The code is
         // the widget's only side channel — the reason string itself
         // never crosses the wire, and no row field is added.
+        // A command with no written spec keeps the shell's own completion
+        // while its `--help` is read: that answer is ready now.
         Response::Empty {
-            reason: Some(r), ..
-        } if crate::loading_kind(r.as_str()).is_some() => EXIT_SPEC_LOADING,
+            reason: Some(r),
+            unspecced,
+            ..
+        } if crate::loading_kind(r.as_str()).is_some() && !(unspecced && compsys) => {
+            EXIT_SPEC_LOADING
+        }
         // No rows → no popup in zsh, unless the shell may answer.
         Response::Empty { unspecced, .. } => complete_exit_code(false, unspecced, compsys),
         _ => 0,
@@ -551,5 +557,21 @@ mod tests {
             true,
         );
         assert_eq!(settled.code, 0);
+        // No written spec, and the widget can ask the shell: it does,
+        // rather than wait on `--help` with nothing on screen.
+        let derived = |compsys| {
+            complete_output(
+                Response::Empty {
+                    reason: Some(format!("{}derived", crate::LOADING_REASON_PREFIX)),
+                    unspecced: true,
+                    ghost: None,
+                },
+                compsys,
+                true,
+            )
+            .code
+        };
+        assert_eq!(derived(true), 5);
+        assert_eq!(derived(false), EXIT_SPEC_LOADING);
     }
 }

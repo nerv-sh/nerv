@@ -870,9 +870,12 @@ fn engine_complete_paths(
     mode: MatchMode,
 ) -> (Response, bool) {
     let cwd_path = cwd.map(std::path::Path::new);
-    let mut result = complete_in(line, cursor, registry, cwd_path, mode, names);
-    let path_arg = result.path_arg;
+    // The widget counts the cursor in characters, the engine in bytes:
+    // passed through as-is, `git commit -m 한글 --am` reached the engine
+    // four bytes short and completed `-` instead of `--am`.
     let before = before_cursor(line, cursor);
+    let mut result = complete_in(line, before.len(), registry, cwd_path, mode, names);
+    let path_arg = result.path_arg;
     let signals = ranking
         .history
         .map(|h| h.token_signals(&completed_words(before), cwd.unwrap_or(""), ranking.prev));
@@ -1030,19 +1033,22 @@ fn on_path_in(name: &str, path_var: &str) -> bool {
             })
 }
 
-/// Whether history rows may join this reply. Three replies are contracts
+/// Whether history rows may join this reply. Four replies are contracts
 /// that extra rows would break:
 /// - a command-word correction comes back as the only row, and the
 ///   widget recognises it by that (`(( ${#rlines} == 1 ))` in _nerv.zsh);
 /// - "no spec for X" is what the miss tally counts and what sends the
 ///   widget to zsh's own completion;
+/// - "loading" is the widget's cue for its hint, and a row would turn the
+///   reply into a popup whose first row Enter inserts;
 /// - rows the source ranked itself (zoxide, command names) keep that
 ///   order. A history row would score above them, and after `z` it is a
 ///   partial query (`z nerv`) that zoxide's rows, full paths, never match:
 ///   picking it re-runs the fuzzy jump the full paths are there to avoid.
 fn wants_history_rows(items: &[Suggestion], reason: Option<&str>) -> bool {
     !items.iter().any(|s| s.replace.is_some() || s.source_ranked)
-        && reason.is_none_or(|r| no_spec_binary(r).is_none())
+        && reason
+            .is_none_or(|r| no_spec_binary(r).is_none() && nerv_engine::loading_kind(r).is_none())
 }
 
 /// How many words the history may add as rows of their own.
@@ -1737,6 +1743,8 @@ mod tests {
         assert!(!wants_history_rows(&[fix], None));
         let no_spec = format!("{}nosuchbin", nerv_engine::complete::NO_SPEC_REASON_PREFIX);
         assert!(!wants_history_rows(&[], Some(&no_spec)));
+        let loading = format!("{}spec", nerv_engine::LOADING_REASON_PREFIX);
+        assert!(!wants_history_rows(&[], Some(&loading)));
         assert!(wants_history_rows(&[sugg("main")], None));
         assert!(wants_history_rows(&[], None));
         // zoxide's rows (and command names) keep the source's order.
@@ -2173,6 +2181,40 @@ mod tests {
         };
         let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
         assert_eq!(words, ["beta/", "alpha/", "gamma/", "-", "~"]);
+    }
+
+    /// The widget counts the cursor in characters. Read as bytes, the
+    /// line reached the engine short by the extra bytes of every wide
+    /// character before the cursor: `--am` was completed as `-`.
+    #[test]
+    fn the_cursor_is_counted_in_characters() {
+        let specs = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            specs.path().join("git.json"),
+            r#"{"name":"git","subcommands":[{"name":"commit","options":[
+                {"names":["-m"],"args":[{"name":"msg"}]},
+                {"names":["--amend"]},{"names":["--all"]},{"names":["--verbose"]}]}]}"#,
+        )
+        .expect("write spec");
+        let line = "git commit -m 한글 --am";
+        let resp = engine_complete(
+            &SpecRegistry::at_dir(specs.path()),
+            Ranking {
+                frecency: &FrecencyStore::empty(),
+                history: None,
+                prev: "",
+            },
+            None,
+            line,
+            line.chars().count(),
+            Some("/"),
+            MatchMode::default(),
+        );
+        let Response::Suggestions { items, .. } = resp else {
+            panic!("expected rows, got {resp:?}");
+        };
+        let words: Vec<&str> = items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(words, ["--amend"]);
     }
 
     #[test]

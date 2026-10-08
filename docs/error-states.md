@@ -268,7 +268,14 @@ reason + exit code 로 답한다. E1/E5 와 달리 조치도 latch 도 없다 �
 **규칙**:
 
 - 매 로딩 키마다 표시 (E1/E5 의 세션 1회 latch 없음 — transient 상태라서).
-- 행이 오거나 settled empty 가 오면 즉시 해소: 팝업 예약 blank 가 덮거나 `zle -R ""`.
+- 채널은 `zle -M` 이다. `zle -R` 상태줄은 위젯이 끝나는 순간 zle 이 지우므로 힌트가 화면에
+  남지 않는다 (E1/E5 와 다른 점 — 그쪽은 세션 1회 깜빡임으로 충분하다고 본 채널).
+- 행이 오거나 settled empty 가 오면 즉시 해소 (`__nerv_clear_loading` → `zle -M ""`).
+- **spec 이 아예 없는 명령은 기다리지 않는다**: `loading:derived` 이고 위젯이 zsh 완성 폴백을
+  쓸 수 있으면(`--compsys`) exit 7 이 아니라 5 — `--help` 파생이 도는 동안에도 셸 자체 완성이
+  바로 뜬다. 폴백이 없을 때만 `…loading`.
+- 로딩 중 응답에는 history 행을 붙이지 않는다 — 붙이면 행 있는 응답이 되어 힌트 대신
+  팝업이 뜨고 Enter 가 그 history 단어를 삽입한다.
 - Enter·새 프롬프트 시 잔상 제거 (`__NERV_LOADING_SHOWN` 플래그 가드).
 - history ghost 는 그대로 유지 (E1/E5 와 동일 — 엔진과 무관한 가치는 잃지 않는다).
 - 80자·회색·영문 (§4 톤).
@@ -282,6 +289,9 @@ THEN:
   - 행 0개 + reason `loading:derived` + 교정 행 없음
   - `no_spec_binary(reason)` = None (tally 미집계)
   - `complete_output` code = 7
+----
+e2e (`scripts/e2e-zle-midline.py` case A): 파싱이 sync window 를 넘는 큰 spec
+THEN: 첫 키 뒤 화면에 `…loading` 이 남아 있고, 다음 키에 행이 오면 사라진다
 ```
 
 ---
