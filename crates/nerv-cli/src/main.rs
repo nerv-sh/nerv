@@ -2489,8 +2489,6 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
     }
 
-    /// Version skew between daemon and CLI → exactly one Warn row whose
-    /// hint is the restart command.
     #[test]
     fn storage_row_counts_rows_against_their_caps() {
         let dir = std::env::temp_dir().join(format!("nerv-storage-doc-{}", std::process::id()));
@@ -2515,6 +2513,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Version skew between daemon and CLI → exactly one Warn row whose
+    /// hint is the restart command.
     #[test]
     fn check_daemon_responding_warns_on_skew() {
         let mut r = DoctorReport::default();

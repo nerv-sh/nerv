@@ -9,6 +9,8 @@ used to degrade in silence.
 2. The next shell in the same terminal says nothing.
 3. A different unlisted terminal (vscode) is told once too.
 4. Listed terminals (iTerm.app, tmux) and an unnamed one: never.
+5. With powerlevel10k loaded the line waits for the second prompt: its
+   instant prompt faults anything printed before the first one.
 
 Run from repo root:  python3 scripts/e2e-zle-terminal-notice.py
 Requires: cargo-built debug binaries, zsh on PATH.
@@ -33,8 +35,9 @@ def log(msg):
     print(f"[e2e-terminal-notice] {msg}", flush=True)
 
 
-def first_screen(env, term_program):
-    """Everything a fresh interactive shell prints up to its first prompt."""
+def first_screen(env, term_program, then=b""):
+    """Everything a fresh interactive shell prints up to its first prompt,
+    and after the keys in `then` if any."""
     env = dict(env)
     env.pop("TERM_PROGRAM", None)
     env.pop("TERMINAL_EMULATOR", None)
@@ -52,17 +55,22 @@ def first_screen(env, term_program):
     )
     os.close(slave)
     out = b""
-    deadline = time.time() + 2.5
-    while time.time() < deadline:
-        r, _, _ = select.select([master], [], [], 0.05)
-        if master in r:
-            try:
-                chunk = os.read(master, 65536)
-            except OSError:
-                break
-            if not chunk:
-                break
-            out += chunk
+    for keys in (b"", then):
+        if keys:
+            os.write(master, keys)
+        elif out:
+            break
+        deadline = time.time() + 2.5
+        while time.time() < deadline:
+            r, _, _ = select.select([master], [], [], 0.05)
+            if master in r:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
     proc.send_signal(signal.SIGTERM)
     try:
         proc.wait(timeout=3)
@@ -105,12 +113,19 @@ def main():
         for name in ("iTerm.app", "Apple_Terminal", "WezTerm", "tmux", None):
             checks.append((f"4 {name or 'unnamed'}: never",
                            NOTICE not in first_screen(env, name)))
+        # A shell that has powerlevel10k (its `p10k` function) loaded.
+        with open(os.path.join(zdot, ".zshrc"), "a") as f:
+            f.write("p10k() { : }\n")
+        checks.append(("5 p10k: silent at the first prompt",
+                       NOTICE not in first_screen(env, "Hyper")))
+        checks.append(("5 p10k: told at the second",
+                       first_screen(env, "Hyper", then=b"\r").count(NOTICE) == 1))
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
     for name, ok in checks:
         log(f"{'OK  ' if ok else 'FAIL'} {name}")
-    if len(checks) == 9 and all(ok for _, ok in checks):
+    if len(checks) == 11 and all(ok for _, ok in checks):
         log("PASS — unlisted terminals are told once, listed ones never")
         return 0
     log("FAIL")

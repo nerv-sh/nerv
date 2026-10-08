@@ -2072,7 +2072,14 @@ __nerv_claim() {
 # is outside the matrix (docs/terminal-compat.md §1). Nothing is said when
 # it does not name itself: Alacritty and Kitty set no TERM_PROGRAM, and
 # inside tmux the outer terminal is not visible from here.
+typeset -gi __NERV_TERMINAL_WAITED=0
 __nerv_terminal_notice() {
+  # powerlevel10k's instant prompt treats anything printed before its
+  # first real prompt as a fault; under it the line waits one prompt.
+  if (( ${+functions[p10k]} && ! __NERV_TERMINAL_WAITED )); then
+    __NERV_TERMINAL_WAITED=1
+    return
+  fi
   add-zsh-hook -d precmd __nerv_terminal_notice
   local name=$TERM_PROGRAM
   [[ -z $name && $TERMINAL_EMULATOR == JetBrains* ]] && name=JetBrains

@@ -121,9 +121,10 @@ if [[ "${NERV_AUTOSTART:-1}" != "0" ]]; then
 fi
 
 # Hand control to nerv-pty, which sets NERV_PTY_SESSION_ID and re-execs
-# this shell under its shadow terminal. Extra shell args (e.g. `--rcfile`
-# from a harness, or `-l`) ride along — dropping them would boot a
-# different shell than the user asked for. Mirrors zsh's `"$@"`.
+# this shell under its shadow terminal. The positional parameters of the
+# shell that sourced this go along, as in zsh's `"$@"`. They are not the
+# options bash itself was started with (`--rcfile`, `-l`): those are not
+# in `$@` and are not carried over.
 # `$BASH` (this bash's own binary), not the login `$SHELL`: a zsh-login
 # user who runs `bash` must land back in bash.
 exec "$__NERV_PTY_BIN" -- "${BASH:-bash}" "$@"

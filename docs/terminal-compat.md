@@ -40,6 +40,7 @@
 - 터미널 이름당 **1회** — `~/Library/Caches/nerv/terminal-seen` 에 이름을 한 줄씩 남긴다.
 - 조용한 경우: `iTerm.app`·`Apple_Terminal`·`WezTerm`·`tmux`, 그리고 **이름을 안 밝히는 터미널**. Alacritty·Kitty 는 `TERM_PROGRAM` 을 두지 않고, tmux 안에서는 바깥 터미널이 보이지 않는다 — 모르는 것을 미지원이라 단정하지 않는다.
 - JetBrains 는 `TERMINAL_EMULATOR=JetBrains-*` 로 읽는다.
+- powerlevel10k 가 로드돼 있으면(`p10k` 함수) 두 번째 프롬프트로 한 번 미룬다 — instant prompt 는 첫 프롬프트 전의 출력을 경고로 처리한다 (p10k 실물로는 미검증, 함수 유무로만 판정).
 - 회귀 = `scripts/e2e-zle-terminal-notice.py` (매트릭스 안 터미널에서 0회 포함).
 
 본 매트릭스를 좁게 유지하는 이유는 *지원 약속의 진실성*. 매트릭스에 올라온 항목은 책임지고 관리한다.
