@@ -133,6 +133,8 @@ def main():
         f.write(f'dump-buffer() {{ print -rn -- "$BUFFER" > {buf_file} }}\n')
         f.write("zle -N dump-buffer\nbindkey '^X^B' dump-buffer\n")
         f.write('say() { print -r -- "SAID-$1" }\n')
+        # A recall widget whose name says nothing about history.
+        f.write("older() { zle up-line-or-history }\nzle -N older\nbindkey '^X^O' older\n")
 
     env = dict(os.environ)
     env["HOME"] = home
@@ -181,6 +183,16 @@ def main():
             log("  B screen:\n" + sh.text())
         sh.close()
 
+        # --- Case B2: the same through a widget named nothing like history
+        sh = Shell(env)
+        sh.send(b"say alpha\r")
+        sh.send(b"say beta\r")
+        sh.send(b"\x18\x0f")
+        ok["B2 recall by an unnamed widget: no popup"] = "╭" not in sh.text()
+        if not ok["B2 recall by an unnamed widget: no popup"]:
+            log("  B2 screen:\n" + sh.text())
+        sh.close()
+
         # --- Case C
         sh = Shell(env)
         sh.send(b"git commit -m x")
@@ -205,7 +217,7 @@ def main():
 
     for name, passed in ok.items():
         log(f"{'OK  ' if passed else 'FAIL'} {name}")
-    if ok and all(ok.values()) and len(ok) == 3:
+    if ok and all(ok.values()) and len(ok) == 4:
         log("PASS — mid-line completion keeps the hint, the history and the next word")
         return 0
     log("FAIL")

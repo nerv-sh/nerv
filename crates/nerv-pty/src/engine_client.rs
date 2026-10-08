@@ -33,7 +33,8 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(50);
 /// Query the daemon for completions at `cursor` within `line`.
 ///
 /// `line` is the prompt buffer up to the cursor (zsh `$LBUFFER`
-/// equivalent) and `cursor` is the byte offset. `cwd` is the shell's
+/// equivalent) and `cursor` counts characters (`ipc::Request::Complete`);
+/// one at or past the end means the whole line. `cwd` is the shell's
 /// working directory so filesystem-aware generators resolve relative to
 /// the user, not the daemon.
 ///

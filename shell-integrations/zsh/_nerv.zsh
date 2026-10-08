@@ -1806,8 +1806,11 @@ bindkey $'\eOC' __nerv_accept_ghost
 # command, not a word being typed. A popup over it would take the next
 # Up (cycling rows instead of older history) and Enter (inserting a row
 # instead of running the line). nerv's own arrow widgets mark the
-# recalled line seen; the pattern below covers history widgets nerv
-# does not wrap (Ctrl-R, fzf, atuin, the *-search family).
+# recalled line seen. For widgets nerv does not wrap there are two
+# signs: the line being edited is not the new one ($HISTNO is behind
+# $HISTCMD — any widget that moves through the history, whatever it is
+# called), or the widget is named like a history search (Ctrl-R, fzf,
+# atuin: they replace the buffer without moving).
 
 __nerv_pre_redraw() {
   # __nerv_complete's first check (`LBUFFER == PREV → return`) is the
@@ -1815,8 +1818,9 @@ __nerv_pre_redraw() {
   # nothing, and only a moved cursor (or an unwrapped edit) gets a
   # fresh query. Dismiss/Esc mark the current LBUFFER seen
   # (`PREV=LBUFFER`, not a popup) so a dismissed line stays dismissed.
-  if [[ $LBUFFER != "$__NERV_PREV_LBUFFER" \
-        && $LASTWIDGET == *(history|-or-search|beginning-search|atuin)* ]]; then
+  if [[ $LBUFFER != "$__NERV_PREV_LBUFFER" ]] \
+     && { (( HISTNO != HISTCMD )) \
+          || [[ $LASTWIDGET == *(history|-or-search|beginning-search|atuin)* ]] }; then
     __nerv_hide_popup
     __NERV_PREV_LBUFFER=$LBUFFER
   fi

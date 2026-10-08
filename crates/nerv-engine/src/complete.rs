@@ -4640,15 +4640,22 @@ region = us-east-1
         assert_eq!(mid_names, ["checkout", "commit"]);
     }
 
-    /// M1: a char cursor landing mid-glyph clamps without panic.
-    /// `ls 한글` is 5 chars / 9 bytes; byte 5 splits `한`.
+    /// M1: a byte cursor landing mid-glyph is clamped back to the
+    /// boundary before it. `git 한글` is 6 chars / 10 bytes; byte 6 splits
+    /// `한`, so the line completes as `git ` — every subcommand, not the
+    /// none that a `한` prefix would leave.
     #[test]
-    fn mid_cjk_cursor_clamps_without_panic() {
-        let line = "ls 한글";
-        assert!(!line.is_char_boundary(5));
-        let r = complete(line, 5, &registry_with(git_min()));
-        // No panic is the assertion; the clamped prefix is `ls `.
-        let _ = r.items;
+    fn mid_cjk_cursor_clamps_to_the_boundary_before_it() {
+        let line = "git 한글";
+        assert!(!line.is_char_boundary(6));
+        let reg = registry_with(git_min());
+        let clamped = complete(line, 6, &reg);
+        let at_space = complete("git ", 4, &reg);
+        let names = |items: &[Suggestion]| -> Vec<String> {
+            items.iter().map(|s| s.insertion.clone()).collect()
+        };
+        assert!(!at_space.items.is_empty());
+        assert_eq!(names(&clamped.items), names(&at_space.items));
     }
 
     #[test]
