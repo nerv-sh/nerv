@@ -7,9 +7,9 @@ shell splits into two words. `cd My Folder/` is not a cd into "My
 Folder"; zsh reads it as `cd <old> <new>` (the string-substitution form)
 and lands somewhere else entirely, or errors.
 
-`cd My` + Enter → cwd must be `<probe>/My Folder`. Directory completion
-inserts AND runs on one Enter (the dotnav contract), so the resulting
-cwd is the assertion: it proves the inserted text was shell-safe. A
+`cd My` + Enter + Enter → cwd must be `<probe>/My Folder`. The first
+Enter inserts the highlighted directory, the second runs the line, so
+the resulting cwd is the assertion: it proves the inserted text was shell-safe. A
 screen scrape would have passed against the broken version — the line
 *looked* right while the cd silently did nothing.
 
@@ -87,12 +87,15 @@ def kill(master, proc):
 
 def cwd_after(env, keys):
     """Type `keys` (bytes, or a list of chunks each given time to
-    settle), press Enter once, then print $PWD."""
+    settle), Enter to insert the highlighted directory, Enter to run,
+    then print $PWD."""
     master, proc = new_shell(env)
     pump(master, 2.0)
     for chunk in (keys if isinstance(keys, list) else [keys]):
         os.write(master, chunk)
         pump(master, 1.5)
+    os.write(master, b"\r")
+    pump(master, 1.5)
     os.write(master, b"\r")
     pump(master, 1.0)
     os.write(master, b'print -r -- "CWDMARK=[$PWD]"\r')
@@ -137,7 +140,7 @@ def main():
         # Case 1 — accept a spacey directory and run it.
         cwd, out = cwd_after(env, b"cd My")
         ok1 = cwd.rstrip("/").endswith("My Folder")
-        log(f"case1 accept    `cd My` +Enter -> cwd={cwd!r} -> {'OK' if ok1 else 'FAIL'}")
+        log(f"case1 accept    `cd My` +Enter+Enter -> cwd={cwd!r} -> {'OK' if ok1 else 'FAIL'}")
 
         # Case 2 — DRILL THROUGH the space. The first Tab leaves
         # `cd My\ Folder/` in the buffer (our own `(q)` quoting), so the
@@ -146,7 +149,7 @@ def main():
         # a unit test on either side alone cannot.
         cwd2, out2 = cwd_after(env, [b"cd My", b"\t", b"deep"])
         ok2 = cwd2.rstrip("/").endswith(os.path.join("My Folder", "deeper"))
-        log(f"case2 drill     `cd My`+Tab+`deep`+Enter -> cwd={cwd2!r} -> {'OK' if ok2 else 'FAIL'}")
+        log(f"case2 drill     `cd My`+Tab+`deep`+Enter+Enter -> cwd={cwd2!r} -> {'OK' if ok2 else 'FAIL'}")
 
         if ok1 and ok2:
             log("PASS — spacey paths both accept and drill through")
