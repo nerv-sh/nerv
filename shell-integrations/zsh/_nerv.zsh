@@ -209,8 +209,8 @@ TRAPWINCH() {
     eval "$__NERV_PREV_WINCH_LIST"
   fi
   __nerv_clear_state_vars
-  # As in __nerv_escape: forget the last buffer, or retyping it after the
-  # resize reads as "unchanged" and never reopens the popup.
+  # Forget the last buffer so the next redraw re-queries and repaints the
+  # popup at the new width (retyping it would otherwise read as unchanged).
   __NERV_PREV_LBUFFER=""
   # A non-zero return from a TRAPNAL function means "interrupted" — keep
   # the chained function's answer.
@@ -1765,26 +1765,25 @@ zle -N __nerv_accept_ghost
 bindkey $'\e[C' __nerv_accept_ghost
 bindkey $'\eOC' __nerv_accept_ghost
 
-# Cursor-position state tracking. The pre-redraw hook below fires
-# on every ZLE redraw and uses this to detect transitions between
-# "at end of buffer" and "in the middle" without having to bind
-# every individual movement key (left, ctrl-a, home, etc.).
-# Mid-line completion is supported (the engine completes line[..cursor]),
-# so a move into the middle re-queries instead of hiding.
-typeset -gi __NERV_LAST_AT_END=1
+# Cursor moves re-query through the pre-redraw hook below, which fires
+# on every ZLE redraw — no need to bind individual movement keys (left,
+# ctrl-a, home, …). The engine completes `line[..cursor]`, so the popup
+# tracks the cursor into the middle of the buffer.
+#
+# Cost control: `__nerv_complete` opens with the LBUFFER dedup guard, so
+# a redraw that changed nothing (repaints, selection navigation, ghost
+# styling) returns before any IPC. A query fires only when LBUFFER
+# differs from the last completed one — exactly cursor moves and
+# unwrapped edits (history recall, paste). Typing already completed via
+# `self-insert` first, so its redraw is a no-op here.
 
 __nerv_pre_redraw() {
-  local at_end=0
-  [[ -z "$RBUFFER" ]] && at_end=1
-  # Only act on state TRANSITIONS to avoid running the heavy
-  # __nerv_complete path on every redraw.
-  if (( at_end != __NERV_LAST_AT_END )); then
-    __NERV_LAST_AT_END=$at_end
-    # Cursor moved across the end/middle boundary → re-trigger the
-    # completion query for the new LBUFFER (mid-line included).
-    __NERV_PREV_LBUFFER=""
-    __nerv_complete
-  fi
+  # __nerv_complete's first check (`LBUFFER == PREV → return`) is the
+  # whole gate: edits complete in their own widgets, repaints change
+  # nothing, and only a moved cursor (or an unwrapped edit) gets a
+  # fresh query. Dismiss/Esc mark the current LBUFFER seen
+  # (`PREV=LBUFFER`, not a popup) so a dismissed line stays dismissed.
+  __nerv_complete
 
   # Paint the inline ghost (POSTDISPLAY) a muted grey — like fish /
   # zsh-autosuggestions — so the not-yet-typed completion reads as a
@@ -1875,7 +1874,7 @@ else
   zle -N zle-line-init __nerv_line_init
 fi
 
-__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER=""; POSTDISPLAY=''; __NERV_PREDICTED=""; }
+__nerv_dismiss() { __nerv_hide_popup; __NERV_PREV_LBUFFER="$LBUFFER"; POSTDISPLAY=''; __NERV_PREDICTED=""; }
 zle -N __nerv_dismiss
 bindkey '^G' __nerv_dismiss
 
@@ -1887,7 +1886,10 @@ bindkey '^G' __nerv_dismiss
 __nerv_escape() {
   if (( __NERV_ACTIVE )); then
     __nerv_hide_popup
-    __NERV_PREV_LBUFFER=""
+    # Mark seen, not unseen: the pre-redraw hook re-queries any LBUFFER
+    # it hasn't completed, so blanking PREV here would reopen the popup
+    # on the next repaint.
+    __NERV_PREV_LBUFFER="$LBUFFER"
     POSTDISPLAY=''
   elif [[ -n $POSTDISPLAY && $POSTDISPLAY == "$__NERV_PREDICTED" ]]; then
     # A showing prediction is dismissed for this line, like ^G.

@@ -8,8 +8,16 @@ answers a DSR if one shows up, so a regression back to querying doesn't
 hang. It asserts the widget paints the popup past column 1
 (`ESC [ <col> G`) under a long prompt.
 
+Phase B covers mid-line completion (slice 01): after moving the cursor
+into the middle of the line the popup must stay up (anchored under the
+cursor, not hidden), and Tab must splice the highlighted row at the
+cursor. The splice is proven by executing: `git che main` + Left x5 +
+Tab + Enter runs `git checkout main`, which outside a repo fails with
+"not a git repository" — a mangled splice would fail differently
+(`'che' is not a git command`).
+
 Run from repo root:  python3 scripts/e2e-zle-popup.py
-Requires: cargo-built debug binaries, zsh on PATH.
+Requires: cargo-built debug binaries, zsh and git on PATH.
 """
 
 import fcntl
@@ -92,6 +100,9 @@ def main():
             stdout=slave,
             stderr=slave,
             env=env,
+            # Outside any repo: phase B's `git checkout main` must fail
+            # with "not a git repository", never touch a real checkout.
+            cwd=home,
             close_fds=True,
         )
         os.close(slave)
@@ -111,6 +122,10 @@ def main():
         at_col1_only = bool(cols_used) and all(c <= 1 for c in cols_used)
         log(f"CHA cols={sorted(set(cols_used))}")
         log(f"anchored(>=20)={anchored}  column-1-only={at_col1_only}  popup_cols={popup_cols[:3]}")
+        # Calibrate the anchor: `git c` is 5 cells, so its box column is
+        # prompt+4. Phase B's rest position (`git che`, 7 cells) must sit
+        # exactly 2 columns right of it — no absolute prompt math.
+        phase_a_col = max(cols_used) if cols_used else 0
 
         if anchored and not at_col1_only:
             log("PASS — popup anchored under the cursor column")
@@ -118,6 +133,44 @@ def main():
         else:
             log("FAIL — popup not anchored to cursor column")
             log(f"  tail repr: {out[-400:]!r}")
+
+        if rc != 0:
+            log("SKIP phase B (mid-line) — phase A failed")
+        else:
+            # --- Phase B: mid-line popup + insert at cursor ---
+            # Clear the line, type a full line, move into the middle.
+            os.write(master, b"\x15")  # Ctrl-U: unix-line-discard
+            pump(master, 1.0, on_dsr=True)
+            os.write(master, b"git che main")
+            out_end = pump(master, 1.5, on_dsr=True)
+            end_cols = [int(m) for m in re.findall(rb"\x1b\[(\d+)G", out_end)]
+            os.write(master, b"\x1b[D" * 5)  # Left x5: `git che| main`
+            out_mid = pump(master, 1.5, on_dsr=True)
+            mid_cols = [int(m) for m in re.findall(rb"\x1b\[(\d+)G", out_mid)]
+            box_up = "╭".encode() in out_mid
+            rows_up = b"checkout" in out_mid
+            # The rest-position box (`git che`, 7 cells) anchors exactly 2
+            # columns right of phase A's (`git c`, 5 cells). Late frames
+            # from longer prefixes can also land in this window, so only
+            # the minimum proves the cursor box itself moved left-with-cursor.
+            anchor_tracked = bool(mid_cols) and min(mid_cols) == phase_a_col + 2
+            log(f"MID box={box_up} rows={rows_up} tracked={anchor_tracked} "
+                f"phase_a={phase_a_col} mid={sorted(set(mid_cols))[:8]}")
+            # Tab splices `checkout` at the cursor, then Enter runs the
+            # spliced line to prove its exact shape.
+            os.write(master, b"\t")
+            pump(master, 1.0, on_dsr=True)
+            os.write(master, b"\r")
+            out_run = pump(master, 2.0, on_dsr=True)
+            spliced = b"not a git repository" in out_run
+            log(f"MID spliced_checkout_main={spliced}")
+            if box_up and rows_up and anchor_tracked and spliced:
+                log("PASS — mid-line popup stays anchored; Tab splices at cursor")
+            else:
+                log("FAIL — mid-line completion broke")
+                log(f"  mid tail: {out_mid[-300:]!r}")
+                log(f"  run tail: {out_run[-300:]!r}")
+                rc = 1
 
         try:
             os.write(master, b"\x03exit\n")
