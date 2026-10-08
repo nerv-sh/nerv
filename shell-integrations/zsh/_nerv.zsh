@@ -1660,7 +1660,7 @@ zle -N accept-line __nerv_line_finish
 # selected (browsing, SELECTED==0), Tab instead dives into the list
 # (moves to the first item) so a second Tab accepts it. Use arrows /
 # Shift-Tab to move the highlight without accepting. Outside a popup:
-# defer to zsh's expand-or-complete.
+# defer to whatever held Tab before nerv (__nerv_take_tab).
 #
 # Only checks __NERV_ITEMS, NOT __NERV_ACTIVE: cursor-movement keys
 # don't clear ITEMS but may leave ACTIVE stale, and we'd rather accept
@@ -1677,15 +1677,31 @@ __nerv_accept() {
     # No live popup. The user pressed Tab expecting completion to fire
     # (universal shell habit), or a prior keystroke's popup desynced away.
     # Re-run the query once — bypass the dedup guard so an unchanged
-    # LBUFFER still re-completes — and only defer to zsh's
-    # expand-or-complete when nerv genuinely has nothing (filenames, etc).
+    # LBUFFER still re-completes — and only defer to the key's previous
+    # owner when nerv genuinely has nothing (filenames, etc).
     __NERV_PREV_LBUFFER=$'\x00'
     __nerv_complete
-    (( ${#__NERV_ITEMS} > 0 )) || zle expand-or-complete
+    (( ${#__NERV_ITEMS} > 0 )) || zle "$__NERV_TAB_PREV"
   fi
 }
 zle -N __nerv_accept
-bindkey '^I' __nerv_accept
+
+# Tab belongs to nerv while a popup is up, and to whoever had it before
+# when nerv has nothing: zsh's own completion by default, or the widget
+# a plugin put there (fzf-tab, zsh-autocomplete). Taking the key without
+# remembering its owner silenced that plugin for good — nerv re-binds on
+# every prompt, so a plugin that binds once never got the key back.
+# Called at load and from the precmd rebind, so a plugin loaded late
+# (zinit turbo, zsh-defer) is noticed at the next prompt.
+typeset -g __NERV_TAB_PREV=expand-or-complete
+__nerv_take_tab() {
+  local cur="$(bindkey -M main '^I' 2>/dev/null)"
+  cur=${cur##* }
+  [[ $cur == __nerv_accept ]] && return
+  (( ${+widgets[$cur]} )) && __NERV_TAB_PREV=$cur
+  bindkey -M main '^I' __nerv_accept 2>/dev/null
+}
+__nerv_take_tab
 
 # Shift-Tab: cycle UP. Falls back to reverse-menu-complete outside Nerv.
 __nerv_accept_back() {
@@ -1981,8 +1997,9 @@ __nerv_precmd_reset() {
 }
 
 __nerv_rebind() {
-  # Tab / Shift-Tab / Ctrl-G — last writer wins; reassert ours.
-  bindkey -M main '^I'    __nerv_accept       2>/dev/null
+  # Tab / Shift-Tab / Ctrl-G — last writer wins; reassert ours. Tab
+  # remembers the widget it takes the key from.
+  __nerv_take_tab
   bindkey -M main '^[[Z'  __nerv_accept_back  2>/dev/null
   bindkey -M main '^G'    __nerv_dismiss      2>/dev/null
   bindkey -M main ' '     __nerv_space        2>/dev/null

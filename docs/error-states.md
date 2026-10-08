@@ -176,6 +176,14 @@ THEN:
 
 - Nerv 의 ZLE widget 이름은 `__nerv_complete` (이중 언더스코어 prefix). 충돌 가능성 최소화.
 - 키 바인딩은 v1.0 에서 `Tab` 만 사용, 다른 키는 권장 — 그러나 사용자가 disable 가능 (`config.toml`).
+- **Tab 은 뺏지 않고 넘겨받는다.** nerv 는 매 프롬프트마다 Tab 을 다시 잡는데, 잡기 전에 그 키에
+  있던 위젯을 기억한다 (`__nerv_take_tab` → `__NERV_TAB_PREV`, 기본 `expand-or-complete`).
+  팝업이 있으면 Tab 은 nerv 것이고, nerv 가 낼 행이 없으면 기억해 둔 위젯이 그대로 돈다 —
+  fzf-tab·zsh-autocomplete 가 한 번 바인딩하고 영영 키를 잃던 것을 막는다. 늦게 로드되는
+  플러그인(zinit turbo, zsh-defer)은 그 다음 프롬프트부터 폴백이 된다.
+  검증 = `scripts/e2e-zle-tabowner.py`.
+- zsh 자체 완성 폴백(spec 없는 명령의 팝업 행)을 끈 상태(`NERV_COMPSYS=0`)는 `nerv doctor` 의
+  `shell completion` 행에 드러난다 — 기본(켜짐)일 때는 행이 없다.
 
 **테스트**:
 

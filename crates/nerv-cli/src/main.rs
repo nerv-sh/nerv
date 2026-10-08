@@ -627,7 +627,24 @@ fn build_doctor_report() -> DoctorReport {
     check_autosuggest(&mut r);
     check_schema_version(&mut r);
     check_pty_mode(&mut r);
+    check_compsys(&mut r, std::env::var("NERV_COMPSYS").ok().as_deref());
     r
+}
+
+/// The widget's fallback to zsh's own completion is on unless
+/// `NERV_COMPSYS=0`. Silent by default; when it is off the row says so,
+/// since a command without a spec then shows no rows at all and looks
+/// like a missing spec.
+fn check_compsys(r: &mut DoctorReport, value: Option<&str>) {
+    if value != Some("0") {
+        return;
+    }
+    r.push(
+        DoctorLevel::Ok,
+        "shell completion",
+        "fallback off (NERV_COMPSYS=0)".to_string(),
+        Some("unset NERV_COMPSYS to show zsh's completions for commands without a spec".into()),
+    );
 }
 
 /// Commands the daemon completed empty for want of a spec. Advisory
@@ -2834,6 +2851,17 @@ mod tests {
         let mut lock = path.as_os_str().to_owned();
         lock.push(".lock");
         let _ = std::fs::remove_file(lock);
+    }
+
+    /// The fallback switch shows only when it is off.
+    #[test]
+    fn doctor_reports_the_compsys_fallback_only_when_off() {
+        let mut r = DoctorReport::default();
+        check_compsys(&mut r, None);
+        check_compsys(&mut r, Some("1"));
+        assert!(r.entries.is_empty());
+        check_compsys(&mut r, Some("0"));
+        assert_eq!(r.entries[0].detail, "fallback off (NERV_COMPSYS=0)");
     }
 
     /// No recorded misses → no row (a fresh install's doctor output is
