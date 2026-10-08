@@ -47,14 +47,23 @@ const MIN_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 /// `misses::State`).
 #[derive(Debug, Default)]
 struct State {
-    // Keyed on `(spec_name, insertion)`.
-    table: HashMap<(String, String), Entry>,
+    /// spec name → insertion → entry. Nested so a lookup borrows both
+    /// strings: ranking asks for every row of a popup, and a flat
+    /// `(String, String)` key cost two allocations per row.
+    table: HashMap<String, HashMap<String, Entry>>,
+    /// Entries across all specs — what [`MAX_ENTRIES`] bounds.
+    rows: usize,
     dirty: bool,
     /// Bumped by every `record`: a flush clears `dirty` only if nothing
     /// was recorded while the lock was released for the write.
     version: u64,
     /// `None` until the first write, so that one is never delayed.
     last_flush: Option<Instant>,
+    /// [`FrecencyStore::spec_names`] as last computed, with the version
+    /// and the minute it was computed in. The list is asked for on every
+    /// command-name keystroke and changes only on an accept, or as the
+    /// decay slowly reorders it.
+    names: Option<(u64, u64, Vec<String>)>,
 }
 
 #[derive(Debug, Default)]
@@ -74,29 +83,32 @@ impl FrecencyStore {
     /// offending row so a corrupted history can't break completion.
     /// A file from before the cap is cut down to its best rows.
     pub fn load(path: &std::path::Path) -> Self {
-        let mut table: HashMap<(String, String), Entry> = HashMap::new();
+        let mut flat: HashMap<(String, String), Entry> = HashMap::new();
         if let Ok(text) = std::fs::read_to_string(path) {
             for line in text.lines() {
                 if let Some(entry) = parse_row(line) {
-                    table.insert(entry.0, entry.1);
+                    flat.insert(entry.0, entry.1);
                 }
             }
         }
-        let dirty = table.len() > MAX_ENTRIES;
+        let dirty = flat.len() > MAX_ENTRIES;
+        let mut rows: Vec<_> = flat.into_iter().collect();
         if dirty {
             let now = now_unix();
-            let mut rows: Vec<_> = table.into_iter().collect();
             rows.sort_by(|a, b| score_of(&b.1, now).total_cmp(&score_of(&a.1, now)));
             rows.truncate(MAX_ENTRIES);
-            table = rows.into_iter().collect();
+        }
+        let mut st = State {
+            rows: rows.len(),
+            dirty,
+            ..Default::default()
+        };
+        for ((spec, insertion), entry) in rows {
+            st.table.entry(spec).or_default().insert(insertion, entry);
         }
         Self {
             path: Some(path.to_path_buf()),
-            state: Mutex::new(State {
-                table,
-                dirty,
-                ..Default::default()
-            }),
+            state: Mutex::new(st),
         }
     }
 
@@ -107,14 +119,25 @@ impl FrecencyStore {
         let Ok(mut st) = self.state.lock() else {
             return;
         };
-        let key = (spec.to_string(), insertion.to_string());
-        if !st.table.contains_key(&key) && st.table.len() >= MAX_ENTRIES {
-            evict_one(&mut st.table, now);
+        let known = st
+            .table
+            .get(spec)
+            .is_some_and(|m| m.contains_key(insertion));
+        if !known {
+            if st.rows >= MAX_ENTRIES {
+                st.evict_one(now);
+            }
+            st.rows += 1;
         }
-        let e = st.table.entry(key).or_insert(Entry {
-            count: 0,
-            last_unix: now,
-        });
+        let e = st
+            .table
+            .entry(spec.to_string())
+            .or_default()
+            .entry(insertion.to_string())
+            .or_insert(Entry {
+                count: 0,
+                last_unix: now,
+            });
         e.count = e.count.saturating_add(1);
         e.last_unix = now;
         st.dirty = true;
@@ -125,13 +148,27 @@ impl FrecencyStore {
     /// pair, `ln(1 + count) · exp(-age / 1 week)`. Zero only when never
     /// accepted — a single pick counts.
     pub fn score(&self, spec: &str, insertion: &str) -> f64 {
-        let Ok(st) = self.state.lock() else {
-            return 0.0;
-        };
-        let key = (spec.to_string(), insertion.to_string());
-        st.table
-            .get(&key)
-            .map_or(0.0, |entry| score_of(entry, now_unix()))
+        self.scores(spec, [insertion])[0]
+    }
+
+    /// [`Self::score`] of each insertion, in order, under one lock and
+    /// one clock reading — what ranking a popup of hundreds of rows asks.
+    pub fn scores<'a>(
+        &self,
+        spec: &str,
+        insertions: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<f64> {
+        let st = self.state.lock().ok();
+        let picks = st.as_ref().and_then(|st| st.table.get(spec));
+        let now = now_unix();
+        insertions
+            .into_iter()
+            .map(|ins| {
+                picks
+                    .and_then(|m| m.get(ins))
+                    .map_or(0.0, |entry| score_of(entry, now))
+            })
+            .collect()
     }
 
     /// Command names the user has accepted a suggestion for, most-used
@@ -139,17 +176,28 @@ impl FrecencyStore {
     /// the sum over its rows of [`Self::score`]'s frecency. Ties break
     /// alphabetically so the list is stable across calls.
     pub fn spec_names(&self) -> Vec<String> {
-        let Ok(st) = self.state.lock() else {
+        let Ok(mut st) = self.state.lock() else {
             return vec![];
         };
         let now = now_unix();
-        let mut weight: HashMap<&str, f64> = HashMap::new();
-        for ((spec, _), entry) in st.table.iter() {
-            *weight.entry(spec.as_str()).or_insert(0.0) += score_of(entry, now);
+        let stamp = (st.version, now / 60);
+        if let Some((version, minute, names)) = &st.names {
+            if (*version, *minute) == stamp {
+                return names.clone();
+            }
         }
-        let mut names: Vec<(&str, f64)> = weight.into_iter().collect();
+        let mut names: Vec<(&str, f64)> = st
+            .table
+            .iter()
+            .map(|(spec, picks)| {
+                let weight = picks.values().map(|e| score_of(e, now)).sum();
+                (spec.as_str(), weight)
+            })
+            .collect();
         names.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-        names.into_iter().map(|(n, _)| n.to_string()).collect()
+        let names: Vec<String> = names.into_iter().map(|(n, _)| n.to_string()).collect();
+        st.names = Some((stamp.0, stamp.1, names.clone()));
+        names
     }
 
     /// Write the in-memory table back to disk if it changed since the
@@ -188,7 +236,11 @@ impl FrecencyStore {
                 return;
             }
             let mut out = String::new();
-            for ((spec, ins), entry) in st.table.iter() {
+            let rows = st
+                .table
+                .iter()
+                .flat_map(|(spec, picks)| picks.iter().map(move |(ins, e)| (spec, ins, e)));
+            for (spec, ins, entry) in rows {
                 // Skip entries whose strings contain TAB or newline — the
                 // row encoding can't represent them. Should be unreachable
                 // for normal suggestions but defends the on-disk format.
@@ -219,7 +271,7 @@ impl FrecencyStore {
 
     /// Live entry count — for diagnostics / `nerv doctor`.
     pub fn len(&self) -> usize {
-        self.state.lock().map(|st| st.table.len()).unwrap_or(0)
+        self.state.lock().map(|st| st.rows).unwrap_or(0)
     }
 
     /// Whether the store has any tracked entries.
@@ -232,18 +284,29 @@ fn score_of(entry: &Entry, now: u64) -> f64 {
     crate::history::frecency(entry.count, entry.last_unix, now)
 }
 
-/// Drop the lowest-scored row (the older one on a tie).
-fn evict_one(table: &mut HashMap<(String, String), Entry>, now: u64) {
-    let victim = table
-        .iter()
-        .min_by(|a, b| {
-            score_of(a.1, now)
-                .total_cmp(&score_of(b.1, now))
-                .then(a.1.last_unix.cmp(&b.1.last_unix))
-        })
-        .map(|(key, _)| key.clone());
-    if let Some(key) = victim {
-        table.remove(&key);
+impl State {
+    /// Drop the lowest-scored row (the older one on a tie).
+    fn evict_one(&mut self, now: u64) {
+        let victim = self
+            .table
+            .iter()
+            .flat_map(|(spec, picks)| picks.iter().map(move |(ins, e)| (spec, ins, e)))
+            .min_by(|a, b| {
+                score_of(a.2, now)
+                    .total_cmp(&score_of(b.2, now))
+                    .then(a.2.last_unix.cmp(&b.2.last_unix))
+            })
+            .map(|(spec, ins, _)| (spec.clone(), ins.clone()));
+        let Some((spec, ins)) = victim else {
+            return;
+        };
+        if let Some(picks) = self.table.get_mut(&spec) {
+            picks.remove(&ins);
+            if picks.is_empty() {
+                self.table.remove(&spec);
+            }
+            self.rows -= 1;
+        }
     }
 }
 
@@ -300,7 +363,7 @@ mod tests {
         // decay the earlier rows and make this a recency test instead.
         if let Ok(mut st) = s.state.lock() {
             let now = now_unix();
-            for entry in st.table.values_mut() {
+            for entry in st.table.values_mut().flat_map(HashMap::values_mut) {
                 entry.last_unix = now;
             }
         }
@@ -315,8 +378,11 @@ mod tests {
         s.record("stale", "x");
         s.record("fresh", "x");
         if let Ok(mut st) = s.state.lock() {
-            let key = ("stale".to_string(), "x".to_string());
-            let e = st.table.get_mut(&key).expect("recorded above");
+            let e = st
+                .table
+                .get_mut("stale")
+                .and_then(|m| m.get_mut("x"))
+                .expect("recorded above");
             // 9 days back → weight e^(-9/7) ≈ 0.28 of the fresh entry's.
             e.last_unix = now_unix() - 9 * 86_400;
         }
@@ -352,7 +418,7 @@ mod tests {
         let s = FrecencyStore::empty();
         s.record("git", "checkout");
         if let Ok(mut st) = s.state.lock() {
-            for e in st.table.values_mut() {
+            for e in st.table.values_mut().flat_map(HashMap::values_mut) {
                 e.last_unix = now_unix() - 7 * 86_400;
             }
         }
@@ -449,6 +515,32 @@ mod tests {
         assert_eq!(FrecencyStore::load(&path).len(), 1);
         s.flush_now();
         assert_eq!(FrecencyStore::load(&path).len(), 2);
+    }
+
+    /// One call scores a whole popup, in the order asked.
+    #[test]
+    fn scores_answers_every_insertion_in_order() {
+        let s = FrecencyStore::empty();
+        s.record("git", "checkout");
+        s.record("git", "checkout");
+        s.record("git", "status");
+        s.record("svn", "commit");
+        let got = s.scores("git", ["status", "commit", "checkout"]);
+        assert_eq!(got.len(), 3);
+        assert!(got[2] > got[0] && got[0] > 0.0);
+        assert_eq!(got[1], 0.0, "another spec's pick does not count");
+        assert_eq!(s.scores("nope", ["x"]), [0.0]);
+    }
+
+    /// The name list is kept between keystrokes and dropped by a record.
+    #[test]
+    fn spec_names_follow_a_new_record() {
+        let s = FrecencyStore::empty();
+        s.record("git", "status");
+        assert_eq!(s.spec_names(), ["git"]);
+        s.record("npm", "run");
+        s.record("npm", "run");
+        assert_eq!(s.spec_names(), ["npm", "git"]);
     }
 
     #[test]
