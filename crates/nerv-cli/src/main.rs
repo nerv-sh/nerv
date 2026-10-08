@@ -704,7 +704,7 @@ fn check_spec_misses_in(
     let hint = overlay.map(
         |dir| match top.iter().find(|(name, _)| derived_file(name).is_none()) {
             Some((name, _)) => format!(
-                "run: curl -fsSL --create-dirs {EXAMPLE_SPEC_URL} -o {}/{name}.json — then edit it",
+                "run: curl -fsSL --create-dirs {EXAMPLE_SPEC_URL} -o '{}/{name}.json' — then edit it",
                 dir.display()
             ),
             None => format!(
@@ -2817,7 +2817,7 @@ mod tests {
             "{hint}"
         );
         assert!(
-            hint.contains(&format!("-o {}/aic2.json", overlay.display())),
+            hint.contains(&format!("-o '{}/aic2.json'", overlay.display())),
             "{hint}"
         );
 

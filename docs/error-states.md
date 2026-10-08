@@ -356,7 +356,7 @@ THEN: 첫 키 뒤 화면에 `…loading` 이 남아 있고, 다음 키에 행이
 
 ```
   ✓ spec misses         zeph 12 (derived), aic2 9, aicommit2 4
-                        → run: curl -fsSL --create-dirs https://raw.githubusercontent.com/nerv-sh/nerv/main/examples/specs/claude.json -o ~/.config/nerv/specs/aic2.json — then edit it
+                        → run: curl -fsSL --create-dirs https://raw.githubusercontent.com/nerv-sh/nerv/main/examples/specs/claude.json -o '/Users/you/.config/nerv/specs/aic2.json' — then edit it
 ```
 
 - **`(derived)`**: 그 이름은 집계 뒤에 `--help` 파생 spec (§3.6.4) 이 생겼다 — 횟수는 과거 기록이고,

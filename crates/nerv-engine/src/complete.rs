@@ -6845,6 +6845,29 @@ region = us-east-1
         assert_eq!(rows, ["checkout"]);
     }
 
+    /// The ordering itself: both rows match `chk`, and the one that
+    /// sorts first by name skips more letters. Alpha order alone put
+    /// `chaback` on top.
+    #[test]
+    fn fuzzy_orders_two_matches_by_what_they_skip() {
+        let dir = fuzzy_spec_dir("git", &["chaback", "checkout"]);
+        assert_eq!(fuzzy_rows(&dir, "git chk"), ["checkout", "chaback"]);
+    }
+
+    /// Tier order: extends the token, then a whole run at a word start,
+    /// then a whole run anywhere, then scattered letters.
+    #[test]
+    fn fuzzy_score_tiers_are_ordered() {
+        assert_eq!(fuzzy_score("dev:web", "dev").0, 0);
+        assert_eq!(fuzzy_score("pre-dev", "dev").0, 1);
+        assert_eq!(fuzzy_score("adev", "dev").0, 2);
+        assert_eq!(fuzzy_score("dxexv", "dev").0, 3);
+        assert!(fuzzy_score("pre-dev", "dev") < fuzzy_score("adev", "dev"));
+        assert!(fuzzy_score("adev", "dev") < fuzzy_score("dxexv", "dev"));
+        // Within the scattered tier, fewer skipped letters first.
+        assert!(fuzzy_score("checkout", "chk") < fuzzy_score("chaback", "chk"));
+    }
+
     /// M4 slice 01: a mixed response containing a generator-ranked row
     /// keeps engine order (source_ranked early-return, no rescoring).
     #[test]
