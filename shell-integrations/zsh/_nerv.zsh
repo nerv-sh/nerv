@@ -1142,15 +1142,13 @@ __nerv_complete() {
     print -r -- "[$(date +%H:%M:%S.%N)] complete LBUFFER=[$LBUFFER] PREV=[$__NERV_PREV_LBUFFER] ACTIVE=$__NERV_ACTIVE ITEMS=${#__NERV_ITEMS} CURSOR=$CURSOR" >> /tmp/nerv-debug.log
   fi
   (( __NERV_PASTING )) && return
-  # Popup only when cursor is at the end of the buffer (LBUFFER ==
-  # full BUFFER, i.e. RBUFFER empty). Fig behavior: typing →
-  # popup; left-arrow into the middle → popup hides; right-arrow
-  # back to the end → popup reappears.
-  if [[ -n "$RBUFFER" ]]; then
-    __nerv_hide_popup
-    __NERV_PREV_LBUFFER=""
-    return
-  fi
+  # Mid-line completion: the engine completes `line[..cursor]`
+  # (`complete_in` + `before_cursor` char handling), so the popup stays
+  # up when the cursor sits in the middle of the buffer. The request
+  # sends LBUFFER (exactly the text before the cursor) with its length
+  # as the char cursor; the insert path splices the remainder back
+  # (`__nerv_insert_selected` strips the partial word from RBUFFER).
+  # Quoted strings stay empty via the engine's `cursor_in_open_quote`.
   [[ "$LBUFFER" == "$__NERV_PREV_LBUFFER" ]] && return
   __NERV_PREV_LBUFFER="$LBUFFER"
   __NERV_SELECTED=0
@@ -1197,8 +1195,10 @@ __nerv_complete() {
 
   # Resolve a leading alias (g=git, cat=bat) so the spec lookup hits.
   # A line with no space is left alone by the expansion below.
-  # RBUFFER is empty here (gate above), so the cursor sits at the end
-  # of whatever line we send — use the expanded length, not $CURSOR.
+  # LBUFFER is exactly the text before the cursor, so the cursor sits
+  # at the end of whatever line we send — use the expanded length,
+  # not $CURSOR (the expansion only touches the first word, which is
+  # fully inside LBUFFER whenever LBUFFER holds a space).
   __nerv_expand_alias_line "$LBUFFER"
   local send_line="$REPLY"
 
@@ -1736,6 +1736,8 @@ bindkey $'\eOC' __nerv_accept_ghost
 # on every ZLE redraw and uses this to detect transitions between
 # "at end of buffer" and "in the middle" without having to bind
 # every individual movement key (left, ctrl-a, home, etc.).
+# Mid-line completion is supported (the engine completes line[..cursor]),
+# so a move into the middle re-queries instead of hiding.
 typeset -gi __NERV_LAST_AT_END=1
 
 __nerv_pre_redraw() {
@@ -1745,14 +1747,10 @@ __nerv_pre_redraw() {
   # __nerv_complete path on every redraw.
   if (( at_end != __NERV_LAST_AT_END )); then
     __NERV_LAST_AT_END=$at_end
-    if (( ! at_end )); then
-      __nerv_hide_popup
-      __NERV_PREV_LBUFFER=""
-    else
-      # Cursor returned to end → re-trigger completion query.
-      __NERV_PREV_LBUFFER=""
-      __nerv_complete
-    fi
+    # Cursor moved across the end/middle boundary → re-trigger the
+    # completion query for the new LBUFFER (mid-line included).
+    __NERV_PREV_LBUFFER=""
+    __nerv_complete
   fi
 
   # Paint the inline ghost (POSTDISPLAY) a muted grey — like fish /

@@ -4596,6 +4596,30 @@ region = us-east-1
         assert_eq!(names, ["checkout", "commit"]);
     }
 
+    /// M1: the cursor in the middle completes the prefix before it —
+    /// `git co|--amend` (cursor 6) answers like `git co`, ignoring the
+    /// text after the cursor. The widget splices the remainder back.
+    #[test]
+    fn mid_line_cursor_completes_the_prefix_before_it() {
+        let end = complete("git co", 6, &registry_with(git_min()));
+        let mid = complete("git co --amend", 6, &registry_with(git_min()));
+        let end_names: Vec<_> = end.items.iter().map(|s| s.insertion.as_str()).collect();
+        let mid_names: Vec<_> = mid.items.iter().map(|s| s.insertion.as_str()).collect();
+        assert_eq!(mid_names, end_names);
+        assert_eq!(mid_names, ["checkout", "commit"]);
+    }
+
+    /// M1: a char cursor landing mid-glyph clamps without panic.
+    /// `ls 한글` is 5 chars / 9 bytes; byte 5 splits `한`.
+    #[test]
+    fn mid_cjk_cursor_clamps_without_panic() {
+        let line = "ls 한글";
+        assert!(!line.is_char_boundary(5));
+        let r = complete(line, 5, &registry_with(git_min()));
+        // No panic is the assertion; the clamped prefix is `ls `.
+        let _ = r.items;
+    }
+
     #[test]
     fn zoxide_ranks_name_prefix_then_substring_then_path() {
         // Rows come score-desc (frecency). The `enc` query:
