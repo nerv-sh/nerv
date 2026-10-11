@@ -520,13 +520,33 @@ impl SpecRegistry {
     /// `disk_mtime` and the loader agree on *which* file a stem means. One
     /// `metadata()` per candidate — this runs on the keystroke fast path.
     fn resolve_spec_file(dirs: &[PathBuf], name: &str) -> Option<(PathBuf, fs::Metadata)> {
+        // The key comes from the typed command word (or a `{stem}/{sub}`
+        // composite), so a segment carrying a separator or a dot-segment
+        // would join outside the layer dir. Every segment must be a bare
+        // stem — composites stay legal because both sides are plain.
+        if !name.split('/').all(is_plain_stem) {
+            return None;
+        }
         dirs.iter().find_map(|dir| {
+            // Canonicalized once per layer (not per candidate): hits are
+            // rare next to misses, and both candidates share the dir.
+            let canon_dir = fs::canonicalize(dir).ok()?;
             [
                 dir.join(format!("{name}.json")),
                 dir.join(format!("{name}.json.gz")),
             ]
             .into_iter()
-            .find_map(|p| p.metadata().ok().map(|m| (p, m)))
+            .find_map(|p| {
+                let meta = p.metadata().ok()?;
+                // Containment after the fact, on hits only (misses cost no
+                // extra stat): a symlink inside the layer pointing out must
+                // not serve outside bytes — fall through to the next layer.
+                let canon = fs::canonicalize(&p).ok()?;
+                if !canon.starts_with(&canon_dir) {
+                    return None;
+                }
+                Some((p, meta))
+            })
         })
     }
 
@@ -3142,6 +3162,13 @@ fn cached_native_generator(
 /// cache means every keystroke after the first hits cache anyway.
 const GENERATOR_TIMEOUT_MS: u64 = 800;
 
+/// Upper bound on one generator's captured stdout. Mirrors
+/// `derived::MAX_HELP_BYTES`: a time cap does not bound bytes, and a
+/// fast producer would otherwise fill the daemon heap once per cache
+/// miss. Consumers already tolerate truncation
+/// (`String::from_utf8_lossy` at the call sites).
+const GENERATOR_MAX_BYTES: u64 = 256 * 1024;
+
 /// Drain a spawned child process's stdout into a single Vec under
 /// [`GENERATOR_TIMEOUT_MS`]. On timeout, kill the child and return
 /// `None`. Otherwise return the captured bytes (which may be empty
@@ -3164,11 +3191,11 @@ pub(crate) fn spawn_with_timeout(
     use std::io::Read;
     use std::sync::mpsc;
     use std::time::Duration;
-    let mut stdout = child.stdout.take()?;
+    let stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = Vec::with_capacity(buf_cap);
-        let _ = stdout.read_to_end(&mut buf);
+        let _ = stdout.take(GENERATOR_MAX_BYTES).read_to_end(&mut buf);
         let _ = tx.send(buf);
     });
     match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
@@ -6181,6 +6208,80 @@ region = us-east-1
     /// pass with the guard removed (it did — mutation, 2026-09-18). The
     /// positive control in the same window proves the window is long
     /// enough for a load to land.
+    /// The primary lookup key comes from the typed command word, so it
+    /// can carry separators — it must never join outside the layer dir.
+    /// The composite `{stem}/{sub}` key stays legal: both segments are
+    /// plain stems. Sync: `resolve_spec_file` answers directly, so no
+    /// load window is needed.
+    #[test]
+    fn primary_lookup_key_cannot_escape_the_layer_dir() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-resolve-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        // Layer is `inner`; the escape target sits one level up from it.
+        fs::create_dir_all(tmp.join("inner")).unwrap();
+        fs::write(tmp.join("evil.json"), r#"{"name":"evil"}"#).unwrap();
+        fs::write(tmp.join("inner/git.json"), r#"{"name":"git"}"#).unwrap();
+        let dirs = vec![tmp.join("inner")];
+        for bad in [
+            "../evil",
+            "/etc/passwd",
+            "..",
+            ".",
+            "",
+            "a/b/c",
+            "a\\b",
+            "a\0b",
+        ] {
+            assert!(
+                SpecRegistry::resolve_spec_file(&dirs, bad).is_none(),
+                "`{bad:?}` resolved — a typed word reached the filesystem as a path"
+            );
+        }
+        // Legit keys still hit.
+        assert!(SpecRegistry::resolve_spec_file(&dirs, "git").is_some());
+        // Composite stem/sub still hits.
+        fs::create_dir_all(tmp.join("inner/cloud")).unwrap();
+        fs::write(tmp.join("inner/cloud/iam.json"), r#"{"name":"iam"}"#).unwrap();
+        assert!(SpecRegistry::resolve_spec_file(&dirs, "cloud/iam").is_some());
+        // A symlink inside the layer pointing out falls through.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(tmp.join("evil.json"), tmp.join("inner/link.json")).unwrap();
+            assert!(
+                SpecRegistry::resolve_spec_file(&dirs, "link").is_none(),
+                "symlink served bytes from outside the layer"
+            );
+            // …to the next layer, not to a miss: the bundled twin serves.
+            fs::create_dir_all(tmp.join("inner2")).unwrap();
+            fs::write(tmp.join("inner2/link.json"), r#"{"name":"link"}"#).unwrap();
+            let two = vec![tmp.join("inner"), tmp.join("inner2")];
+            let (served, _) =
+                SpecRegistry::resolve_spec_file(&two, "link").expect("fallthrough serves");
+            assert_eq!(served, tmp.join("inner2/link.json"));
+        }
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A generator emitting fast output must not fill the daemon heap:
+    /// the capture stays bounded even when the child writes megabytes.
+    #[test]
+    fn spawn_with_timeout_bounds_fast_output() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("sh")
+            .args(["-c", "head -c 1000000 /dev/zero"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sh is available in test env");
+        let buf = spawn_with_timeout(child, 8192).expect("a fast producer is captured");
+        assert!(
+            buf.len() <= 256 * 1024,
+            "unbounded generator capture: {} bytes",
+            buf.len()
+        );
+        assert!(!buf.is_empty());
+    }
+
     #[test]
     fn an_external_name_cannot_escape_the_spec_dir() {
         use std::fs;
