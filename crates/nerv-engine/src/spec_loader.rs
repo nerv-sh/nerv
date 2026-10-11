@@ -63,9 +63,7 @@ impl SpecLoadError {
     pub fn path(&self) -> &str {
         match self {
             Self::NotFound(p) => p,
-            Self::Io { path, .. } | Self::Parse { path, .. } | Self::TooLarge { path, .. } => {
-                path
-            }
+            Self::Io { path, .. } | Self::Parse { path, .. } | Self::TooLarge { path, .. } => path,
         }
     }
 }
@@ -118,11 +116,10 @@ pub fn load_spec_file_with_size(path: &Path) -> Result<(Spec, usize), SpecLoadEr
                 cap: SPEC_GZ_MAX_BYTES,
             });
         }
-        let s = String::from_utf8(buf).map_err(|e| SpecLoadError::Io {
+        String::from_utf8(buf).map_err(|e| SpecLoadError::Io {
             path: path.display().to_string(),
             source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
-        })?;
-        s
+        })?
     } else {
         fs::read_to_string(path).map_err(|e| SpecLoadError::Io {
             path: path.display().to_string(),
@@ -430,7 +427,10 @@ mod tests {
         let _ = fs::remove_file(&tmp);
         let f = fs::File::create(&tmp).unwrap();
         let mut enc = GzEncoder::new(f, Compression::fast());
-        let json = format!("{{\"name\":\"big\",\"description\":\"{}\"}}", "x".repeat(1024 * 1024));
+        let json = format!(
+            "{{\"name\":\"big\",\"description\":\"{}\"}}",
+            "x".repeat(1024 * 1024)
+        );
         enc.write_all(json.as_bytes()).unwrap();
         enc.finish().unwrap();
         let (spec, bytes) = load_spec_file_with_size(&tmp).expect("1MB gzip loads");

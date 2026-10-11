@@ -584,10 +584,8 @@ async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response
                     };
                 }
             };
-            let res = tokio::task::spawn_blocking(move || {
-                history.import_zsh_history(&resolved)
-            })
-            .await;
+            let res =
+                tokio::task::spawn_blocking(move || history.import_zsh_history(&resolved)).await;
             match res {
                 Ok(Ok(n)) => {
                     info!(imported = n, "zsh history imported");
@@ -1482,12 +1480,13 @@ mod tests {
         // `..` escape refused: home/sub exists, the raw path walks out
         // to the real outside file.
         std::fs::create_dir_all(home.path().join("sub")).expect("mkdir");
-        let dotdot = home.path().join("sub").join("..").join("..").join(
-            outside
-                .path()
-                .file_name()
-                .unwrap(),
-        ).join("secret.txt");
+        let dotdot = home
+            .path()
+            .join("sub")
+            .join("..")
+            .join("..")
+            .join(outside.path().file_name().unwrap())
+            .join("secret.txt");
         assert!(
             scoped_import_path_in(home.path(), dotdot.to_str().unwrap()).is_err(),
             "`..` escape resolved"

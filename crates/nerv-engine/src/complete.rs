@@ -6216,8 +6216,7 @@ region = us-east-1
     #[test]
     fn primary_lookup_key_cannot_escape_the_layer_dir() {
         use std::fs;
-        let tmp =
-            std::env::temp_dir().join(format!("nerv-resolve-escape-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("nerv-resolve-escape-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         // Layer is `inner`; the escape target sits one level up from it.
         fs::create_dir_all(tmp.join("inner")).unwrap();
@@ -6248,8 +6247,7 @@ region = us-east-1
         // A symlink inside the layer pointing out falls through.
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(tmp.join("evil.json"), tmp.join("inner/link.json"))
-                .unwrap();
+            std::os::unix::fs::symlink(tmp.join("evil.json"), tmp.join("inner/link.json")).unwrap();
             assert!(
                 SpecRegistry::resolve_spec_file(&dirs, "link").is_none(),
                 "symlink served bytes from outside the layer"
