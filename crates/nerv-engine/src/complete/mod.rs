@@ -1329,6 +1329,7 @@ fn subcommand_correction(
     context: &CursorContext,
     prefix: &str,
     full_line: &str,
+    base: usize,
     cursor: usize,
     tokens: &[Annotation],
 ) -> Option<Suggestion> {
@@ -1379,7 +1380,11 @@ fn subcommand_correction(
         .map(|(_, k)| *k)
         .unwrap_or(SuggestionKind::Subcommand);
     // Byte span of the token under the cursor for in-place replacement.
+    // Token spans are segment-relative, like the command-word path:
+    // add both offsets or compound lines (`a && git chekout`) replace
+    // the wrong range.
     let tok = tokens.iter().rev().find(|t| t.span.end == cursor)?;
+    let start = base + tok.span.start;
     Some(Suggestion {
         insertion: name.to_string(),
         display: name.to_string(),
@@ -1388,7 +1393,7 @@ fn subcommand_correction(
         priority: None,
         icon: None,
         source_ranked: true,
-        replace: Some(char_span(full_line, tok.span.start..tok.span.end)),
+        replace: Some(char_span(full_line, start..start + (tok.span.end - tok.span.start))),
     })
 }
 
@@ -1768,6 +1773,7 @@ pub fn complete_in(
             &result.cursor_context,
             &prefix,
             full_line,
+            seg_start + wrap_start,
             cursor,
             &tokens,
         )
@@ -5082,6 +5088,22 @@ region = us-east-1
             out.items.iter().any(|s| s.insertion == "--message"),
             "option typo should correct: {:?}",
             out.items
+        );
+        // Compound line: the replace span is segment-relative, so the
+        // offsets must be added or acceptance clobbers the wrong range.
+        let line = "echo hi; git chekout";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        let rows: Vec<_> = out
+            .items
+            .iter()
+            .filter(|s| s.description.as_deref() == Some("did you mean"))
+            .collect();
+        assert_eq!(rows.len(), 1, "{:?}", out.items);
+        assert_eq!(rows[0].insertion, "checkout");
+        assert_eq!(
+            rows[0].replace,
+            Some(ReplaceSpan { start: 13, end: 20 }),
+            "span must cover the token in the second segment"
         );
     }
 
