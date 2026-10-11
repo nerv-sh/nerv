@@ -239,7 +239,22 @@ impl SpecRegistry {
     fn layer_snapshot(&self) -> (Vec<PathBuf>, Vec<PathBuf>, Option<PathBuf>) {
         self.layers
             .read()
-            .map(|l| (l.dirs.clone(), l.written_dirs.clone(), l.derive_into.clone()))
+            .map(|l| {
+                (
+                    l.dirs.clone(),
+                    l.written_dirs.clone(),
+                    l.derive_into.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Just the layer dirs (the common hot-path read): one lock, one
+    /// small clone — not the whole triple. See [`layer_snapshot`](Self::layer_snapshot).
+    fn dirs_cloned(&self) -> Vec<PathBuf> {
+        self.layers
+            .read()
+            .map(|l| l.dirs.clone())
             .unwrap_or_default()
     }
 
@@ -383,7 +398,12 @@ impl SpecRegistry {
         // `insert`) have nothing to load → miss is `None`; bail before the
         // in-flight claim so we never leave a slot claimed with no populator
         // to release it.
-        if self.layer_snapshot().0.is_empty() {
+        // One snapshot for the whole miss path (checked non-empty
+        // below): a concurrent `set_derivation` swaps whole generations,
+        // never mixes them, and the gate below is read live so the
+        // disable half of a toggle applies even to a spawn already queued.
+        let (dirs, _written, derive_into) = self.layer_snapshot();
+        if dirs.is_empty() {
             return None;
         }
         let claimed = self
@@ -394,12 +414,6 @@ impl SpecRegistry {
         if !claimed {
             return stale;
         }
-        // dirs is non-empty (checked above); clone only now that we're
-        // committed to the parse. The snapshot is one generation: a
-        // concurrent `set_derivation` swaps whole generations, never
-        // mixes them, and the gate below is read live so the disable
-        // half of a toggle applies even to a spawn already queued.
-        let (dirs, _written, derive_into) = self.layer_snapshot();
         let cache = Arc::clone(&self.cache);
         let next_tick = Arc::clone(&self.next_tick);
         let inflight = Arc::clone(&self.inflight);
@@ -569,7 +583,7 @@ impl SpecRegistry {
     /// stat() the file backing `name` (plain or .gz form) and return
     /// its mtime. `None` if the file doesn't exist or stat fails.
     fn disk_mtime(&self, name: &str) -> Option<std::time::SystemTime> {
-        Self::resolve_spec_file(&self.layer_snapshot().0, name)
+        Self::resolve_spec_file(&self.dirs_cloned(), name)
             .and_then(|(_, meta)| meta.modified().ok())
     }
 
@@ -751,7 +765,7 @@ impl SpecRegistry {
     /// Callers that cache a derived view of the layer contents (the
     /// daemon's command-name list) stat these to know when to rebuild.
     pub fn layer_dirs(&self) -> Vec<PathBuf> {
-        self.layer_snapshot().0
+        self.dirs_cloned()
     }
 
     /// Command names currently in the in-memory positive cache. Does not
@@ -779,7 +793,7 @@ impl SpecRegistry {
     /// so the table reflects what's installed even before any lookup;
     /// which layer actually serves a stem is `stems_served_from`.
     pub fn dir_listing(&self) -> Vec<String> {
-        if self.layer_snapshot().0.is_empty() {
+        if self.dirs_cloned().is_empty() {
             return self.cached_names();
         }
         self.listing_by_origin().into_keys().collect()
@@ -1174,22 +1188,42 @@ pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggesti
 /// source is empty, so for that one window a real binary one edit from
 /// a stem (`pnpm` against `npm`) can draw a correction it would not
 /// draw a moment later.
+/// Best damerau match within `budget` over `candidates` (first wins
+/// ties). Shared by command-word and subcommand correction so the two
+/// typo-selection loops cannot drift apart.
+fn best_within_budget<'a>(
+    input: &[char],
+    budget: usize,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<(usize, &'a str)> {
+    let mut best: Option<(usize, &'a str)> = None;
+    for name in candidates {
+        let Some(distance) = damerau_levenshtein_within(input, name, budget) else {
+            continue;
+        };
+        if best.is_none_or(|(b, _)| distance < b) {
+            best = Some((distance, name));
+        }
+    }
+    best
+}
+
 pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str> {
     if names.path_pending {
         return None;
     }
     let input: Vec<char> = input.chars().collect();
     let budget = typo_distance_budget(input.len())?;
-    let mut best: Option<(usize, &str)> = None;
-    for name in names.frecent.iter().chain(names.stems.iter()) {
-        let Some(distance) = damerau_levenshtein_within(&input, name, budget) else {
-            continue;
-        };
-        if best.is_none_or(|(b, _)| distance < b) {
-            best = Some((distance, name.as_str()));
-        }
-    }
-    best.map(|(_, name)| name)
+    best_within_budget(
+        &input,
+        budget,
+        names
+            .frecent
+            .iter()
+            .chain(names.stems.iter())
+            .map(|s| s.as_str()),
+    )
+    .map(|(_, name)| name)
 }
 
 /// How many edits may separate a typo from the name it meant. The
@@ -1321,7 +1355,11 @@ fn subcommand_correction(
     } else {
         for s in &node.subcommands {
             candidates.push((s.name.as_str(), SuggestionKind::Subcommand));
-            candidates.extend(s.aliases.iter().map(|a| (a.as_str(), SuggestionKind::Subcommand)));
+            candidates.extend(
+                s.aliases
+                    .iter()
+                    .map(|a| (a.as_str(), SuggestionKind::Subcommand)),
+            );
         }
     }
     if candidates.is_empty() {
@@ -1329,21 +1367,17 @@ fn subcommand_correction(
     }
     let budget = typo_distance_budget(prefix.chars().count())?;
     let input: Vec<char> = prefix.chars().collect();
-    let mut best: Option<(usize, &str, SuggestionKind)> = None;
-    for (name, kind) in candidates {
-        let Some(d) = damerau_levenshtein_within(&input, name, budget) else {
-            continue;
-        };
-        // An exact token is complete, not a typo (the no-op drop left
-        // the list empty for it) — never correct to itself.
-        if d == 0 {
-            continue;
-        }
-        if best.is_none_or(|(b, _, _)| d < b) {
-            best = Some((d, name, kind));
-        }
+    let (_, name) = best_within_budget(&input, budget, candidates.iter().map(|(n, _)| *n))?;
+    // An exact token is complete, not a typo (the no-op drop left the
+    // list empty for it) — never correct to itself.
+    if name == prefix {
+        return None;
     }
-    let (_, name, kind) = best?;
+    let kind = candidates
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, k)| *k)
+        .unwrap_or(SuggestionKind::Subcommand);
     // Byte span of the token under the cursor for in-place replacement.
     let tok = tokens.iter().rev().find(|t| t.span.end == cursor)?;
     Some(Suggestion {
@@ -1603,7 +1637,8 @@ pub fn complete_in(
             crate::spec_parser::find_option_inherited(spec_ref, &result.subcommand_path, opt_name)
         {
             if let Some(arg) = opt.args.get(*arg_idx) {
-                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens, unspecced);
+                let items =
+                    emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens, unspecced);
                 return CompleteResult {
                     token_complete: false,
                     unspecced,
@@ -1634,8 +1669,15 @@ pub fn complete_in(
                 && !opt.requires_separator
                 && !opt.args.is_empty()
             {
-                let mut items =
-                    emit_candidates_for_arg(&opt.args[0], "", cwd, Some(opt), mode, &tokens, unspecced);
+                let mut items = emit_candidates_for_arg(
+                    &opt.args[0],
+                    "",
+                    cwd,
+                    Some(opt),
+                    mode,
+                    &tokens,
+                    unspecced,
+                );
                 if !items.is_empty() {
                     // The widget replaces the whole current token (`--profile`)
                     // with `insertion`, so the flag must ride along or it gets
@@ -1721,9 +1763,16 @@ pub fn complete_in(
     // Empty subcommand/option slot with a mistyped token: one
     // correction row, never alongside real rows (idea batch).
     let items = if items.is_empty() {
-        subcommand_correction(&current, &result.cursor_context, &prefix, full_line, cursor, &tokens)
-            .into_iter()
-            .collect()
+        subcommand_correction(
+            &current,
+            &result.cursor_context,
+            &prefix,
+            full_line,
+            cursor,
+            &tokens,
+        )
+        .into_iter()
+        .collect()
     } else {
         items
     };
@@ -2446,22 +2495,25 @@ fn arg_has_dynamic_source(node: &Subcommand) -> bool {
 /// values, not just names. Pure table — the emit site decides when it
 /// applies (derived specs only; authored specs never). Token equality
 /// (not substring): `profile` must not match `file`.
-fn fallback_generator_for_placeholder(
-    name: Option<&str>,
-) -> Option<crate::spec_parser::Generator> {
+fn fallback_generator_for_placeholder(name: Option<&str>) -> Option<crate::spec_parser::Generator> {
     use crate::spec_parser::Generator::*;
-    let lower = name?.to_ascii_lowercase();
+    // File/dir classes reuse the path-argument classifier (single
+    // table, no drift): bracketed placeholders stripped first, since
+    // `<file>` is not a bare word.
+    let stripped = name?
+        .trim()
+        .trim_matches(['<', '>', '(', ')', '[', ']', '{', '}']);
+    if let Some(folders_only) = infer_filepaths_kind(Some(stripped)) {
+        return Some(Filepaths { folders_only });
+    }
+    let lower = stripped.to_ascii_lowercase();
     let has = |w: &str| {
         lower
             .split(|c: char| !c.is_ascii_alphanumeric())
             .any(|t| t == w)
     };
     let any = |ws: &[&str]| ws.iter().any(|w| has(w));
-    if any(&["file", "files", "filepath", "filepaths", "filename", "path", "paths"]) {
-        Some(Filepaths { folders_only: false })
-    } else if any(&["dir", "dirs", "directory", "directories", "folder", "folders"]) {
-        Some(Filepaths { folders_only: true })
-    } else if any(&["branch", "branches"]) {
+    if any(&["branch", "branches"]) {
         Some(Template {
             script: vec!["git".into(), "branch".into(), "--list".into()],
         })
@@ -2488,12 +2540,12 @@ fn emit_arg_candidates(
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
     tokens: &[Annotation],
-    derived_like: bool,
+    unspecced: bool,
 ) -> Vec<Suggestion> {
     let Some(arg) = arg_index.and_then(|i| node.args.get(i)) else {
         return vec![];
     };
-    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens, derived_like)
+    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens, unspecced)
 }
 
 /// Whether [`emit_candidates_for_arg`] lists this argument from disk:
@@ -2540,7 +2592,7 @@ fn emit_candidates_for_arg(
     enclosing_opt: Option<&crate::spec_parser::Opt>,
     mode: MatchMode,
     tokens: &[Annotation],
-    derived_like: bool,
+    unspecced: bool,
 ) -> Vec<Suggestion> {
     let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
     // Fig parity getQueryTerm: when the arg declares delimiter chars
@@ -2646,9 +2698,9 @@ fn emit_candidates_for_arg(
         // derived-like command borrows the matching native generator.
         // Gated on the statically-filled `out` being empty (never noise
         // next to real rows) and on `arg.generators` being empty (never
-        // racing a real generator) — plus `derived_like`, computed once
+        // racing a real generator) — plus `unspecced`, computed once
         // per `complete_in`, so authored specs never take this path.
-        let fallback = (derived_like && arg.generators.is_empty() && out.is_empty())
+        let fallback = (unspecced && arg.generators.is_empty() && out.is_empty())
             .then(|| fallback_generator_for_placeholder(arg.name.as_deref()))
             .flatten();
         let n_generators = arg.generators.len() as u32 + u32::from(fallback.is_some());
@@ -4935,8 +4987,7 @@ region = us-east-1
     #[test]
     fn derived_fallback_completes_files_only_when_derived_like() {
         use std::fs;
-        let tmp =
-            std::env::temp_dir().join(format!("nerv-pin-fallback-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-fallback-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         fs::write(tmp.join("frobnicator.txt"), "").unwrap();
@@ -4948,7 +4999,8 @@ region = us-east-1
         };
         assert!(arg.generators.is_empty());
         // Derived-like: fallback fires.
-        let out = emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], true);
+        let out =
+            emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], true);
         let got: Vec<_> = out.iter().map(|s| s.insertion.as_str()).collect();
         assert!(
             got.iter().any(|s| s.ends_with("frobnicator.txt")),
@@ -4959,7 +5011,8 @@ region = us-east-1
             "prefix `f` must filter: {got:?}"
         );
         // Authored path: same arg, no fallback rows.
-        let out = emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], false);
+        let out =
+            emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], false);
         assert!(out.is_empty(), "authored path must stay empty: {out:?}");
         fs::remove_dir_all(&tmp).ok();
     }
@@ -5006,7 +5059,9 @@ region = us-east-1
         let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
         assert!(out.items.iter().any(|s| s.insertion == "checkout"));
         assert!(
-            out.items.iter().all(|s| s.description.as_deref() != Some("did you mean")),
+            out.items
+                .iter()
+                .all(|s| s.description.as_deref() != Some("did you mean")),
             "prefix hits must not draw correction rows: {:?}",
             out.items
         );
@@ -5014,7 +5069,9 @@ region = us-east-1
         let line = "git status";
         let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
         assert!(
-            out.items.iter().all(|s| s.description.as_deref() != Some("did you mean")),
+            out.items
+                .iter()
+                .all(|s| s.description.as_deref() != Some("did you mean")),
             "exact token must not correct to itself: {:?}",
             out.items
         );
@@ -7667,7 +7724,8 @@ region = us-east-1
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[], false);
+        let out =
+            emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[], false);
         // Only "serde" matches "se" prefix.
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].display, "serde");

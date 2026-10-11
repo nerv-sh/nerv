@@ -103,11 +103,15 @@ impl Config {
     /// hot-reload keeps old values on unparsable saves instead of
     /// falling back to defaults mid-session.
     pub fn parse_valid(text: &str) -> bool {
-        toml::from_str::<RawConfig>(text).is_ok()
+        Self::parse_raw(text).is_ok()
+    }
+
+    fn parse_raw(text: &str) -> Result<RawConfig, toml::de::Error> {
+        toml::from_str(text)
     }
 
     fn parse(text: &str) -> Self {
-        let raw: RawConfig = match toml::from_str(text) {
+        let raw: RawConfig = match Self::parse_raw(text) {
             Ok(r) => r,
             Err(_) => return Self::default(),
         };

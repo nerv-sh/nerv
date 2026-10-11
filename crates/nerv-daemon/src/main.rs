@@ -427,7 +427,10 @@ fn reload_config_from_file(shared: &Shared, path: &std::path::Path) -> Config {
         .map(|t| Config::parse_valid(&t))
         .unwrap_or(true);
     if !readable {
-        warn!("ignoring malformed {}, keeping current config", path.display());
+        warn!(
+            "ignoring malformed {}, keeping current config",
+            path.display()
+        );
         return shared.config.read().map(|c| *c).unwrap_or_default();
     }
     let cfg = Config::load_from_path(path);
@@ -464,10 +467,7 @@ fn start_config_watcher(
         let Ok(event) = res else {
             return;
         };
-        if !matches!(
-            event.kind,
-            EventKind::Create(_) | EventKind::Modify(_)
-        ) {
+        if !matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
             return;
         }
         if event.paths.iter().any(|p| p.file_name() == want.as_deref()) {
@@ -516,10 +516,7 @@ async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response
                 let history = history.clone();
                 // Live config read per request (hot-reload): a poisoned
                 // lock degrades to the default mode, never a hang.
-                let mode = config
-                    .read()
-                    .map(|c| c.matching.mode)
-                    .unwrap_or_default();
+                let mode = config.read().map(|c| c.matching.mode).unwrap_or_default();
                 tokio::task::spawn_blocking(move || {
                     // Building the name list means stat-ing every
                     // spec layer, cloning ~700 stems and folding the
