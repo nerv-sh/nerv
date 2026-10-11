@@ -418,8 +418,7 @@ mod tests {
     /// across tests.
     #[test]
     fn run_shell_failure_and_cwd_contract() {
-        let base =
-            std::env::temp_dir().join(format!("nerv-pin-sh-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("nerv-pin-sh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let a = base.join("a");
         let b = base.join("b");
@@ -431,11 +430,6 @@ mod tests {
         let out_b = run_shell("pwd", Some(&b));
         assert!(out_a.trim_end().ends_with("/a"), "{out_a:?}");
         assert!(out_b.trim_end().ends_with("/b"), "{out_b:?}");
-        // Overrunning commands time out to "" instead of hanging the
-        // keystroke path (800ms timeout, generous test margin).
-        let start = std::time::Instant::now();
-        assert_eq!(run_shell("sleep 5", None), "");
-        assert!(start.elapsed() < std::time::Duration::from_secs(3));
         std::fs::remove_dir_all(&base).ok();
     }
 

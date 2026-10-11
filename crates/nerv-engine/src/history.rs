@@ -1096,7 +1096,6 @@ mod tests {
     fn frecency_future_timestamp_clamps_to_zero_age() {
         let now = 1_700_000_000u64;
         let got = frecency(5, now + 99999, now);
-        assert!(got.is_finite());
         assert!((got - 5f64.ln_1p()).abs() < 1e-12, "age not clamped: {got}");
     }
 

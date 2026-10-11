@@ -6188,8 +6188,7 @@ region = us-east-1
     #[test]
     fn complete_in_uses_cwd_for_package_json_scripts() {
         use std::fs;
-        let tmp =
-            std::env::temp_dir().join(format!("nerv-pin-npm-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-npm-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         fs::write(
@@ -6232,8 +6231,7 @@ region = us-east-1
     #[test]
     fn package_json_scripts_walk_up_and_missing() {
         use std::fs;
-        let tmp =
-            std::env::temp_dir().join(format!("nerv-pin-walkup-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-walkup-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("a").join("b")).unwrap();
         fs::write(
@@ -6255,8 +6253,7 @@ region = us-east-1
     fn zoxide_file_parsing_handles_io_edges() {
         use std::env;
         use std::fs;
-        let tmp =
-            std::env::temp_dir().join(format!("nerv-pin-zoxide-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-zoxide-{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
         let zfile = tmp.join("z");
@@ -6276,6 +6273,8 @@ region = us-east-1
             "missing z file must be None, not a panic"
         );
         unsafe { env::set_var("ZSHZ_DATA", "") };
+        // Empty var falls through to $HOME/.z: the value depends on the
+        // runner's HOME, so this pins only "does not panic".
         let _ = zoxide_via_z_file();
         let _ = z_history_file();
         match prev {
