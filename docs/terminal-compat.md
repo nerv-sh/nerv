@@ -341,7 +341,7 @@ CI 매트릭스 (M1):
 
 ```
 matrix:
-  os: [macos-14]   # Apple Silicon only (Intel runners dropped)
+  os: [macos-14]   # Apple Silicon only
   terminal: [iterm2, terminal-app, tmux-iterm2, tmux-terminal-app]
 ```
 
