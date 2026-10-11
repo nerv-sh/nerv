@@ -2,7 +2,7 @@
 
 > **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 §5.4 정합.
 > **출시 차단 요건**: 본 문서의 *모든* 인수 기준이 e2e 자동 테스트에서 통과해야 v1.0 출시.
-> **v0.6 정합**: marker 블록 식별/제거 로직은 `nerv-shell` (자작, 보존) + `nerv-integrations` (← upstream `fig_integrations`, 흡수) 에 분산. uninstall 절차 자체는 변경 없음. nerv-pty (M1 figterm opt-in) 도입 시 PTY shim 바이너리 (`~/.local/bin/nerv-pty`) 가 §2 인벤토리에 8번으로 추가됨 — §11 참조.
+> **v0.6 정합**: marker 블록 식별/제거 로직은 `nerv-shell` (자작, 보존) + `nerv-integrations` (← upstream `fig_integrations`, 흡수) 에 분산. uninstall 절차 자체는 변경 없음. nerv-pty (M1 figterm opt-in, `NERV_PTY=1`) 도입 시 sibling 바이너리 + `NERV_PTY_BIN` export + per-shell bootstrap이 §2 인벤토리에 추가됨 — §11 참조.
 
 ---
 
@@ -35,7 +35,7 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 
 > **v1.0 비대상**: LaunchAgent (`~/Library/LaunchAgents/sh.nerv.nervd.plist`) — v1.0 은 `nerv start` / `stop` 수동 라이프사이클만. 자동 기동 도입 (v1.x) 시점에 본 인벤토리에 8번으로 추가하고 §4 step 6 도 함께 부활한다.
 >
-> **v1.0 M0 비대상 (M1 도입 예정)**: `nerv-pty` (← upstream figterm) PTY shim 바이너리 — PRD v0.6 §5.8 의 opt-in path 도입 시 `~/.local/bin/nerv-pty` + `pre.sh` 의 `exec -a` 라인이 §2 인벤토리에 추가됨. uninstall 절차도 PTY shim 종료 + 바이너리 삭제 + pre.sh 라인 제거 단계 추가. §11 참조.
+> **v1.0 M0 비대상 (M1 도입 예정)**: `nerv-pty` (← upstream figterm) PTY shim 바이너리 — PRD v0.6 §5.8 의 opt-in path (`NERV_PTY=1`) 도입 시 sibling 바이너리 + `NERV_PTY_BIN` export 라인 + per-shell bootstrap이 §2 인벤토리에 추가됨. §11 참조.
 
 > **macOS 경로 일관성 원칙**: 캐시 = `~/Library/Caches/nerv/`, 로그 = `~/Library/Logs/nerv/`, 설정 = `~/.config/nerv/`.
 
