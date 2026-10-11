@@ -111,19 +111,19 @@ M0-2 산출물:
 
 ### 3.3 사용자 시점
 
-- `nerv spec list` 출력:
+- `nerv spec list` 출력 (TIER = 무거운 generator 기준 분류: A 정적 / B (limited) shell-command / C (M1) JS-closure; `*` overlay / `+` derived 표시):
   ```
   $ nerv spec list
-  git           limited (3 dynamic args, see ?)
-  docker        limited (2 dynamic args)
-  kubectl       limited (5 dynamic args)
-  brew          full
-  cargo         full
-  jq            full
+  NAME               SUBS  OPTS  TIER
+  git                  120    45  B (limited)
+  docker                60    30  B (limited)
+  kubectl               90    50  C (M1)
+  brew                  40    20  A
+  cargo                 25    15  A
   ...
-  Total: 50 specs (full: 22, limited: 28)
+  * = served from ~/.config/nerv/specs (user overlay)
+  + = derived from --help, cached in ~/Library/Caches/nerv/derived
   ```
-- `?` 키로 limited spec 의 동적 인자 목록 펼침.
 
 ---
 
@@ -476,10 +476,11 @@ upstream `withfig/autocomplete` 는 2025-05 이후 커밋이 없다. 거기 없�
 
 | 지점 | 정책 항목 |
 |------|----------|
-| `nerv spec list` 의 `(limited)` 라벨 | §3.3 |
-| `?` 키로 limited 인자 목록 | §3.3 |
+| `nerv spec list` 의 TIER 값 (`A` / `B (limited)` / `C (M1)`) + `*`/`+` 범례 | §3.3 |
+| `nerv doctor` 의 "specs" 섹션 (`{count} loaded`) | §3.3 |
 | §5.1 동적 힌트 메시지 (PLAN.md, error-states.md) | §2 Tier B |
-| `nerv doctor` 의 "specs" 섹션 (full / limited / disabled 카운트) | §3.3 |
+| 릴리즈 노트의 spec 변경 항목 | §7.3 |
+| `vendor-patches/AUTHORS.md` 의 흡수 PR 출처 표기 | §5.2.B |
 | 릴리즈 노트의 spec 변경 항목 | §7.3 |
 | `vendor-patches/AUTHORS.md` 의 흡수 PR 출처 표기 | §5.2.B |
 
