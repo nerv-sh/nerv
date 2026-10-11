@@ -1285,6 +1285,79 @@ fn command_word_correction(
     })
 }
 
+/// One correction row for a mistyped subcommand or option token that
+/// matched nothing (`git chekout` → `checkout`). Empty results only —
+/// a prefix hit never draws a row (the existing philosophy: recall
+/// beats guessing). The span covers the mistyped token so accepting
+/// swaps it in place. Shaped like [`command_word_correction`].
+fn subcommand_correction(
+    node: &Subcommand,
+    context: &CursorContext,
+    prefix: &str,
+    full_line: &str,
+    cursor: usize,
+    tokens: &[Annotation],
+) -> Option<Suggestion> {
+    if prefix.is_empty() || prefix.contains('/') {
+        return None;
+    }
+    // Arg values and exhausted positions are open-ended: nothing sane
+    // to correct against (static enums aside — out of scope).
+    if !matches!(
+        context,
+        CursorContext::Subcommand | CursorContext::OptionName
+    ) {
+        return None;
+    }
+    // The token decides the pool, not the node: a `--…` token corrects
+    // against option names even when the node also has subcommands
+    // (which is why the context alone would look in the wrong place).
+    let dashed = prefix.starts_with('-');
+    let mut candidates: Vec<(&str, SuggestionKind)> = vec![];
+    if dashed {
+        for o in &node.options {
+            candidates.extend(o.names.iter().map(|n| (n.as_str(), SuggestionKind::Flag)));
+        }
+    } else {
+        for s in &node.subcommands {
+            candidates.push((s.name.as_str(), SuggestionKind::Subcommand));
+            candidates.extend(s.aliases.iter().map(|a| (a.as_str(), SuggestionKind::Subcommand)));
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let budget = typo_distance_budget(prefix.chars().count())?;
+    let input: Vec<char> = prefix.chars().collect();
+    let mut best: Option<(usize, &str, SuggestionKind)> = None;
+    for (name, kind) in candidates {
+        let Some(d) = damerau_levenshtein_within(&input, name, budget) else {
+            continue;
+        };
+        // An exact token is complete, not a typo (the no-op drop left
+        // the list empty for it) — never correct to itself.
+        if d == 0 {
+            continue;
+        }
+        if best.is_none_or(|(b, _, _)| d < b) {
+            best = Some((d, name, kind));
+        }
+    }
+    let (_, name, kind) = best?;
+    // Byte span of the token under the cursor for in-place replacement.
+    let tok = tokens.iter().rev().find(|t| t.span.end == cursor)?;
+    Some(Suggestion {
+        insertion: name.to_string(),
+        display: name.to_string(),
+        description: Some("did you mean".into()),
+        kind,
+        priority: None,
+        icon: None,
+        source_ranked: true,
+        replace: Some(char_span(full_line, tok.span.start..tok.span.end)),
+    })
+}
+
 /// `bytes` of `line` as a character range.
 fn char_span(line: &str, bytes: std::ops::Range<usize>) -> ReplaceSpan {
     let start = line[..bytes.start].chars().count();
@@ -1645,6 +1718,15 @@ pub fn complete_in(
     // matches (`status-v2`) remain. Empty prefix means the user is
     // browsing a fresh token (`git `), so keep everything.
     let (items, token_complete) = settle_typed_token(items, &prefix, mode);
+    // Empty subcommand/option slot with a mistyped token: one
+    // correction row, never alongside real rows (idea batch).
+    let items = if items.is_empty() {
+        subcommand_correction(&current, &result.cursor_context, &prefix, full_line, cursor, &tokens)
+            .into_iter()
+            .collect()
+    } else {
+        items
+    };
     // Only a plain positional slot: next to subcommands or option names
     // a history word is as likely one of those.
     let path_arg = !prefix_is_option
@@ -4880,6 +4962,70 @@ region = us-east-1
         let out = emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], false);
         assert!(out.is_empty(), "authored path must stay empty: {out:?}");
         fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Empty subcommand slot with a typo offers the one fix
+    /// (`git chekout` → `checkout`); a prefix hit never draws a
+    /// correction row; an exact token never corrects to itself.
+    #[test]
+    fn subcommand_correction_on_empty_only() {
+        use std::fs;
+        let git = Subcommand {
+            name: "git".into(),
+            subcommands: vec![
+                Subcommand {
+                    name: "checkout".into(),
+                    ..Default::default()
+                },
+                Subcommand {
+                    name: "status".into(),
+                    ..Default::default()
+                },
+            ],
+            options: vec![crate::spec_parser::Opt {
+                names: vec!["--message".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = SpecRegistry::empty();
+        r.insert(git);
+        let line = "git chekout";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert_eq!(out.items.len(), 1, "{:?}", out.items);
+        let row = &out.items[0];
+        assert_eq!(row.insertion, "checkout");
+        assert_eq!(row.description.as_deref(), Some("did you mean"));
+        assert_eq!(
+            row.replace,
+            Some(ReplaceSpan { start: 4, end: 11 }),
+            "acceptance must swap the mistyped token in place"
+        );
+        // Prefix hit: real rows, no correction row.
+        let line = "git chec";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert!(out.items.iter().any(|s| s.insertion == "checkout"));
+        assert!(
+            out.items.iter().all(|s| s.description.as_deref() != Some("did you mean")),
+            "prefix hits must not draw correction rows: {:?}",
+            out.items
+        );
+        // Exact token: complete, not a typo — stays empty.
+        let line = "git status";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert!(
+            out.items.iter().all(|s| s.description.as_deref() != Some("did you mean")),
+            "exact token must not correct to itself: {:?}",
+            out.items
+        );
+        // Option slot typo.
+        let line = "git --mesage";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert!(
+            out.items.iter().any(|s| s.insertion == "--message"),
+            "option typo should correct: {:?}",
+            out.items
+        );
     }
 
     #[test]
