@@ -647,8 +647,13 @@ impl HistoryStore {
             agg.rows
         };
         if let Some(path) = &self.path {
-            let _lock = FileLock::acquire(path)?;
-            append_unlocked(path, &e)?;
+            {
+                let _lock = FileLock::acquire(path)?;
+                append_unlocked(path, &e)?;
+            }
+            // Lock released before compact: `compact` takes the file
+            // lock itself, and flock outer/inner pairs in one process
+            // deadlock (separate descriptions still conflict).
             if rows > ROW_CAP {
                 self.compact(path)?;
             }
@@ -657,8 +662,10 @@ impl HistoryStore {
     }
 
     /// Keep the newest [`ROW_KEEP`] rows and rebuild the aggregates from
-    /// exactly what the file now holds. The caller holds the [`FileLock`].
+    /// exactly what the file now holds. Takes the [`FileLock`] itself,
+    /// so every caller is safe — never call it holding the lock.
     fn compact(&self, path: &Path) -> std::io::Result<()> {
+        let _lock = FileLock::acquire(path)?;
         let text = std::fs::read_to_string(path)?;
         let rows: Vec<&str> = text.lines().filter(|l| parse_row(l).is_some()).collect();
         let kept = &rows[rows.len().saturating_sub(ROW_KEEP)..];
@@ -1071,6 +1078,57 @@ mod tests {
             .unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// Compaction under concurrent appends loses no rows: both sides
+    /// serialize on the file lock, so the read-compute-write sees every
+    /// row appended before its read and never clobbers later ones.
+    /// Total stays far under ROW_KEEP, so every written row must still
+    /// be on disk at the end (anything missing is a lost write).
+    #[test]
+    fn compact_under_concurrent_appends_loses_no_rows() {
+        use std::collections::HashSet;
+        let path = tmp("compact-race");
+        let mut expected: HashSet<String> = HashSet::new();
+        let mut body = String::new();
+        for i in 0..2000 {
+            let row = format_row(&entry(&format!("seed{i}"), "/", ""));
+            body.push_str(&row);
+            body.push('\n');
+            expected.insert(row);
+        }
+        std::fs::write(&path, body).unwrap();
+        let store = HistoryStore::load(&path);
+        std::thread::scope(|sp| {
+            for t in 0..4 {
+                let p = path.clone();
+                sp.spawn(move || {
+                    for i in 0..200 {
+                        append_row(&p, &entry(&format!("racer{t}-{i}"), "/", "")).unwrap();
+                    }
+                });
+            }
+            sp.spawn(|| {
+                for _ in 0..10 {
+                    store.compact(&path).unwrap();
+                }
+            });
+        });
+        for t in 0..4 {
+            for i in 0..200 {
+                expected.insert(format_row(&entry(&format!("racer{t}-{i}"), "/", "")));
+            }
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let have: HashSet<String> = text.lines().map(str::to_string).collect();
+        let missing: Vec<_> = expected.difference(&have).take(5).collect();
+        assert!(
+            missing.is_empty(),
+            "rows lost under compaction: {missing:?} ({} of {})",
+            expected.difference(&have).count(),
+            expected.len()
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// The lock file gets the same 0600 repair: a pre-existing

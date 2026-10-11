@@ -102,6 +102,17 @@ pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()
     Err(last_err)
 }
 
+/// One stderr line the first time a ranking store finds its lock
+/// poisoned, then silence: the callers degrade to cold defaults, and a
+/// wedged lock must leave a trace without spamming every keystroke.
+/// Engine has no logger; the daemon captures stderr.
+pub(crate) fn warn_poison_once(what: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("nerv: {what} lock poisoned — ranking degraded to cold defaults");
+    }
+}
+
 /// A plain executable stem as the user would type it: 2–64 chars of
 /// `[A-Za-z0-9_.+-]`, starting alphanumeric. Rejects paths (`./x`,
 /// `/usr/bin/x`), single letters, and anything carrying whitespace or a

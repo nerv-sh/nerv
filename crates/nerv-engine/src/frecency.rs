@@ -165,6 +165,9 @@ impl FrecencyStore {
         insertions: impl IntoIterator<Item = &'a str>,
     ) -> Vec<f64> {
         let st = self.state.lock().ok();
+        if st.is_none() {
+            crate::paths::warn_poison_once("frecency scores");
+        }
         let picks = st.as_ref().and_then(|st| st.table.get(spec));
         let now = now_unix();
         insertions
@@ -183,6 +186,7 @@ impl FrecencyStore {
     /// alphabetically so the list is stable across calls.
     pub fn spec_names(&self) -> Vec<String> {
         let Ok(mut st) = self.state.lock() else {
+            crate::paths::warn_poison_once("frecency names");
             return vec![];
         };
         let now = now_unix();
@@ -343,6 +347,22 @@ mod tests {
     #[test]
     fn spec_names_is_empty_without_history() {
         assert!(FrecencyStore::empty().spec_names().is_empty());
+    }
+
+    /// A poisoned lock degrades to cold defaults (zeros / empty) with a
+    /// stderr trace — never a hang, never stale-looking data.
+    #[test]
+    fn poisoned_lock_returns_cold_defaults() {
+        let s = FrecencyStore::empty();
+        s.record("git", "status");
+        assert!(!s.spec_names().is_empty());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = s.state.lock().unwrap();
+            panic!("poison the mutex");
+        }));
+        assert!(r.is_err());
+        assert_eq!(s.scores("git", ["status"]), vec![0.0]);
+        assert!(s.spec_names().is_empty());
     }
 
     /// Empty spec/insertion records nothing: the load-time invariant

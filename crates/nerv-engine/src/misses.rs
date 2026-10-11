@@ -147,6 +147,7 @@ impl MissCounter {
     /// stable across runs.
     pub fn top_n(&self, n: usize) -> Vec<(String, u32)> {
         let Ok(st) = self.state.lock() else {
+            crate::paths::warn_poison_once("miss tally");
             return Vec::new();
         };
         let mut rows: Vec<(&String, &Entry)> = st.table.iter().collect();
@@ -545,5 +546,19 @@ mod tests {
         assert!(c.len() <= MAX_ENTRIES, "len was {}", c.len());
         assert_eq!(c.top_n(1), vec![("zeph".to_string(), 50)]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A poisoned lock degrades to an empty tally with a stderr trace.
+    #[test]
+    fn poisoned_lock_returns_empty_tally() {
+        let c = MissCounter::empty();
+        c.record("zeph");
+        assert_eq!(c.top_n(1), vec![("zeph".to_string(), 1)]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = c.state.lock().unwrap();
+            panic!("poison the mutex");
+        }));
+        assert!(r.is_err());
+        assert!(c.top_n(5).is_empty());
     }
 }
