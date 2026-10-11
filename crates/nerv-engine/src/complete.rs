@@ -6254,6 +6254,13 @@ region = us-east-1
                 SpecRegistry::resolve_spec_file(&dirs, "link").is_none(),
                 "symlink served bytes from outside the layer"
             );
+            // …to the next layer, not to a miss: the bundled twin serves.
+            fs::create_dir_all(tmp.join("inner2")).unwrap();
+            fs::write(tmp.join("inner2/link.json"), r#"{"name":"link"}"#).unwrap();
+            let two = vec![tmp.join("inner"), tmp.join("inner2")];
+            let (served, _) =
+                SpecRegistry::resolve_spec_file(&two, "link").expect("fallthrough serves");
+            assert_eq!(served, tmp.join("inner2/link.json"));
         }
         fs::remove_dir_all(&tmp).ok();
     }

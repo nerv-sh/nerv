@@ -415,6 +415,30 @@ mod tests {
         assert_eq!(spec, restored);
     }
 
+    /// The cap must not touch legit loads: a 1MB archive round-trips
+    /// `Ok` (existing small-fixture tests pin the tiny end; this pins a
+    /// mid-size body well under the 256MB ceiling).
+    #[test]
+    fn mid_size_gzip_loads_fine_under_cap() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let tmp = std::env::temp_dir().join(format!(
+            "nerv-spec-loader-mid-{}.json.gz",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&tmp);
+        let f = fs::File::create(&tmp).unwrap();
+        let mut enc = GzEncoder::new(f, Compression::fast());
+        let json = format!("{{\"name\":\"big\",\"description\":\"{}\"}}", "x".repeat(1024 * 1024));
+        enc.write_all(json.as_bytes()).unwrap();
+        enc.finish().unwrap();
+        let (spec, bytes) = load_spec_file_with_size(&tmp).expect("1MB gzip loads");
+        assert_eq!(bytes, json.len());
+        assert_eq!(spec.name, "big");
+        fs::remove_file(&tmp).ok();
+    }
+
     /// A `.json.gz` decompressing past the cap fails closed as
     /// `TooLarge` instead of materialising gigabytes (a small crafted
     /// archive in any layer would otherwise OOM the background
