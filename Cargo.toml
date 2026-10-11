@@ -75,8 +75,6 @@ tokio-util = { version = "0.7.16", features = ["codec", "compat"] }
 serde = { version = "1.0.219", features = ["derive", "rc"] }
 serde_json = "1.0.140"
 
-# TUI / ANSI
-
 # Errors / logging
 anyhow = "1.0.98"
 thiserror = "2.0.12"
