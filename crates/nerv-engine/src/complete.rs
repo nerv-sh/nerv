@@ -520,13 +520,31 @@ impl SpecRegistry {
     /// `disk_mtime` and the loader agree on *which* file a stem means. One
     /// `metadata()` per candidate — this runs on the keystroke fast path.
     fn resolve_spec_file(dirs: &[PathBuf], name: &str) -> Option<(PathBuf, fs::Metadata)> {
+        // The key comes from the typed command word (or a `{stem}/{sub}`
+        // composite), so a segment carrying a separator or a dot-segment
+        // would join outside the layer dir. Every segment must be a bare
+        // stem — composites stay legal because both sides are plain.
+        if !name.split('/').all(is_plain_stem) {
+            return None;
+        }
         dirs.iter().find_map(|dir| {
             [
                 dir.join(format!("{name}.json")),
                 dir.join(format!("{name}.json.gz")),
             ]
             .into_iter()
-            .find_map(|p| p.metadata().ok().map(|m| (p, m)))
+            .find_map(|p| {
+                let meta = p.metadata().ok()?;
+                // Containment after the fact, on hits only (misses cost no
+                // extra stat): a symlink inside the layer pointing out must
+                // not serve outside bytes — fall through to the next layer.
+                let canon = fs::canonicalize(&p).ok()?;
+                let canon_dir = fs::canonicalize(dir).ok()?;
+                if !canon.starts_with(&canon_dir) {
+                    return None;
+                }
+                Some((p, meta))
+            })
         })
     }
 
@@ -6181,6 +6199,56 @@ region = us-east-1
     /// pass with the guard removed (it did — mutation, 2026-09-18). The
     /// positive control in the same window proves the window is long
     /// enough for a load to land.
+    /// The primary lookup key comes from the typed command word, so it
+    /// can carry separators — it must never join outside the layer dir.
+    /// The composite `{stem}/{sub}` key stays legal: both segments are
+    /// plain stems. Sync: `resolve_spec_file` answers directly, so no
+    /// load window is needed.
+    #[test]
+    fn primary_lookup_key_cannot_escape_the_layer_dir() {
+        use std::fs;
+        let tmp =
+            std::env::temp_dir().join(format!("nerv-resolve-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        // Layer is `inner`; the escape target sits one level up from it.
+        fs::create_dir_all(tmp.join("inner")).unwrap();
+        fs::write(tmp.join("evil.json"), r#"{"name":"evil"}"#).unwrap();
+        fs::write(tmp.join("inner/git.json"), r#"{"name":"git"}"#).unwrap();
+        let dirs = vec![tmp.join("inner")];
+        for bad in [
+            "../evil",
+            "/etc/passwd",
+            "..",
+            ".",
+            "",
+            "a/b/c",
+            "a\\b",
+            "a\0b",
+        ] {
+            assert!(
+                SpecRegistry::resolve_spec_file(&dirs, bad).is_none(),
+                "`{bad:?}` resolved — a typed word reached the filesystem as a path"
+            );
+        }
+        // Legit keys still hit.
+        assert!(SpecRegistry::resolve_spec_file(&dirs, "git").is_some());
+        // Composite stem/sub still hits.
+        fs::create_dir_all(tmp.join("inner/cloud")).unwrap();
+        fs::write(tmp.join("inner/cloud/iam.json"), r#"{"name":"iam"}"#).unwrap();
+        assert!(SpecRegistry::resolve_spec_file(&dirs, "cloud/iam").is_some());
+        // A symlink inside the layer pointing out falls through.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(tmp.join("evil.json"), tmp.join("inner/link.json"))
+                .unwrap();
+            assert!(
+                SpecRegistry::resolve_spec_file(&dirs, "link").is_none(),
+                "symlink served bytes from outside the layer"
+            );
+        }
+        fs::remove_dir_all(&tmp).ok();
+    }
+
     #[test]
     fn an_external_name_cannot_escape_the_spec_dir() {
         use std::fs;
