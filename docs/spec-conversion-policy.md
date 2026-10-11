@@ -23,7 +23,7 @@ const completionSpec: Fig.Spec = {
 
 **문제**: `generators` 필드는 *실행 시점* 에 자식 프로세스 (예: `git branch --list`) 를 호출해 후보를 가져오는 코드. 정적 추출 불가.
 
-**v1.0 결정**: 정적으로 추출 가능한 부분 (서브커맨드 / 플래그) 은 JSON 으로 직렬화. 동적 generator 는 **런타임에 실행** — Tier B (정적 shell command, 예 `git branch --list`) 는 엔진이 직접 spawn (200ms timeout + TTL 5s LRU 64 cache), well-known Tier C (kubectl/docker/aws/npm scripts/filepaths) 는 signature recognizer 로 Rust-native 회복. closure-only tail 만 `--features quickjs` opt-in (출시 미동봉).
+**v1.0 결정**: 정적으로 추출 가능한 부분 (서브커맨드 / 플래그) 은 JSON 으로 직렬화. 동적 generator 는 **런타임에 실행** — Tier B (정적 shell command, 예 `git branch --list`) 는 엔진이 직접 spawn (800ms timeout + TTL 5s/60s adaptive + 50ms sync window, LRU 64 cache), well-known Tier C (kubectl/docker/aws/npm scripts/filepaths) 는 signature recognizer 로 Rust-native 회복. closure-only tail 은 `--features quickjs` 게이트 (출시 바이너리 동봉).
 
 > **갱신 (v1.4)**: 초기 v0.5.1 설계는 동적 인자를 manifest `limited_args` 로 *마킹* 만 하고 사용자에겐 §5.1 "직접 입력하세요" 힌트를 띄울 계획이었다. M1 에서 Tier B 직접 실행 + recognizer 회복이 동적완성을 실제로 작동시키면서 이 마킹/힌트 메커니즘 (`limited_args` / `Response::DynamicHint` / `LimitedArg`) 은 **폐기 + 코드 삭제** 됐다. 아래 본문의 `limited_args` / §5.1 힌트 언급은 역사적 설계 기록 — 현 manifest 스키마 v2 에는 `limited_args` 필드가 없다.
 
@@ -209,15 +209,10 @@ v1.0 (M0–M1) 의 Tier C 는 *빌드 산출 0* — `generator.custom!(ctx)`
 같은 클로저는 정적으로 추론 불가. PRD v0.6 §0.2 의 비목표 (deno_core
 임베드) 정책상 V8/JIT 임베드는 금지.
 
-**M1 opt-in 경로**: `rquickjs` (~1MB, sandboxed, pure-C QuickJS 바인딩)
-를 `crates/nerv-engine` 의 optional dep 으로 추가. 사용자가
-`~/.config/nerv/nerv.toml` 에서 다음을 설정 시 활성:
-
-```toml
-[runtime]
-dynamic_specs = true   # 기본 false — M1 opt-in
-js_engine = "rquickjs" # 명시. deno_core 등 다른 값 금지 (CLAUDE.md §4)
-```
+**M1 동봉 경로**: `rquickjs` (~1MB, sandboxed, pure-C QuickJS 바인딩)
+를 `crates/nerv-engine` 의 optional dep 으로 추가. `--features quickjs`
+컴파일 플래그로 활성 — release 바이너리에 동봉. `~/.config/nerv/nerv.toml`
+`[runtime]` 게이트는 존재하지 않는다 (`RawConfig` 는 `matching`·`derived` 섹션만 읽음).
 
 활성 시 `nerv-engine::spec_runtime` 모듈 (M1 5-10주차 산출물) 이
 Tier C 의 generator 함수를 QuickJS context 에 평가 → 결과 후보 반환.
@@ -230,7 +225,7 @@ Tier C 의 generator 함수를 QuickJS context 에 평가 → 결과 후보 반�
 - Worker / async generator 의 완전한 호환 (best-effort).
 
 성공 신호 — M1 dogfooding 결과로 Tier C 회복률 측정 후 v1.1 기본
-활성화 (`dynamic_specs = true`) 검토.
+활성화 검토.
 
 ---
 
