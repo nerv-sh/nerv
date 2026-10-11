@@ -92,12 +92,19 @@ pub fn load_spec_file_with_size(path: &Path) -> Result<(Spec, usize), SpecLoadEr
             path: path.display().to_string(),
             source: e,
         })?;
+        // Seed capacity from the compressed size (a lower bound of the
+        // output) so legit large specs don't grow by realloc. Metadata
+        // first: the File moves into the decoder below.
+        let cap_hint = file
+            .metadata()
+            .map(|m| m.len().saturating_add(1).min(SPEC_GZ_MAX_BYTES + 1) as usize)
+            .unwrap_or(0);
         let decoder = GzDecoder::new(file);
         // Cap+1: `take` truncates silently (a second probe reads Ok(0)
         // once the limit is spent), so one byte of headroom tells "at
         // cap" from "over cap". Bytes first — a cut mid-char must not
         // change the error routing — then UTF-8 exactly as before.
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(cap_hint);
         decoder
             .take(SPEC_GZ_MAX_BYTES + 1)
             .read_to_end(&mut buf)

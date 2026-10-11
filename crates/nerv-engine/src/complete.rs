@@ -528,6 +528,9 @@ impl SpecRegistry {
             return None;
         }
         dirs.iter().find_map(|dir| {
+            // Canonicalized once per layer (not per candidate): hits are
+            // rare next to misses, and both candidates share the dir.
+            let canon_dir = fs::canonicalize(dir).ok()?;
             [
                 dir.join(format!("{name}.json")),
                 dir.join(format!("{name}.json.gz")),
@@ -539,7 +542,6 @@ impl SpecRegistry {
                 // extra stat): a symlink inside the layer pointing out must
                 // not serve outside bytes — fall through to the next layer.
                 let canon = fs::canonicalize(&p).ok()?;
-                let canon_dir = fs::canonicalize(dir).ok()?;
                 if !canon.starts_with(&canon_dir) {
                     return None;
                 }
@@ -3189,7 +3191,7 @@ pub(crate) fn spawn_with_timeout(
     use std::io::Read;
     use std::sync::mpsc;
     use std::time::Duration;
-    let mut stdout = child.stdout.take()?;
+    let stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = Vec::with_capacity(buf_cap);
