@@ -3160,6 +3160,13 @@ fn cached_native_generator(
 /// cache means every keystroke after the first hits cache anyway.
 const GENERATOR_TIMEOUT_MS: u64 = 800;
 
+/// Upper bound on one generator's captured stdout. Mirrors
+/// `derived::MAX_HELP_BYTES`: a time cap does not bound bytes, and a
+/// fast producer would otherwise fill the daemon heap once per cache
+/// miss. Consumers already tolerate truncation
+/// (`String::from_utf8_lossy` at the call sites).
+const GENERATOR_MAX_BYTES: u64 = 256 * 1024;
+
 /// Drain a spawned child process's stdout into a single Vec under
 /// [`GENERATOR_TIMEOUT_MS`]. On timeout, kill the child and return
 /// `None`. Otherwise return the captured bytes (which may be empty
@@ -3186,7 +3193,7 @@ pub(crate) fn spawn_with_timeout(
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
         let mut buf = Vec::with_capacity(buf_cap);
-        let _ = stdout.read_to_end(&mut buf);
+        let _ = stdout.take(GENERATOR_MAX_BYTES).read_to_end(&mut buf);
         let _ = tx.send(buf);
     });
     match rx.recv_timeout(Duration::from_millis(GENERATOR_TIMEOUT_MS)) {
@@ -6247,6 +6254,25 @@ region = us-east-1
             );
         }
         fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A generator emitting fast output must not fill the daemon heap:
+    /// the capture stays bounded even when the child writes megabytes.
+    #[test]
+    fn spawn_with_timeout_bounds_fast_output() {
+        use std::process::{Command, Stdio};
+        let child = Command::new("sh")
+            .args(["-c", "head -c 1000000 /dev/zero"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sh is available in test env");
+        let buf = spawn_with_timeout(child, 8192).expect("a fast producer is captured");
+        assert!(
+            buf.len() <= 256 * 1024,
+            "unbounded generator capture: {} bytes",
+            buf.len()
+        );
+        assert!(!buf.is_empty());
     }
 
     #[test]
