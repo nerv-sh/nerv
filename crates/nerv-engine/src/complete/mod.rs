@@ -1455,7 +1455,7 @@ pub fn complete_in(
             crate::spec_parser::find_option_inherited(spec_ref, &result.subcommand_path, opt_name)
         {
             if let Some(arg) = opt.args.get(*arg_idx) {
-                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens);
+                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens, unspecced);
                 return CompleteResult {
                     token_complete: false,
                     unspecced,
@@ -1487,7 +1487,7 @@ pub fn complete_in(
                 && !opt.args.is_empty()
             {
                 let mut items =
-                    emit_candidates_for_arg(&opt.args[0], "", cwd, Some(opt), mode, &tokens);
+                    emit_candidates_for_arg(&opt.args[0], "", cwd, Some(opt), mode, &tokens, unspecced);
                 if !items.is_empty() {
                     // The widget replaces the whole current token (`--profile`)
                     // with `insertion`, so the flag must ride along or it gets
@@ -1532,6 +1532,7 @@ pub fn complete_in(
                 cwd,
                 mode,
                 &tokens,
+                unspecced,
             ));
         }
         // Sort by priority first (script results get priority 75
@@ -1556,6 +1557,7 @@ pub fn complete_in(
                 cwd,
                 mode,
                 &tokens,
+                unspecced,
             ),
             CursorContext::Done => vec![],
         }
@@ -2281,6 +2283,42 @@ fn arg_has_dynamic_source(node: &Subcommand) -> bool {
     })
 }
 
+/// A derived spec carries shape only: argument names with no generator
+/// behind them. When the placeholder names a well-known value class,
+/// borrow the matching native generator so long-tail commands complete
+/// values, not just names. Pure table — the emit site decides when it
+/// applies (derived specs only; authored specs never). Token equality
+/// (not substring): `profile` must not match `file`.
+fn fallback_generator_for_placeholder(
+    name: Option<&str>,
+) -> Option<crate::spec_parser::Generator> {
+    use crate::spec_parser::Generator::*;
+    let lower = name?.to_ascii_lowercase();
+    let has = |w: &str| {
+        lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|t| t == w)
+    };
+    let any = |ws: &[&str]| ws.iter().any(|w| has(w));
+    if any(&["file", "files", "filepath", "filepaths", "filename", "path", "paths"]) {
+        Some(Filepaths { folders_only: false })
+    } else if any(&["dir", "dirs", "directory", "directories", "folder", "folders"]) {
+        Some(Filepaths { folders_only: true })
+    } else if any(&["branch", "branches"]) {
+        Some(Template {
+            script: vec!["git".into(), "branch".into(), "--list".into()],
+        })
+    } else if any(&["remote", "remotes"]) {
+        Some(Template {
+            script: vec!["git".into(), "remote".into()],
+        })
+    } else if any(&["host", "hosts", "hostname"]) {
+        Some(SshHosts)
+    } else {
+        None
+    }
+}
+
 /// `arg_index` is the parser's positional cursor — which slot the
 /// consumed tokens have advanced to. Assuming slot 0 here is what made
 /// `git push origin <Tab>` re-suggest remotes: the branch generator
@@ -2293,11 +2331,12 @@ fn emit_arg_candidates(
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
     tokens: &[Annotation],
+    derived_like: bool,
 ) -> Vec<Suggestion> {
     let Some(arg) = arg_index.and_then(|i| node.args.get(i)) else {
         return vec![];
     };
-    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens)
+    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens, derived_like)
 }
 
 /// Whether [`emit_candidates_for_arg`] lists this argument from disk:
@@ -2344,6 +2383,7 @@ fn emit_candidates_for_arg(
     enclosing_opt: Option<&crate::spec_parser::Opt>,
     mode: MatchMode,
     tokens: &[Annotation],
+    derived_like: bool,
 ) -> Vec<Suggestion> {
     let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
     // Fig parity getQueryTerm: when the arg declares delimiter chars
@@ -2445,8 +2485,17 @@ fn emit_candidates_for_arg(
     // generators on one arg already run concurrently — no explicit
     // prewarm pass needed.
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
-        let n_generators = arg.generators.len() as u32;
-        for (gi, g) in arg.generators.iter().enumerate() {
+        // Derived-shape fallback (idea batch): a generator-less arg on a
+        // derived-like command borrows the matching native generator.
+        // Gated on the statically-filled `out` being empty (never noise
+        // next to real rows) and on `arg.generators` being empty (never
+        // racing a real generator) — plus `derived_like`, computed once
+        // per `complete_in`, so authored specs never take this path.
+        let fallback = (derived_like && arg.generators.is_empty() && out.is_empty())
+            .then(|| fallback_generator_for_placeholder(arg.name.as_deref()))
+            .flatten();
+        let n_generators = arg.generators.len() as u32 + u32::from(fallback.is_some());
+        for (gi, g) in arg.generators.iter().chain(fallback.iter()).enumerate() {
             // Spec order is group order: `git checkout` lists branches, then
             // tags. Each generator gets its own band so its rows can't tie
             // with the next one's and be alpha-interleaved.
@@ -4696,6 +4745,68 @@ region = us-east-1
     // tests (cargo's default runner). Manually verified in the daemon
     // smoke-test path. See PRD v0.6 §0.2 for the contract.
 
+    /// Derived-shape fallback table: placeholder names borrow the
+    /// matching native generator. Token equality, not substring —
+    /// `profile` must not match `file`.
+    #[test]
+    fn fallback_placeholder_table() {
+        use crate::spec_parser::Generator::*;
+        let cases: Vec<(Option<&str>, Option<String>)> = vec![
+            (Some("<file>"), Some("Filepaths(false)".into())),
+            (Some("[DIR]"), Some("Filepaths(true)".into())),
+            (Some("<branch>"), Some("Template(git branch --list)".into())),
+            (Some("remote"), Some("Template(git remote)".into())),
+            (Some("host"), Some("SshHosts".into())),
+            (Some("profile-name"), None),
+            (Some(""), None),
+            (None, None),
+        ];
+        for (name, want) in cases {
+            let got = fallback_generator_for_placeholder(name).map(|g| match g {
+                Filepaths { folders_only } => format!("Filepaths({folders_only})"),
+                Template { script } => format!("Template({})", script.join(" ")),
+                SshHosts => "SshHosts".into(),
+                other => format!("UNEXPECTED({other:?})"),
+            });
+            assert_eq!(got, want, "placeholder {name:?}");
+        }
+    }
+
+    /// End-to-end: a derived-like command (no written spec) completes
+    /// live values for a generator-less `<file>` arg; the same setup
+    /// through the authored path stays empty (bundled/overlay guard).
+    #[test]
+    fn derived_fallback_completes_files_only_when_derived_like() {
+        use std::fs;
+        let tmp =
+            std::env::temp_dir().join(format!("nerv-pin-fallback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("frobnicator.txt"), "").unwrap();
+        fs::write(tmp.join("other.txt"), "").unwrap();
+        let arg = crate::spec_parser::Arg {
+            name: Some("<file>".into()),
+            is_optional: true,
+            ..Default::default()
+        };
+        assert!(arg.generators.is_empty());
+        // Derived-like: fallback fires.
+        let out = emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], true);
+        let got: Vec<_> = out.iter().map(|s| s.insertion.as_str()).collect();
+        assert!(
+            got.iter().any(|s| s.ends_with("frobnicator.txt")),
+            "no file rows for derived-like arg: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|s| s.ends_with("other.txt")),
+            "prefix `f` must filter: {got:?}"
+        );
+        // Authored path: same arg, no fallback rows.
+        let out = emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], false);
+        assert!(out.is_empty(), "authored path must stay empty: {out:?}");
+        fs::remove_dir_all(&tmp).ok();
+    }
+
     #[test]
     fn sanitize_strips_git_current_branch_marker() {
         assert_eq!(sanitize_generator_line("* main"), "main");
@@ -5195,12 +5306,12 @@ region = us-east-1
         let kb: GeneratorCacheKey = (script("conc-gen-b"), None);
         let t0 = Instant::now();
         // First emit spawns both populators concurrently.
-        let _ = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        let _ = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[], false);
         wait_for_generator_cache(&ka, Duration::from_secs(3));
         wait_for_generator_cache(&kb, Duration::from_secs(3));
         let warm_elapsed = t0.elapsed();
         // Both cached now — a second emit collects them.
-        let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[], false);
         assert_eq!(
             out.len(),
             2,
@@ -5219,7 +5330,7 @@ region = us-east-1
     /// Emit `arg` once to start its cold generators, wait for every one to
     /// land in the cache, then emit again and return the displays.
     fn warm_arg_displays(arg: &Arg) -> Vec<String> {
-        let _ = emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[]);
+        let _ = emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[], false);
         for g in &arg.generators {
             if let crate::spec_parser::Generator::Template { script } = g {
                 wait_for_generator_cache(
@@ -5228,7 +5339,7 @@ region = us-east-1
                 );
             }
         }
-        emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[])
+        emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[], false)
             .into_iter()
             .map(|s| s.display)
             .collect()
@@ -7314,7 +7425,7 @@ region = us-east-1
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[]);
+        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[], false);
         // Only "serde" matches "se" prefix.
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].display, "serde");
@@ -7524,7 +7635,7 @@ region = us-east-1
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "foo", None, None, MatchMode::Prefix, &[]);
+        let out = emit_candidates_for_arg(&arg, "foo", None, None, MatchMode::Prefix, &[], false);
         // Both "foobar" and "barfoo" contain "foo".
         let names: Vec<_> = out.iter().map(|s| s.display.as_str()).collect();
         assert!(names.contains(&"foobar"));
