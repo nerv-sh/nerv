@@ -5,7 +5,7 @@
 //! falls back to the default — no hard errors on config so the daemon
 //! always starts cleanly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -82,17 +82,36 @@ impl Config {
     /// e2e tests that need to load a non-default config without
     /// touching the user's real `~/.config`.
     pub fn load_default() -> Self {
-        if let Some(override_path) = std::env::var_os("NERV_CONFIG_FILE") {
-            return Self::load_from_path(Path::new(&override_path));
-        }
-        match crate::paths::config_dir() {
-            Some(dir) => Self::load_from_path(&dir.join("nerv.toml")),
+        match Self::config_file_path() {
+            Some(path) => Self::load_from_path(&path),
             None => Self::default(),
         }
     }
 
+    /// The file [`load_default`](Self::load_default) reads. `None` when
+    /// HOME is unset and no override is set. The daemon watches the
+    /// parent directory for hot-reload.
+    pub fn config_file_path() -> Option<PathBuf> {
+        if let Some(override_path) = std::env::var_os("NERV_CONFIG_FILE") {
+            return Some(PathBuf::from(override_path));
+        }
+        crate::paths::config_dir().map(|dir| dir.join("nerv.toml"))
+    }
+
+    /// Whether `text` parses as a config at all (keys unchecked —
+    /// unknown sections are ignored, not errors). The daemon's
+    /// hot-reload keeps old values on unparsable saves instead of
+    /// falling back to defaults mid-session.
+    pub fn parse_valid(text: &str) -> bool {
+        Self::parse_raw(text).is_ok()
+    }
+
+    fn parse_raw(text: &str) -> Result<RawConfig, toml::de::Error> {
+        toml::from_str(text)
+    }
+
     fn parse(text: &str) -> Self {
-        let raw: RawConfig = match toml::from_str(text) {
+        let raw: RawConfig = match Self::parse_raw(text) {
             Ok(r) => r,
             Err(_) => return Self::default(),
         };

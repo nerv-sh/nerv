@@ -22,6 +22,7 @@ quickjs = ["nerv-engine/quickjs"]
 
 [dependencies]
 tokio = { workspace = true }
+notify.workspace = true
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

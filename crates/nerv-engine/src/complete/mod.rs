@@ -20,7 +20,7 @@ use crate::spec_parser::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Lazy spec set, keyed by binary name.
@@ -66,12 +66,25 @@ const SPEC_CACHE_BYTE_BUDGET: usize = 200 << 20;
 /// 50ms sits below the ~100ms human "instant" threshold.
 const SPEC_LOAD_SYNC_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 
-pub struct SpecRegistry {
-    /// Spec layers, highest priority first. A stem resolves from the first
-    /// layer holding `<stem>.json` / `<stem>.json.gz` — so a user overlay
-    /// (`~/.config/nerv/specs/`) replaces the bundled file of the same name
-    /// wholesale. Empty for in-code registries (`empty()` + `insert`).
+/// The three layer views [`SpecRegistry`] resolves from, kept behind
+/// one lock so a runtime layer swap (nerv.toml `[derived]` hot-reload)
+/// never shows a mixed generation. Built by [`split_layers`].
+#[derive(Default)]
+struct LayerSet {
+    /// All layers, highest priority first (derived last when present).
     dirs: Vec<PathBuf>,
+    /// `dirs` without the derive target: hand-written specs, probed on
+    /// every keystroke by [`SpecRegistry::has_written_spec`].
+    written_dirs: Vec<PathBuf>,
+    /// Where `--help` derivations are written (`None` disables).
+    derive_into: Option<PathBuf>,
+}
+
+pub struct SpecRegistry {
+    /// All layer views (see [`LayerSet`]): one lock so a runtime swap
+    /// never shows a mixed generation. Empty for in-code registries
+    /// (`empty()` + `insert`).
+    layers: std::sync::RwLock<LayerSet>,
     /// Arc-wrapped so a background parse thread (see `lookup`) can insert
     /// its result after the keystroke that spawned it has already
     /// returned. All `.read()`/`.write()` call sites are unchanged — the
@@ -97,10 +110,13 @@ pub struct SpecRegistry {
     /// no layer has one (`crate::derived`). `None` disables derivation
     /// entirely — nothing is ever spawned. Always the last entry of
     /// `dirs` when set, so a derived file is read back like any other.
-    derive_into: Option<PathBuf>,
-    /// `dirs` without `derive_into`: the layers holding hand-written specs,
-    /// probed on every keystroke by [`has_written_spec`](Self::has_written_spec).
-    written_dirs: Vec<PathBuf>,
+    /// Lives in [`LayerSet`]; see `layers`.
+    ///
+    /// The live switch for that target. Checked at each derivation
+    /// decision (not per keystroke) so nerv.toml `[derived]` applies
+    /// from the next decision without a restart. `false` serves old
+    /// derived files but derives nothing new.
+    derive_gate: Arc<AtomicBool>,
     /// The last root spliced with one of its external subtrees, kept so
     /// the splice is not redone on every keystroke of the same command.
     /// One slot: a prompt is one command line at a time.
@@ -110,7 +126,7 @@ pub struct SpecRegistry {
 impl std::fmt::Debug for SpecRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpecRegistry")
-            .field("dirs", &self.dirs)
+            .field("dirs", &self.layer_snapshot().0)
             .field("cache", &self.cache)
             .field("watcher_active", &self._watcher.is_some())
             .finish()
@@ -120,14 +136,13 @@ impl std::fmt::Debug for SpecRegistry {
 impl Default for SpecRegistry {
     fn default() -> Self {
         Self {
-            dirs: Vec::new(),
+            layers: std::sync::RwLock::new(LayerSet::default()),
             cache: Arc::new(RwLock::new(HashMap::new())),
             next_tick: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: None,
             _watcher: None,
-            derive_into: None,
-            written_dirs: Vec::new(),
+            derive_gate: Arc::new(AtomicBool::new(false)),
             spliced: Arc::new(RwLock::new(None)),
         }
     }
@@ -201,22 +216,90 @@ impl SpecRegistry {
         Self::at_dirs_deriving(&layers.dirs(), layers.derived.clone())
     }
 
-    fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
-        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        let watcher = start_spec_watcher(dirs, pending.clone());
-        Self {
-            dirs: dirs.to_vec(),
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            next_tick: Arc::new(AtomicU64::new(0)),
-            inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            pending_invalidations: Some(pending),
-            _watcher: watcher,
+    /// Split `dirs` into the [`LayerSet`] views: everything in order,
+    /// minus the derive target for the hand-written probe set. Shared
+    /// by construction and [`set_derivation`](Self::set_derivation) so
+    /// the order invariant (derived last) holds in both.
+    fn split_layers(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> LayerSet {
+        LayerSet {
             written_dirs: dirs
                 .iter()
                 .filter(|d| Some(*d) != derive_into.as_ref())
                 .cloned()
                 .collect(),
+            dirs: dirs.to_vec(),
             derive_into,
+        }
+    }
+
+    /// Snapshot the layer views. One read lock; a poisoned lock degrades
+    /// to empty layers (fail-closed: no specs), matching the cache's
+    /// poison policy. The vectors are tiny (≤3 entries) — cheaper than
+    /// holding the guard across FS stats.
+    fn layer_snapshot(&self) -> (Vec<PathBuf>, Vec<PathBuf>, Option<PathBuf>) {
+        self.layers
+            .read()
+            .map(|l| {
+                (
+                    l.dirs.clone(),
+                    l.written_dirs.clone(),
+                    l.derive_into.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Just the layer dirs (the common hot-path read): one lock, one
+    /// small clone — not the whole triple. See [`layer_snapshot`](Self::layer_snapshot).
+    fn dirs_cloned(&self) -> Vec<PathBuf> {
+        self.layers
+            .read()
+            .map(|l| l.dirs.clone())
+            .unwrap_or_default()
+    }
+
+    /// Retarget derivation at runtime (nerv.toml `[derived]` hot-reload).
+    /// The old target is dropped wherever it sits and the new one
+    /// appended last, rebuilding the order invariant instead of assuming
+    /// it; the gate flips with the target. Cached entries stay — serving
+    /// previously derived files while off is intended (the gate covers
+    /// the next derivation decision, not old files).
+    pub fn set_derivation(&self, derived: Option<PathBuf>) {
+        let gate = derived.is_some();
+        if let Ok(mut layers) = self.layers.write() {
+            let mut dirs: Vec<PathBuf> = layers
+                .dirs
+                .iter()
+                .filter(|d| Some(*d) != layers.derive_into.as_ref())
+                .cloned()
+                .collect();
+            if let Some(dir) = derived.clone() {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+            *layers = Self::split_layers(&dirs, derived);
+            self.derive_gate.store(gate, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether derivation decisions currently run (the live switch behind
+    /// [`set_derivation`](Self::set_derivation)).
+    pub fn derivation_enabled(&self) -> bool {
+        self.derive_gate.load(Ordering::Relaxed)
+    }
+
+    fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let watcher = start_spec_watcher(dirs, pending.clone());
+        Self {
+            layers: std::sync::RwLock::new(Self::split_layers(dirs, derive_into.clone())),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            next_tick: Arc::new(AtomicU64::new(0)),
+            inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            pending_invalidations: Some(pending),
+            _watcher: watcher,
+            derive_gate: Arc::new(AtomicBool::new(derive_into.is_some())),
             spliced: Arc::new(RwLock::new(None)),
         }
     }
@@ -315,7 +398,12 @@ impl SpecRegistry {
         // `insert`) have nothing to load → miss is `None`; bail before the
         // in-flight claim so we never leave a slot claimed with no populator
         // to release it.
-        if self.dirs.is_empty() {
+        // One snapshot for the whole miss path (checked non-empty
+        // below): a concurrent `set_derivation` swaps whole generations,
+        // never mixes them, and the gate below is read live so the
+        // disable half of a toggle applies even to a spawn already queued.
+        let (dirs, _written, derive_into) = self.layer_snapshot();
+        if dirs.is_empty() {
             return None;
         }
         let claimed = self
@@ -326,13 +414,10 @@ impl SpecRegistry {
         if !claimed {
             return stale;
         }
-        // dirs is non-empty (checked above) and never mutated after
-        // construction; clone only now that we're committed to the parse.
-        let dirs = self.dirs.clone();
         let cache = Arc::clone(&self.cache);
         let next_tick = Arc::clone(&self.next_tick);
         let inflight = Arc::clone(&self.inflight);
-        let derive_into = self.derive_into.clone();
+        let derive_into = derive_into.filter(|_| self.derivation_enabled());
         let release_name = name.to_string();
         let load_name = name.to_string();
         spawn_populator_and_maybe_wait(
@@ -498,7 +583,8 @@ impl SpecRegistry {
     /// stat() the file backing `name` (plain or .gz form) and return
     /// its mtime. `None` if the file doesn't exist or stat fails.
     fn disk_mtime(&self, name: &str) -> Option<std::time::SystemTime> {
-        Self::resolve_spec_file(&self.dirs, name).and_then(|(_, meta)| meta.modified().ok())
+        Self::resolve_spec_file(&self.dirs_cloned(), name)
+            .and_then(|(_, meta)| meta.modified().ok())
     }
 
     /// True when a layer above the derived one — overlay or bundled — has
@@ -508,10 +594,11 @@ impl SpecRegistry {
     /// keystroke past the command word. An in-code registry (no layers)
     /// counts what it holds as written.
     pub fn has_written_spec(&self, name: &str) -> bool {
-        if self.dirs.is_empty() {
+        let (dirs, written, _) = self.layer_snapshot();
+        if dirs.is_empty() {
             return self.cache.read().is_ok_and(|c| c.contains_key(name));
         }
-        Self::resolve_spec_file(&self.written_dirs, name).is_some()
+        Self::resolve_spec_file(&written, name).is_some()
     }
 
     /// First on-disk file backing `name` across the layers, with the stat
@@ -677,8 +764,8 @@ impl SpecRegistry {
     /// The spec layers this registry reads, highest priority first.
     /// Callers that cache a derived view of the layer contents (the
     /// daemon's command-name list) stat these to know when to rebuild.
-    pub fn layer_dirs(&self) -> &[PathBuf] {
-        &self.dirs
+    pub fn layer_dirs(&self) -> Vec<PathBuf> {
+        self.dirs_cloned()
     }
 
     /// Command names currently in the in-memory positive cache. Does not
@@ -706,7 +793,7 @@ impl SpecRegistry {
     /// so the table reflects what's installed even before any lookup;
     /// which layer actually serves a stem is `stems_served_from`.
     pub fn dir_listing(&self) -> Vec<String> {
-        if self.dirs.is_empty() {
+        if self.dirs_cloned().is_empty() {
             return self.cached_names();
         }
         self.listing_by_origin().into_keys().collect()
@@ -719,7 +806,7 @@ impl SpecRegistry {
     pub fn stems_served_from(&self, layer: &Path) -> Vec<String> {
         self.listing_by_origin()
             .into_iter()
-            .filter(|(_, origin)| *origin == layer)
+            .filter(|(_, origin)| origin == layer)
             .map(|(stem, _)| stem)
             .collect()
     }
@@ -729,19 +816,21 @@ impl SpecRegistry {
     /// from this single map rather than scanning per layer.
     pub fn stems_by_origin(&self) -> std::collections::BTreeMap<String, PathBuf> {
         self.listing_by_origin()
-            .into_iter()
-            .map(|(stem, origin)| (stem, origin.to_path_buf()))
-            .collect()
     }
 
     /// One `read_dir` pass per layer, in priority order: stem → the layer
     /// that serves it (first layer listing the stem wins, matching the
     /// probe order of `resolve_spec_file`). Sorted by stem.
-    fn listing_by_origin(&self) -> std::collections::BTreeMap<String, &Path> {
+    fn listing_by_origin(&self) -> std::collections::BTreeMap<String, PathBuf> {
         let mut origin = std::collections::BTreeMap::new();
-        for dir in &self.dirs {
+        // Borrowed from the lock: the listing holds owned paths, so the
+        // generation is pinned for the walk. A concurrent swap waits.
+        let Ok(layers) = self.layers.read() else {
+            return origin;
+        };
+        for dir in &layers.dirs {
             for (_, stem) in spec_files(std::slice::from_ref(dir)) {
-                origin.entry(stem).or_insert(dir.as_path());
+                origin.entry(stem).or_insert_with(|| dir.clone());
             }
         }
         origin
@@ -1099,22 +1188,42 @@ pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggesti
 /// source is empty, so for that one window a real binary one edit from
 /// a stem (`pnpm` against `npm`) can draw a correction it would not
 /// draw a moment later.
+/// Best damerau match within `budget` over `candidates` (first wins
+/// ties). Shared by command-word and subcommand correction so the two
+/// typo-selection loops cannot drift apart.
+fn best_within_budget<'a>(
+    input: &[char],
+    budget: usize,
+    candidates: impl Iterator<Item = &'a str>,
+) -> Option<(usize, &'a str)> {
+    let mut best: Option<(usize, &'a str)> = None;
+    for name in candidates {
+        let Some(distance) = damerau_levenshtein_within(input, name, budget) else {
+            continue;
+        };
+        if best.is_none_or(|(b, _)| distance < b) {
+            best = Some((distance, name));
+        }
+    }
+    best
+}
+
 pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str> {
     if names.path_pending {
         return None;
     }
     let input: Vec<char> = input.chars().collect();
     let budget = typo_distance_budget(input.len())?;
-    let mut best: Option<(usize, &str)> = None;
-    for name in names.frecent.iter().chain(names.stems.iter()) {
-        let Some(distance) = damerau_levenshtein_within(&input, name, budget) else {
-            continue;
-        };
-        if best.is_none_or(|(b, _)| distance < b) {
-            best = Some((distance, name.as_str()));
-        }
-    }
-    best.map(|(_, name)| name)
+    best_within_budget(
+        &input,
+        budget,
+        names
+            .frecent
+            .iter()
+            .chain(names.stems.iter())
+            .map(|s| s.as_str()),
+    )
+    .map(|(_, name)| name)
 }
 
 /// How many edits may separate a typo from the name it meant. The
@@ -1207,6 +1316,88 @@ fn command_word_correction(
     Some(Suggestion {
         replace: Some(span()),
         ..command_name_suggestion(name, "did you mean")
+    })
+}
+
+/// One correction row for a mistyped subcommand or option token that
+/// matched nothing (`git chekout` → `checkout`). Empty results only —
+/// a prefix hit never draws a row (the existing philosophy: recall
+/// beats guessing). The span covers the mistyped token so accepting
+/// swaps it in place. Shaped like [`command_word_correction`].
+fn subcommand_correction(
+    node: &Subcommand,
+    context: &CursorContext,
+    prefix: &str,
+    full_line: &str,
+    base: usize,
+    cursor: usize,
+    tokens: &[Annotation],
+) -> Option<Suggestion> {
+    if prefix.is_empty() || prefix.contains('/') {
+        return None;
+    }
+    // Arg values and exhausted positions are open-ended: nothing sane
+    // to correct against (static enums aside — out of scope).
+    if !matches!(
+        context,
+        CursorContext::Subcommand | CursorContext::OptionName
+    ) {
+        return None;
+    }
+    // The token decides the pool, not the node: a `--…` token corrects
+    // against option names even when the node also has subcommands
+    // (which is why the context alone would look in the wrong place).
+    let dashed = prefix.starts_with('-');
+    let mut candidates: Vec<(&str, SuggestionKind)> = vec![];
+    if dashed {
+        for o in &node.options {
+            candidates.extend(o.names.iter().map(|n| (n.as_str(), SuggestionKind::Flag)));
+        }
+    } else {
+        for s in &node.subcommands {
+            candidates.push((s.name.as_str(), SuggestionKind::Subcommand));
+            candidates.extend(
+                s.aliases
+                    .iter()
+                    .map(|a| (a.as_str(), SuggestionKind::Subcommand)),
+            );
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let budget = typo_distance_budget(prefix.chars().count())?;
+    let input: Vec<char> = prefix.chars().collect();
+    let (_, name) = best_within_budget(&input, budget, candidates.iter().map(|(n, _)| *n))?;
+    // An exact token (case-insensitively, like the no-op drop) is
+    // complete, not a typo — never correct to itself or its case
+    // variant.
+    if name.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let kind = candidates
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, k)| *k)
+        .unwrap_or(SuggestionKind::Subcommand);
+    // Byte span of the token under the cursor for in-place replacement.
+    // Token spans are segment-relative, like the command-word path:
+    // add both offsets or compound lines (`a && git chekout`) replace
+    // the wrong range.
+    let tok = tokens.iter().rev().find(|t| t.span.end == cursor)?;
+    let start = base + tok.span.start;
+    Some(Suggestion {
+        insertion: name.to_string(),
+        display: name.to_string(),
+        description: Some("did you mean".into()),
+        kind,
+        priority: None,
+        icon: None,
+        source_ranked: true,
+        replace: Some(char_span(
+            full_line,
+            start..start + (tok.span.end - tok.span.start),
+        )),
     })
 }
 
@@ -1455,7 +1646,8 @@ pub fn complete_in(
             crate::spec_parser::find_option_inherited(spec_ref, &result.subcommand_path, opt_name)
         {
             if let Some(arg) = opt.args.get(*arg_idx) {
-                let items = emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens);
+                let items =
+                    emit_candidates_for_arg(arg, &prefix, cwd, Some(opt), mode, &tokens, unspecced);
                 return CompleteResult {
                     token_complete: false,
                     unspecced,
@@ -1486,8 +1678,15 @@ pub fn complete_in(
                 && !opt.requires_separator
                 && !opt.args.is_empty()
             {
-                let mut items =
-                    emit_candidates_for_arg(&opt.args[0], "", cwd, Some(opt), mode, &tokens);
+                let mut items = emit_candidates_for_arg(
+                    &opt.args[0],
+                    "",
+                    cwd,
+                    Some(opt),
+                    mode,
+                    &tokens,
+                    unspecced,
+                );
                 if !items.is_empty() {
                     // The widget replaces the whole current token (`--profile`)
                     // with `insertion`, so the flag must ride along or it gets
@@ -1532,6 +1731,7 @@ pub fn complete_in(
                 cwd,
                 mode,
                 &tokens,
+                unspecced,
             ));
         }
         // Sort by priority first (script results get priority 75
@@ -1556,6 +1756,7 @@ pub fn complete_in(
                 cwd,
                 mode,
                 &tokens,
+                unspecced,
             ),
             CursorContext::Done => vec![],
         }
@@ -1568,6 +1769,23 @@ pub fn complete_in(
     // matches (`status-v2`) remain. Empty prefix means the user is
     // browsing a fresh token (`git `), so keep everything.
     let (items, token_complete) = settle_typed_token(items, &prefix, mode);
+    // Empty subcommand/option slot with a mistyped token: one
+    // correction row, never alongside real rows (idea batch).
+    let items = if items.is_empty() {
+        subcommand_correction(
+            current,
+            &result.cursor_context,
+            &prefix,
+            full_line,
+            seg_start + wrap_start,
+            cursor,
+            &tokens,
+        )
+        .into_iter()
+        .collect()
+    } else {
+        items
+    };
     // Only a plain positional slot: next to subcommands or option names
     // a history word is as likely one of those.
     let path_arg = !prefix_is_option
@@ -2281,6 +2499,45 @@ fn arg_has_dynamic_source(node: &Subcommand) -> bool {
     })
 }
 
+/// A derived spec carries shape only: argument names with no generator
+/// behind them. When the placeholder names a well-known value class,
+/// borrow the matching native generator so long-tail commands complete
+/// values, not just names. Pure table — the emit site decides when it
+/// applies (derived specs only; authored specs never). Token equality
+/// (not substring): `profile` must not match `file`.
+fn fallback_generator_for_placeholder(name: Option<&str>) -> Option<crate::spec_parser::Generator> {
+    use crate::spec_parser::Generator::*;
+    // File/dir classes reuse the path-argument classifier (single
+    // table, no drift): bracketed placeholders stripped first, since
+    // `<file>` is not a bare word.
+    let stripped = name?
+        .trim()
+        .trim_matches(['<', '>', '(', ')', '[', ']', '{', '}']);
+    if let Some(folders_only) = infer_filepaths_kind(Some(stripped)) {
+        return Some(Filepaths { folders_only });
+    }
+    let lower = stripped.to_ascii_lowercase();
+    let has = |w: &str| {
+        lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|t| t == w)
+    };
+    let any = |ws: &[&str]| ws.iter().any(|w| has(w));
+    if any(&["branch", "branches"]) {
+        Some(Template {
+            script: vec!["git".into(), "branch".into(), "--list".into()],
+        })
+    } else if any(&["remote", "remotes"]) {
+        Some(Template {
+            script: vec!["git".into(), "remote".into()],
+        })
+    } else if any(&["host", "hosts", "hostname"]) {
+        Some(SshHosts)
+    } else {
+        None
+    }
+}
+
 /// `arg_index` is the parser's positional cursor — which slot the
 /// consumed tokens have advanced to. Assuming slot 0 here is what made
 /// `git push origin <Tab>` re-suggest remotes: the branch generator
@@ -2293,11 +2550,12 @@ fn emit_arg_candidates(
     cwd: Option<&std::path::Path>,
     mode: MatchMode,
     tokens: &[Annotation],
+    unspecced: bool,
 ) -> Vec<Suggestion> {
     let Some(arg) = arg_index.and_then(|i| node.args.get(i)) else {
         return vec![];
     };
-    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens)
+    emit_candidates_for_arg(arg, prefix, cwd, None, mode, tokens, unspecced)
 }
 
 /// Whether [`emit_candidates_for_arg`] lists this argument from disk:
@@ -2344,6 +2602,7 @@ fn emit_candidates_for_arg(
     enclosing_opt: Option<&crate::spec_parser::Opt>,
     mode: MatchMode,
     tokens: &[Annotation],
+    unspecced: bool,
 ) -> Vec<Suggestion> {
     let enclosing_description = enclosing_opt.and_then(|o| o.description.as_deref());
     // Fig parity getQueryTerm: when the arg declares delimiter chars
@@ -2445,8 +2704,17 @@ fn emit_candidates_for_arg(
     // generators on one arg already run concurrently — no explicit
     // prewarm pass needed.
     if std::env::var_os("NERV_NO_GENERATORS").is_none() {
-        let n_generators = arg.generators.len() as u32;
-        for (gi, g) in arg.generators.iter().enumerate() {
+        // Derived-shape fallback (idea batch): a generator-less arg on a
+        // derived-like command borrows the matching native generator.
+        // Gated on the statically-filled `out` being empty (never noise
+        // next to real rows) and on `arg.generators` being empty (never
+        // racing a real generator) — plus `unspecced`, computed once
+        // per `complete_in`, so authored specs never take this path.
+        let fallback = (unspecced && arg.generators.is_empty() && out.is_empty())
+            .then(|| fallback_generator_for_placeholder(arg.name.as_deref()))
+            .flatten();
+        let n_generators = arg.generators.len() as u32 + u32::from(fallback.is_some());
+        for (gi, g) in arg.generators.iter().chain(fallback.iter()).enumerate() {
             // Spec order is group order: `git checkout` lists branches, then
             // tags. Each generator gets its own band so its rows can't tie
             // with the next one's and be alpha-interleaved.
@@ -4696,6 +4964,152 @@ region = us-east-1
     // tests (cargo's default runner). Manually verified in the daemon
     // smoke-test path. See PRD v0.6 §0.2 for the contract.
 
+    /// Derived-shape fallback table: placeholder names borrow the
+    /// matching native generator. Token equality, not substring —
+    /// `profile` must not match `file`.
+    #[test]
+    fn fallback_placeholder_table() {
+        use crate::spec_parser::Generator::*;
+        let cases: Vec<(Option<&str>, Option<String>)> = vec![
+            (Some("<file>"), Some("Filepaths(false)".into())),
+            (Some("[DIR]"), Some("Filepaths(true)".into())),
+            (Some("<branch>"), Some("Template(git branch --list)".into())),
+            (Some("remote"), Some("Template(git remote)".into())),
+            (Some("host"), Some("SshHosts".into())),
+            (Some("profile-name"), None),
+            (Some(""), None),
+            (None, None),
+        ];
+        for (name, want) in cases {
+            let got = fallback_generator_for_placeholder(name).map(|g| match g {
+                Filepaths { folders_only } => format!("Filepaths({folders_only})"),
+                Template { script } => format!("Template({})", script.join(" ")),
+                SshHosts => "SshHosts".into(),
+                other => format!("UNEXPECTED({other:?})"),
+            });
+            assert_eq!(got, want, "placeholder {name:?}");
+        }
+    }
+
+    /// End-to-end: a derived-like command (no written spec) completes
+    /// live values for a generator-less `<file>` arg; the same setup
+    /// through the authored path stays empty (bundled/overlay guard).
+    #[test]
+    fn derived_fallback_completes_files_only_when_derived_like() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-fallback-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("frobnicator.txt"), "").unwrap();
+        fs::write(tmp.join("other.txt"), "").unwrap();
+        let arg = crate::spec_parser::Arg {
+            name: Some("<file>".into()),
+            is_optional: true,
+            ..Default::default()
+        };
+        assert!(arg.generators.is_empty());
+        // Derived-like: fallback fires.
+        let out =
+            emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], true);
+        let got: Vec<_> = out.iter().map(|s| s.insertion.as_str()).collect();
+        assert!(
+            got.iter().any(|s| s.ends_with("frobnicator.txt")),
+            "no file rows for derived-like arg: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|s| s.ends_with("other.txt")),
+            "prefix `f` must filter: {got:?}"
+        );
+        // Authored path: same arg, no fallback rows.
+        let out =
+            emit_candidates_for_arg(&arg, "f", Some(&tmp), None, MatchMode::Prefix, &[], false);
+        assert!(out.is_empty(), "authored path must stay empty: {out:?}");
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// Empty subcommand slot with a typo offers the one fix
+    /// (`git chekout` → `checkout`); a prefix hit never draws a
+    /// correction row; an exact token never corrects to itself.
+    #[test]
+    fn subcommand_correction_on_empty_only() {
+        let git = Subcommand {
+            name: "git".into(),
+            subcommands: vec![
+                Subcommand {
+                    name: "checkout".into(),
+                    ..Default::default()
+                },
+                Subcommand {
+                    name: "status".into(),
+                    ..Default::default()
+                },
+            ],
+            options: vec![crate::spec_parser::Opt {
+                names: vec!["--message".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = SpecRegistry::empty();
+        r.insert(git);
+        let line = "git chekout";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert_eq!(out.items.len(), 1, "{:?}", out.items);
+        let row = &out.items[0];
+        assert_eq!(row.insertion, "checkout");
+        assert_eq!(row.description.as_deref(), Some("did you mean"));
+        assert_eq!(
+            row.replace,
+            Some(ReplaceSpan { start: 4, end: 11 }),
+            "acceptance must swap the mistyped token in place"
+        );
+        // Prefix hit: real rows, no correction row.
+        let line = "git chec";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert!(out.items.iter().any(|s| s.insertion == "checkout"));
+        assert!(
+            out.items
+                .iter()
+                .all(|s| s.description.as_deref() != Some("did you mean")),
+            "prefix hits must not draw correction rows: {:?}",
+            out.items
+        );
+        // Exact token: complete, not a typo — stays empty.
+        let line = "git status";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert!(
+            out.items
+                .iter()
+                .all(|s| s.description.as_deref() != Some("did you mean")),
+            "exact token must not correct to itself: {:?}",
+            out.items
+        );
+        // Option slot typo.
+        let line = "git --mesage";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        assert!(
+            out.items.iter().any(|s| s.insertion == "--message"),
+            "option typo should correct: {:?}",
+            out.items
+        );
+        // Compound line: the replace span is segment-relative, so the
+        // offsets must be added or acceptance clobbers the wrong range.
+        let line = "echo hi; git chekout";
+        let out = complete_in(line, line.len(), &r, None, MatchMode::Prefix, None);
+        let rows: Vec<_> = out
+            .items
+            .iter()
+            .filter(|s| s.description.as_deref() == Some("did you mean"))
+            .collect();
+        assert_eq!(rows.len(), 1, "{:?}", out.items);
+        assert_eq!(rows[0].insertion, "checkout");
+        assert_eq!(
+            rows[0].replace,
+            Some(ReplaceSpan { start: 13, end: 20 }),
+            "span must cover the token in the second segment"
+        );
+    }
+
     #[test]
     fn sanitize_strips_git_current_branch_marker() {
         assert_eq!(sanitize_generator_line("* main"), "main");
@@ -5195,12 +5609,12 @@ region = us-east-1
         let kb: GeneratorCacheKey = (script("conc-gen-b"), None);
         let t0 = Instant::now();
         // First emit spawns both populators concurrently.
-        let _ = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        let _ = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[], false);
         wait_for_generator_cache(&ka, Duration::from_secs(3));
         wait_for_generator_cache(&kb, Duration::from_secs(3));
         let warm_elapsed = t0.elapsed();
         // Both cached now — a second emit collects them.
-        let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[]);
+        let out = emit_candidates_for_arg(&arg, "", None, None, MatchMode::Prefix, &[], false);
         assert_eq!(
             out.len(),
             2,
@@ -5219,7 +5633,7 @@ region = us-east-1
     /// Emit `arg` once to start its cold generators, wait for every one to
     /// land in the cache, then emit again and return the displays.
     fn warm_arg_displays(arg: &Arg) -> Vec<String> {
-        let _ = emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[]);
+        let _ = emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[], false);
         for g in &arg.generators {
             if let crate::spec_parser::Generator::Template { script } = g {
                 wait_for_generator_cache(
@@ -5228,7 +5642,7 @@ region = us-east-1
                 );
             }
         }
-        emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[])
+        emit_candidates_for_arg(arg, "", None, None, MatchMode::Prefix, &[], false)
             .into_iter()
             .map(|s| s.display)
             .collect()
@@ -5735,6 +6149,27 @@ region = us-east-1
         );
         assert!(!buf.is_empty());
     }
+    /// `set_derivation` swaps the write target and flips the gate as
+    /// one generation: enabling appends the target last, re-enabling
+    /// never duplicates, disabling strips it back out. Pure path ops —
+    /// no FS touch.
+    #[test]
+    fn set_derivation_swaps_target_and_gate() {
+        let a = std::path::PathBuf::from("/tmp/nerv-pin-layers-a");
+        let b = std::path::PathBuf::from("/tmp/nerv-pin-layers-b");
+        let r = SpecRegistry::at_dirs(std::slice::from_ref(&a));
+        assert!(!r.derivation_enabled());
+        assert_eq!(r.layer_dirs(), vec![a.clone()]);
+        r.set_derivation(Some(b.clone()));
+        assert!(r.derivation_enabled());
+        assert_eq!(r.layer_dirs(), vec![a.clone(), b.clone()]);
+        r.set_derivation(Some(b.clone()));
+        assert_eq!(r.layer_dirs(), vec![a.clone(), b.clone()]);
+        r.set_derivation(None);
+        assert!(!r.derivation_enabled());
+        assert_eq!(r.layer_dirs(), vec![a.clone()]);
+    }
+
     #[test]
     fn an_external_name_cannot_escape_the_spec_dir() {
         use std::fs;
@@ -7314,7 +7749,8 @@ region = us-east-1
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[]);
+        let out =
+            emit_candidates_for_arg(&arg, "tokio,se", None, None, MatchMode::Prefix, &[], false);
         // Only "serde" matches "se" prefix.
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].display, "serde");
@@ -7524,7 +7960,7 @@ region = us-east-1
             ],
             ..Default::default()
         };
-        let out = emit_candidates_for_arg(&arg, "foo", None, None, MatchMode::Prefix, &[]);
+        let out = emit_candidates_for_arg(&arg, "foo", None, None, MatchMode::Prefix, &[], false);
         // Both "foobar" and "barfoo" contain "foo".
         let names: Vec<_> = out.iter().map(|s| s.display.as_str()).collect();
         assert!(names.contains(&"foobar"));

@@ -1677,6 +1677,7 @@ dependencies = [
  "anyhow",
  "libc",
  "nerv-engine",
+ "notify",
  "serde_json",
  "tempfile",
  "tokio",
