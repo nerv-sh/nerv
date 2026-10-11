@@ -20,7 +20,7 @@ use crate::spec_parser::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Lazy spec set, keyed by binary name.
@@ -66,12 +66,25 @@ const SPEC_CACHE_BYTE_BUDGET: usize = 200 << 20;
 /// 50ms sits below the ~100ms human "instant" threshold.
 const SPEC_LOAD_SYNC_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 
-pub struct SpecRegistry {
-    /// Spec layers, highest priority first. A stem resolves from the first
-    /// layer holding `<stem>.json` / `<stem>.json.gz` — so a user overlay
-    /// (`~/.config/nerv/specs/`) replaces the bundled file of the same name
-    /// wholesale. Empty for in-code registries (`empty()` + `insert`).
+/// The three layer views [`SpecRegistry`] resolves from, kept behind
+/// one lock so a runtime layer swap (nerv.toml `[derived]` hot-reload)
+/// never shows a mixed generation. Built by [`split_layers`].
+#[derive(Default)]
+struct LayerSet {
+    /// All layers, highest priority first (derived last when present).
     dirs: Vec<PathBuf>,
+    /// `dirs` without the derive target: hand-written specs, probed on
+    /// every keystroke by [`SpecRegistry::has_written_spec`].
+    written_dirs: Vec<PathBuf>,
+    /// Where `--help` derivations are written (`None` disables).
+    derive_into: Option<PathBuf>,
+}
+
+pub struct SpecRegistry {
+    /// All layer views (see [`LayerSet`]): one lock so a runtime swap
+    /// never shows a mixed generation. Empty for in-code registries
+    /// (`empty()` + `insert`).
+    layers: std::sync::RwLock<LayerSet>,
     /// Arc-wrapped so a background parse thread (see `lookup`) can insert
     /// its result after the keystroke that spawned it has already
     /// returned. All `.read()`/`.write()` call sites are unchanged — the
@@ -97,10 +110,13 @@ pub struct SpecRegistry {
     /// no layer has one (`crate::derived`). `None` disables derivation
     /// entirely — nothing is ever spawned. Always the last entry of
     /// `dirs` when set, so a derived file is read back like any other.
-    derive_into: Option<PathBuf>,
-    /// `dirs` without `derive_into`: the layers holding hand-written specs,
-    /// probed on every keystroke by [`has_written_spec`](Self::has_written_spec).
-    written_dirs: Vec<PathBuf>,
+    /// Lives in [`LayerSet`]; see `layers`.
+    ///
+    /// The live switch for that target. Checked at each derivation
+    /// decision (not per keystroke) so nerv.toml `[derived]` applies
+    /// from the next decision without a restart. `false` serves old
+    /// derived files but derives nothing new.
+    derive_gate: Arc<AtomicBool>,
     /// The last root spliced with one of its external subtrees, kept so
     /// the splice is not redone on every keystroke of the same command.
     /// One slot: a prompt is one command line at a time.
@@ -110,7 +126,7 @@ pub struct SpecRegistry {
 impl std::fmt::Debug for SpecRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SpecRegistry")
-            .field("dirs", &self.dirs)
+            .field("dirs", &self.layer_snapshot().0)
             .field("cache", &self.cache)
             .field("watcher_active", &self._watcher.is_some())
             .finish()
@@ -120,14 +136,13 @@ impl std::fmt::Debug for SpecRegistry {
 impl Default for SpecRegistry {
     fn default() -> Self {
         Self {
-            dirs: Vec::new(),
+            layers: std::sync::RwLock::new(LayerSet::default()),
             cache: Arc::new(RwLock::new(HashMap::new())),
             next_tick: Arc::new(AtomicU64::new(0)),
             inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             pending_invalidations: None,
             _watcher: None,
-            derive_into: None,
-            written_dirs: Vec::new(),
+            derive_gate: Arc::new(AtomicBool::new(false)),
             spliced: Arc::new(RwLock::new(None)),
         }
     }
@@ -201,22 +216,75 @@ impl SpecRegistry {
         Self::at_dirs_deriving(&layers.dirs(), layers.derived.clone())
     }
 
-    fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
-        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
-        let watcher = start_spec_watcher(dirs, pending.clone());
-        Self {
-            dirs: dirs.to_vec(),
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            next_tick: Arc::new(AtomicU64::new(0)),
-            inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
-            pending_invalidations: Some(pending),
-            _watcher: watcher,
+    /// Split `dirs` into the [`LayerSet`] views: everything in order,
+    /// minus the derive target for the hand-written probe set. Shared
+    /// by construction and [`set_derivation`](Self::set_derivation) so
+    /// the order invariant (derived last) holds in both.
+    fn split_layers(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> LayerSet {
+        LayerSet {
             written_dirs: dirs
                 .iter()
                 .filter(|d| Some(*d) != derive_into.as_ref())
                 .cloned()
                 .collect(),
+            dirs: dirs.to_vec(),
             derive_into,
+        }
+    }
+
+    /// Snapshot the layer views. One read lock; a poisoned lock degrades
+    /// to empty layers (fail-closed: no specs), matching the cache's
+    /// poison policy. The vectors are tiny (≤3 entries) — cheaper than
+    /// holding the guard across FS stats.
+    fn layer_snapshot(&self) -> (Vec<PathBuf>, Vec<PathBuf>, Option<PathBuf>) {
+        self.layers
+            .read()
+            .map(|l| (l.dirs.clone(), l.written_dirs.clone(), l.derive_into.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Retarget derivation at runtime (nerv.toml `[derived]` hot-reload).
+    /// The old target is dropped wherever it sits and the new one
+    /// appended last, rebuilding the order invariant instead of assuming
+    /// it; the gate flips with the target. Cached entries stay — serving
+    /// previously derived files while off is intended (the gate covers
+    /// the next derivation decision, not old files).
+    pub fn set_derivation(&self, derived: Option<PathBuf>) {
+        let gate = derived.is_some();
+        if let Ok(mut layers) = self.layers.write() {
+            let mut dirs: Vec<PathBuf> = layers
+                .dirs
+                .iter()
+                .filter(|d| Some(*d) != layers.derive_into.as_ref())
+                .cloned()
+                .collect();
+            if let Some(dir) = derived.clone() {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+            *layers = Self::split_layers(&dirs, derived);
+            self.derive_gate.store(gate, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether derivation decisions currently run (the live switch behind
+    /// [`set_derivation`](Self::set_derivation)).
+    pub fn derivation_enabled(&self) -> bool {
+        self.derive_gate.load(Ordering::Relaxed)
+    }
+
+    fn at_dirs_deriving(dirs: &[PathBuf], derive_into: Option<PathBuf>) -> Self {
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let watcher = start_spec_watcher(dirs, pending.clone());
+        Self {
+            layers: std::sync::RwLock::new(Self::split_layers(dirs, derive_into.clone())),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            next_tick: Arc::new(AtomicU64::new(0)),
+            inflight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            pending_invalidations: Some(pending),
+            _watcher: watcher,
+            derive_gate: Arc::new(AtomicBool::new(derive_into.is_some())),
             spliced: Arc::new(RwLock::new(None)),
         }
     }
@@ -315,7 +383,7 @@ impl SpecRegistry {
         // `insert`) have nothing to load → miss is `None`; bail before the
         // in-flight claim so we never leave a slot claimed with no populator
         // to release it.
-        if self.dirs.is_empty() {
+        if self.layer_snapshot().0.is_empty() {
             return None;
         }
         let claimed = self
@@ -326,13 +394,16 @@ impl SpecRegistry {
         if !claimed {
             return stale;
         }
-        // dirs is non-empty (checked above) and never mutated after
-        // construction; clone only now that we're committed to the parse.
-        let dirs = self.dirs.clone();
+        // dirs is non-empty (checked above); clone only now that we're
+        // committed to the parse. The snapshot is one generation: a
+        // concurrent `set_derivation` swaps whole generations, never
+        // mixes them, and the gate below is read live so the disable
+        // half of a toggle applies even to a spawn already queued.
+        let (dirs, _written, derive_into) = self.layer_snapshot();
         let cache = Arc::clone(&self.cache);
         let next_tick = Arc::clone(&self.next_tick);
         let inflight = Arc::clone(&self.inflight);
-        let derive_into = self.derive_into.clone();
+        let derive_into = derive_into.filter(|_| self.derivation_enabled());
         let release_name = name.to_string();
         let load_name = name.to_string();
         spawn_populator_and_maybe_wait(
@@ -498,7 +569,8 @@ impl SpecRegistry {
     /// stat() the file backing `name` (plain or .gz form) and return
     /// its mtime. `None` if the file doesn't exist or stat fails.
     fn disk_mtime(&self, name: &str) -> Option<std::time::SystemTime> {
-        Self::resolve_spec_file(&self.dirs, name).and_then(|(_, meta)| meta.modified().ok())
+        Self::resolve_spec_file(&self.layer_snapshot().0, name)
+            .and_then(|(_, meta)| meta.modified().ok())
     }
 
     /// True when a layer above the derived one — overlay or bundled — has
@@ -508,10 +580,11 @@ impl SpecRegistry {
     /// keystroke past the command word. An in-code registry (no layers)
     /// counts what it holds as written.
     pub fn has_written_spec(&self, name: &str) -> bool {
-        if self.dirs.is_empty() {
+        let (dirs, written, _) = self.layer_snapshot();
+        if dirs.is_empty() {
             return self.cache.read().is_ok_and(|c| c.contains_key(name));
         }
-        Self::resolve_spec_file(&self.written_dirs, name).is_some()
+        Self::resolve_spec_file(&written, name).is_some()
     }
 
     /// First on-disk file backing `name` across the layers, with the stat
@@ -677,8 +750,8 @@ impl SpecRegistry {
     /// The spec layers this registry reads, highest priority first.
     /// Callers that cache a derived view of the layer contents (the
     /// daemon's command-name list) stat these to know when to rebuild.
-    pub fn layer_dirs(&self) -> &[PathBuf] {
-        &self.dirs
+    pub fn layer_dirs(&self) -> Vec<PathBuf> {
+        self.layer_snapshot().0
     }
 
     /// Command names currently in the in-memory positive cache. Does not
@@ -706,7 +779,7 @@ impl SpecRegistry {
     /// so the table reflects what's installed even before any lookup;
     /// which layer actually serves a stem is `stems_served_from`.
     pub fn dir_listing(&self) -> Vec<String> {
-        if self.dirs.is_empty() {
+        if self.layer_snapshot().0.is_empty() {
             return self.cached_names();
         }
         self.listing_by_origin().into_keys().collect()
@@ -719,7 +792,7 @@ impl SpecRegistry {
     pub fn stems_served_from(&self, layer: &Path) -> Vec<String> {
         self.listing_by_origin()
             .into_iter()
-            .filter(|(_, origin)| *origin == layer)
+            .filter(|(_, origin)| origin == layer)
             .map(|(stem, _)| stem)
             .collect()
     }
@@ -729,19 +802,21 @@ impl SpecRegistry {
     /// from this single map rather than scanning per layer.
     pub fn stems_by_origin(&self) -> std::collections::BTreeMap<String, PathBuf> {
         self.listing_by_origin()
-            .into_iter()
-            .map(|(stem, origin)| (stem, origin.to_path_buf()))
-            .collect()
     }
 
     /// One `read_dir` pass per layer, in priority order: stem → the layer
     /// that serves it (first layer listing the stem wins, matching the
     /// probe order of `resolve_spec_file`). Sorted by stem.
-    fn listing_by_origin(&self) -> std::collections::BTreeMap<String, &Path> {
+    fn listing_by_origin(&self) -> std::collections::BTreeMap<String, PathBuf> {
         let mut origin = std::collections::BTreeMap::new();
-        for dir in &self.dirs {
+        // Borrowed from the lock: the listing holds owned paths, so the
+        // generation is pinned for the walk. A concurrent swap waits.
+        let Ok(layers) = self.layers.read() else {
+            return origin;
+        };
+        for dir in &layers.dirs {
             for (_, stem) in spec_files(std::slice::from_ref(dir)) {
-                origin.entry(stem).or_insert(dir.as_path());
+                origin.entry(stem).or_insert_with(|| dir.clone());
             }
         }
         origin
@@ -5846,6 +5921,27 @@ region = us-east-1
         );
         assert!(!buf.is_empty());
     }
+    /// `set_derivation` swaps the write target and flips the gate as
+    /// one generation: enabling appends the target last, re-enabling
+    /// never duplicates, disabling strips it back out. Pure path ops —
+    /// no FS touch.
+    #[test]
+    fn set_derivation_swaps_target_and_gate() {
+        let a = std::path::PathBuf::from("/tmp/nerv-pin-layers-a");
+        let b = std::path::PathBuf::from("/tmp/nerv-pin-layers-b");
+        let r = SpecRegistry::at_dirs(std::slice::from_ref(&a));
+        assert!(!r.derivation_enabled());
+        assert_eq!(r.layer_dirs(), vec![a.clone()]);
+        r.set_derivation(Some(b.clone()));
+        assert!(r.derivation_enabled());
+        assert_eq!(r.layer_dirs(), vec![a.clone(), b.clone()]);
+        r.set_derivation(Some(b.clone()));
+        assert_eq!(r.layer_dirs(), vec![a.clone(), b.clone()]);
+        r.set_derivation(None);
+        assert!(!r.derivation_enabled());
+        assert_eq!(r.layer_dirs(), vec![a.clone()]);
+    }
+
     #[test]
     fn an_external_name_cannot_escape_the_spec_dir() {
         use std::fs;

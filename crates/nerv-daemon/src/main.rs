@@ -43,8 +43,10 @@ async fn main() -> anyhow::Result<()> {
     // user overlay `~/.config/nerv/specs/` (if the dir exists) is layered
     // on top — a stem there replaces the bundled file wholesale. The E5
     // schema gate below looks at the primary dir only.
-    // `~/.config/nerv/nerv.toml`, read once at boot — matching mode
-    // (PLAN §5.1) and derivation switch. Edits need a daemon restart.
+    // `~/.config/nerv/nerv.toml` — matching mode (PLAN §5.1) and
+    // derivation switch, live: the watcher below reloads edits without
+    // a restart (matching applies to the next request, derivation to
+    // the next derivation decision).
     let config = Config::load_default();
     info!(mode = ?config.matching.mode, derive = config.derived.enabled, "config loaded");
     let layers =
@@ -158,9 +160,15 @@ async fn main() -> anyhow::Result<()> {
         misses: misses.clone(),
         names,
         history,
-        mode: config.matching.mode,
+        config: Arc::new(std::sync::RwLock::new(config)),
         schema_block,
     };
+
+    // Hot-reload: nerv.toml Create/Modify events re-read the file; the
+    // loop arm below applies them. A missing config dir (or a failed
+    // watcher) only logs — the daemon keeps boot-time values.
+    let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::channel::<()>(8);
+    let _config_watcher = start_config_watcher(cfg_tx);
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -186,6 +194,14 @@ async fn main() -> anyhow::Result<()> {
                         tokio::spawn(handle_connection(stream, shared.clone()));
                     }
                     Err(e) => warn!(?e, "accept error"),
+                }
+            }
+            Some(()) = cfg_rx.recv() => {
+                // One event converges fully: the file is re-read whole,
+                // so a coalesced burst needs no counting.
+                if let Some(path) = Config::config_file_path() {
+                    let applied = reload_config_from_file(&shared, &path);
+                    info!(mode = ?applied.matching.mode, derive = applied.derived.enabled, "config reloaded");
                 }
             }
             _ = &mut shutdown => {
@@ -215,7 +231,9 @@ struct Shared {
     misses: Arc<MissCounter>,
     names: Arc<NameCache>,
     history: Arc<HistoryStore>,
-    mode: MatchMode,
+    /// Live `nerv.toml` (hot-reload): read per request, poison degrades
+    /// to the default. Replaces the old boot-frozen `mode` copy.
+    config: Arc<std::sync::RwLock<Config>>,
     schema_block: Arc<Option<String>>,
 }
 
@@ -395,6 +413,72 @@ fn scoped_import_path_in(home: &std::path::Path, raw: &str) -> Result<std::path:
     Ok(cand_canon)
 }
 
+/// Apply `nerv.toml` at `path` to a running daemon (hot-reload):
+/// matching updates the per-request read; `[derived]` flips the
+/// registry gate (creating the derived dir on enable). Idempotent — a
+/// reload with no changes recomputes identical state. Returns the
+/// applied config for logging. Pure FS + locks, no async: unit-testable
+/// with an explicit path (no env touch).
+fn reload_config_from_file(shared: &Shared, path: &std::path::Path) -> Config {
+    // Unparsable save keeps old values (a typo must not nuke the live
+    // mode mid-session); a missing/unreadable file means the config is
+    // genuinely gone, so defaults apply as at boot.
+    let readable = std::fs::read_to_string(path)
+        .map(|t| Config::parse_valid(&t))
+        .unwrap_or(true);
+    if !readable {
+        warn!("ignoring malformed {}, keeping current config", path.display());
+        return shared.config.read().map(|c| *c).unwrap_or_default();
+    }
+    let cfg = Config::load_from_path(path);
+    if let Ok(mut cur) = shared.config.write() {
+        *cur = cfg;
+    }
+    if cfg.derived.enabled {
+        if let Some(dir) = paths::derived_specs_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            shared.registry.set_derivation(Some(dir));
+        }
+    } else {
+        shared.registry.set_derivation(None);
+    }
+    cfg
+}
+
+/// Watch the config file's parent dir for `nerv.toml` Create/Modify
+/// events and nudge `tx` (coalesced downstream: one reload converges
+/// fully). `None` when the path is unknown, the dir is missing, or the
+/// watcher fails — all soft, like the spec watcher. The guard must be
+/// held for events to flow.
+fn start_config_watcher(
+    tx: tokio::sync::mpsc::Sender<()>,
+) -> Option<Box<dyn notify::Watcher + Send + Sync>> {
+    use notify::{EventKind, RecursiveMode, Watcher};
+    let path = Config::config_file_path()?;
+    let parent = path.parent()?.to_path_buf();
+    if !parent.is_dir() {
+        return None;
+    }
+    let want = path.file_name().map(|s| s.to_owned());
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(event) = res else {
+            return;
+        };
+        if !matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(_)
+        ) {
+            return;
+        }
+        if event.paths.iter().any(|p| p.file_name() == want.as_deref()) {
+            let _ = tx.try_send(());
+        }
+    })
+    .ok()?;
+    watcher.watch(&parent, RecursiveMode::NonRecursive).ok()?;
+    Some(Box::new(watcher))
+}
+
 async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response {
     let Shared {
         registry,
@@ -402,7 +486,7 @@ async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response
         misses,
         names,
         history,
-        mode,
+        config,
         schema_block,
     } = shared.clone();
     match request {
@@ -430,6 +514,12 @@ async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response
                 let misses = misses.clone();
                 let names = names.clone();
                 let history = history.clone();
+                // Live config read per request (hot-reload): a poisoned
+                // lock degrades to the default mode, never a hang.
+                let mode = config
+                    .read()
+                    .map(|c| c.matching.mode)
+                    .unwrap_or_default();
                 tokio::task::spawn_blocking(move || {
                     // Building the name list means stat-ing every
                     // spec layer, cloning ~700 stems and folding the
@@ -1409,6 +1499,64 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HOME is process-global; reload tests point it at a tempdir under
+    /// this lock (mirrors the engine paths-tests pattern).
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn test_shared() -> Shared {
+        Shared {
+            registry: Arc::new(SpecRegistry::empty()),
+            frecency: Arc::new(FrecencyStore::empty()),
+            misses: Arc::new(MissCounter::empty()),
+            names: Arc::new(NameCache::from_env()),
+            history: Arc::new(HistoryStore::empty()),
+            config: Arc::new(std::sync::RwLock::new(Config::default())),
+            schema_block: Arc::new(None),
+        }
+    }
+
+    /// `reload_config_from_file` applies matching immediately and flips
+    /// the derivation gate both ways — the hot-reload contract, with an
+    /// explicit path (no env touch except the locked HOME for the
+    /// derived dir).
+    #[test]
+    fn config_reload_applies_matching_and_derivation() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialized by HOME_LOCK.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let cfg_file = home.path().join("nerv.toml");
+        let shared = test_shared();
+        std::fs::write(
+            &cfg_file,
+            "[matching]\nmode = \"fuzzy\"\n[derived]\nenabled = false\n",
+        )
+        .unwrap();
+        let applied = reload_config_from_file(&shared, &cfg_file);
+        assert_eq!(applied.matching.mode, MatchMode::Fuzzy);
+        assert!(!applied.derived.enabled);
+        assert_eq!(
+            shared.config.read().unwrap().matching.mode,
+            MatchMode::Fuzzy
+        );
+        assert!(!shared.registry.derivation_enabled());
+        // Malformed save keeps old values (mode stays fuzzy, gate stays
+        // off) instead of falling back to defaults.
+        std::fs::write(&cfg_file, "[[[").unwrap();
+        let applied = reload_config_from_file(&shared, &cfg_file);
+        assert_eq!(applied.matching.mode, MatchMode::Fuzzy);
+        assert!(!shared.registry.derivation_enabled());
+        std::fs::write(&cfg_file, "[derived]\nenabled = true\n").unwrap();
+        let applied = reload_config_from_file(&shared, &cfg_file);
+        assert!(applied.derived.enabled);
+        assert!(shared.registry.derivation_enabled());
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
 
     /// Directory mtime is the whole guard keeping `read_dir` off the
     /// keystroke path: an unchanged layer must be served from the
