@@ -1073,6 +1073,32 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    /// The lock file gets the same 0600 repair: a pre-existing
+    /// world-readable `<history>.lock` must not stay world-readable
+    /// after an append (the history-file twin is `file_is_private`).
+    #[test]
+    fn lock_file_is_repaired_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmp("lockperm");
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let lock = std::path::PathBuf::from(lock);
+        std::fs::write(&lock, "").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        append_row(&path, &entry("ls", "/", "")).unwrap();
+        let mode = std::fs::metadata(&lock).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// Clock skew (imported rows dated in the future) clamps age to 0
+    /// instead of exponentiating a negative age into a huge boost.
+    #[test]
+    fn frecency_future_timestamp_clamps_to_zero_age() {
+        let now = 1_700_000_000u64;
+        let got = frecency(5, now + 99999, now);
+        assert!((got - 5f64.ln_1p()).abs() < 1e-12, "age not clamped: {got}");
+    }
+
     #[test]
     fn ignored_commands_leave_no_row_and_no_sequence_key() {
         let path = tmp("ignored");

@@ -382,6 +382,57 @@ mod tests {
         assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
+    /// The production entry (`execute_custom_source_cached`, what the
+    /// generator dispatcher calls) serves repeat lines deterministically
+    /// — same result twice — without the caller touching the memo.
+    /// The pid tag keeps the process-wide cache key unique to this test.
+    #[test]
+    fn cached_public_path_serves_repeat_lines() {
+        let tag = format!("/* pin-pub-{} */", std::process::id());
+        let src = format!(
+            r#"{tag}(async () => {{ const o = await executeShellCommand("printf 'main\ndev'"); return o.split("\n"); }})()"#
+        );
+        let tokens: Vec<String> = vec![];
+        let first = execute_custom_source_cached(&src, &tokens, None);
+        let second = execute_custom_source_cached(&src, &tokens, None);
+        assert_eq!(first, Some(vec!["main".into(), "dev".into()]));
+        assert_eq!(second, first);
+    }
+
+    /// …and a failing closure stays failing through the cache (its
+    /// `None` is memoized per TTL, so a 200ms-burning closure blocks
+    /// once per burst, not once per keystroke).
+    #[test]
+    fn cached_public_path_memoizes_failure() {
+        let tag = format!("/* pin-pub-fail-{} */", std::process::id());
+        let src = format!(r#"{tag}throw new Error("nope")"#);
+        let tokens: Vec<String> = vec![];
+        assert_eq!(execute_custom_source_cached(&src, &tokens, None), None);
+        assert_eq!(execute_custom_source_cached(&src, &tokens, None), None);
+    }
+
+    /// `run_shell` failure contract: non-zero exit with no output and an
+    /// impossible cwd both answer `""` (never a panic, never stale
+    /// bytes); `pwd` under two dirs proves the cache is keyed per cwd.
+    /// Pid-scoped dirs: the process-wide SHELL_CACHE key must not leak
+    /// across tests.
+    #[test]
+    fn run_shell_failure_and_cwd_contract() {
+        let base = std::env::temp_dir().join(format!("nerv-pin-sh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        assert_eq!(run_shell("exit 3", None), "");
+        assert_eq!(run_shell("echo hi", Some(&base.join("absent"))), "");
+        let out_a = run_shell("pwd", Some(&a));
+        let out_b = run_shell("pwd", Some(&b));
+        assert!(out_a.trim_end().ends_with("/a"), "{out_a:?}");
+        assert!(out_b.trim_end().ends_with("/b"), "{out_b:?}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn process_env_shim_is_readable() {
         // `process.env` is seeded from the daemon env so path-building

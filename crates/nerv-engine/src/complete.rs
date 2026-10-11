@@ -6263,6 +6263,129 @@ region = us-east-1
         fs::remove_dir_all(&tmp).ok();
     }
 
+    /// `complete_in` threads `cwd` to filesystem generators: `npm run`
+    /// surfaces the scripts of the nearest `package.json` above `cwd`.
+    /// A hand-built npm spec (the `insert` seam) with a
+    /// `PackageJsonScripts` arg, completed with `cwd=Some(tmp)`.
+    #[test]
+    fn complete_in_uses_cwd_for_package_json_scripts() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-npm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(
+            tmp.join("package.json"),
+            r#"{"scripts":{"dev":"vite","build":"tsc"}}"#,
+        )
+        .unwrap();
+        let npm = Subcommand {
+            name: "npm".into(),
+            subcommands: vec![Subcommand {
+                name: "run".into(),
+                args: vec![Arg {
+                    name: Some("script".into()),
+                    is_optional: true,
+                    generators: vec![crate::spec_parser::Generator::PackageJsonScripts],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let r = SpecRegistry::empty();
+        r.insert(npm);
+        let line = "npm run d";
+        let out = complete_in(line, line.len(), &r, Some(&tmp), MatchMode::Prefix, None);
+        let got = insertions(&out);
+        assert!(
+            got.iter().any(|s| s == "dev"),
+            "`dev` script missing for cwd {tmp:?}: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|s| s == "build"),
+            "prefix `d` must filter `build` out: {got:?}"
+        );
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// `package_json_scripts` walks up to the nearest `package.json`
+    /// and returns `None` (not a panic, not `/`'s) when there is none.
+    #[test]
+    fn package_json_scripts_walk_up_and_missing() {
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-walkup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(tmp.join("a").join("b")).unwrap();
+        fs::write(
+            tmp.join("a").join("package.json"),
+            r#"{"scripts":{"lint":"eslint"}}"#,
+        )
+        .unwrap();
+        let scripts = package_json_scripts(Some(&tmp.join("a").join("b")))
+            .expect("walk-up finds a/package.json");
+        assert!(scripts.iter().any(|(n, _)| n == "lint"));
+        assert!(package_json_scripts(Some(&tmp.join("lonely"))).is_none());
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// `zoxide_via_z_file` parses `path|score|time` rows; a missing file
+    /// is `None`, and an emptied `ZSHZ_DATA` falls through without
+    /// panicking. (Single test fn: the env var is process-global.)
+    #[test]
+    fn zoxide_file_parsing_handles_io_edges() {
+        use std::env;
+        use std::fs;
+        let tmp = std::env::temp_dir().join(format!("nerv-pin-zoxide-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let zfile = tmp.join("z");
+        fs::write(
+            &zfile,
+            "/home/u/proj|12.5|1700000000\n/home/u/other|3|1700000001\n",
+        )
+        .unwrap();
+        let prev = env::var("ZSHZ_DATA").ok();
+        unsafe { env::set_var("ZSHZ_DATA", &zfile) };
+        let rows = zoxide_via_z_file().expect("readable z file parses");
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert!(rows.iter().any(|(_, p, _)| p.ends_with("proj")));
+        unsafe { env::set_var("ZSHZ_DATA", tmp.join("absent")) };
+        assert!(
+            zoxide_via_z_file().is_none(),
+            "missing z file must be None, not a panic"
+        );
+        unsafe { env::set_var("ZSHZ_DATA", "") };
+        // Empty var falls through to $HOME/.z: the value depends on the
+        // runner's HOME, so this pins only "does not panic".
+        let _ = zoxide_via_z_file();
+        let _ = z_history_file();
+        match prev {
+            Some(v) => unsafe { env::set_var("ZSHZ_DATA", v) },
+            None => unsafe { env::remove_var("ZSHZ_DATA") },
+        }
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// An overrunning generator is killed at the timeout: `sleep 5`
+    /// answers `None` in well under 5s (and `wait()` inside reaps it —
+    /// no zombie by construction).
+    #[test]
+    fn spawn_with_timeout_kills_overrunning_child() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let child = Command::new("sh")
+            .args(["-c", "sleep 5"])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sh is available in test env");
+        assert!(spawn_with_timeout(child, 8192).is_none());
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "overrunner not killed promptly"
+        );
+    }
+
     /// A generator emitting fast output must not fill the daemon heap:
     /// the capture stays bounded even when the child writes megabytes.
     #[test]
@@ -6281,7 +6404,6 @@ region = us-east-1
         );
         assert!(!buf.is_empty());
     }
-
     #[test]
     fn an_external_name_cannot_escape_the_spec_dir() {
         use std::fs;
