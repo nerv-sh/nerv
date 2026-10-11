@@ -1369,9 +1369,10 @@ fn subcommand_correction(
     let budget = typo_distance_budget(prefix.chars().count())?;
     let input: Vec<char> = prefix.chars().collect();
     let (_, name) = best_within_budget(&input, budget, candidates.iter().map(|(n, _)| *n))?;
-    // An exact token is complete, not a typo (the no-op drop left the
-    // list empty for it) — never correct to itself.
-    if name == prefix {
+    // An exact token (case-insensitively, like the no-op drop) is
+    // complete, not a typo — never correct to itself or its case
+    // variant.
+    if name.eq_ignore_ascii_case(prefix) {
         return None;
     }
     let kind = candidates
