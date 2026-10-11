@@ -1393,7 +1393,10 @@ fn subcommand_correction(
         priority: None,
         icon: None,
         source_ranked: true,
-        replace: Some(char_span(full_line, start..start + (tok.span.end - tok.span.start))),
+        replace: Some(char_span(
+            full_line,
+            start..start + (tok.span.end - tok.span.start),
+        )),
     })
 }
 
@@ -1769,7 +1772,7 @@ pub fn complete_in(
     // correction row, never alongside real rows (idea batch).
     let items = if items.is_empty() {
         subcommand_correction(
-            &current,
+            current,
             &result.cursor_context,
             &prefix,
             full_line,
@@ -5028,7 +5031,6 @@ region = us-east-1
     /// correction row; an exact token never corrects to itself.
     #[test]
     fn subcommand_correction_on_empty_only() {
-        use std::fs;
         let git = Subcommand {
             name: "git".into(),
             subcommands: vec![
