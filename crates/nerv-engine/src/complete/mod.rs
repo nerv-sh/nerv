@@ -1616,7 +1616,7 @@ pub fn complete_in(
     // Walk the subcommand chain so emit_options can pull in
     // persistent ancestor options (Fig parity for `--help` /
     // `--debug` declared at the root with isPersistent).
-    let chain = walk_chain(spec_ref, &result.subcommand_path);
+    let chain = crate::spec_parser::walk_chain(spec_ref, &result.subcommand_path);
     let ancestor_refs: Vec<&Subcommand> = chain.iter().rev().skip(1).copied().collect();
 
     let has_emittable_options = !current.options.is_empty()
@@ -2335,25 +2335,6 @@ fn walk_to_current<'a>(root: &'a Spec, path: &[String]) -> Option<&'a Subcommand
         node = find_subcommand(node, name)?;
     }
     Some(node)
-}
-
-/// Like [`walk_to_current`] but returns the whole chain root → leaf.
-/// Used to enumerate ancestor subcommands when looking up
-/// persistent options. Returns at least `[root]` for an empty
-/// path.
-fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
-    let mut chain: Vec<&Subcommand> = vec![root];
-    let mut node: &Subcommand = root;
-    for name in path.iter().skip(1) {
-        match find_subcommand(node, name) {
-            Some(next) => {
-                node = next;
-                chain.push(next);
-            }
-            None => break,
-        }
-    }
-    chain
 }
 
 /// Fig-style positional-argument hint for a subcommand, e.g.

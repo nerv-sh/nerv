@@ -600,26 +600,35 @@ pub(crate) fn find_option<'a>(subcommand: &'a Subcommand, needle: &str) -> Optio
 /// (deepest in `path`), fall back to ancestor subcommands' options
 /// whose `is_persistent` flag is set. `root` is the root spec;
 /// `path` is the subcommand chain (path[0] is root.name).
+/// The chain root → leaf, stopping at the first stale segment instead
+/// of failing. Shared by option lookup here and the node fallback in
+/// `crate::complete`, so both agree on the surviving prefix. Returns
+/// at least `[root]` for an empty path.
+pub(crate) fn walk_chain<'a>(root: &'a Spec, path: &[String]) -> Vec<&'a Subcommand> {
+    let mut chain: Vec<&Subcommand> = vec![root];
+    let mut node: &Subcommand = root;
+    for name in path.iter().skip(1) {
+        match find_subcommand(node, name) {
+            Some(next) => {
+                node = next;
+                chain.push(next);
+            }
+            None => break,
+        }
+    }
+    chain
+}
+
 pub(crate) fn find_option_inherited<'a>(
     root: &'a Spec,
     path: &[String],
     needle: &str,
 ) -> Option<&'a Opt> {
-    // Walk leaf → root. Leaf can match any option; ancestors only
-    // contribute options with is_persistent = true. A stale segment
-    // (renamed subcommand, missed stub) stops the walk instead of
-    // failing it — the surviving prefix is searched, agreeing with
-    // `walk_to_current`'s lenient fallback. Fully-valid paths walk
-    // identically to before.
-    let mut node: &Spec = root;
-    let mut chain: Vec<&Spec> = vec![root];
-    for name in path.iter().skip(1) {
-        let Some(next) = find_subcommand(node, name) else {
-            break;
-        };
-        chain.push(next);
-        node = next;
-    }
+    // Walk leaf → root over the surviving prefix (stale segments stop
+    // the walk instead of failing it — same rule as `walk_chain`, so
+    // option lookup agrees with the node fallback). Leaf can match any
+    // option; ancestors only contribute options with is_persistent.
+    let chain = walk_chain(root, path);
     // Leaf (last) — any option.
     if let Some(opt) = chain.last().and_then(|sc| find_option(sc, needle)) {
         return Some(opt);

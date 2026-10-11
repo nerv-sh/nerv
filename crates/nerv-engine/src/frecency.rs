@@ -123,6 +123,7 @@ impl FrecencyStore {
         }
         let now = now_unix();
         let Ok(mut st) = self.state.lock() else {
+            crate::paths::warn_poison_once("frecency record");
             return;
         };
         let known = st
@@ -164,12 +165,12 @@ impl FrecencyStore {
         spec: &str,
         insertions: impl IntoIterator<Item = &'a str>,
     ) -> Vec<f64> {
-        let st = self.state.lock().ok();
-        if st.is_none() {
+        let Ok(st) = self.state.lock() else {
             crate::paths::warn_poison_once("frecency scores");
-        }
-        let picks = st.as_ref().and_then(|st| st.table.get(spec));
+            return insertions.into_iter().map(|_| 0.0).collect();
+        };
         let now = now_unix();
+        let picks = st.table.get(spec);
         insertions
             .into_iter()
             .map(|ins| {

@@ -47,14 +47,11 @@ pub const DERIVED_SUBDIR: &str = "derived";
 /// concurrent writers never share one. `create_new` below turns a
 /// (near-impossible) collision into an error instead of interleaved
 /// bytes surviving the atomic rename.
-fn unique_tmp_path(path: &std::path::Path, file_name: &str) -> std::path::PathBuf {
+fn unique_tmp_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let file_name = path.file_name()?.to_str()?;
     static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    path.with_file_name(format!(
-        "{file_name}.nerv-tmp.{}.{}",
-        std::process::id(),
-        n
-    ))
+    Some(path.with_file_name(format!("{file_name}.nerv-tmp.{}.{}", std::process::id(), n)))
 }
 
 pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
@@ -62,10 +59,6 @@ pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| std::io::Error::other("path has no file name"))?;
     // Every early return unlinks the temp file: `nerv uninstall` rewrites
     // rc files through here and must leave no trace, not even on failure
     // (uninstall-spec §4).
@@ -86,7 +79,9 @@ pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()
     // real FS problem and surfaces as Err).
     let mut last_err = std::io::Error::other("no temp path available");
     for _ in 0..8 {
-        let tmp = unique_tmp_path(path, file_name);
+        let Some(tmp) = unique_tmp_path(path) else {
+            return Err(std::io::Error::other("path has no file name"));
+        };
         match write(&tmp) {
             Ok(()) => return Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -102,13 +97,13 @@ pub fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()
     Err(last_err)
 }
 
-/// One stderr line the first time a ranking store finds its lock
-/// poisoned, then silence: the callers degrade to cold defaults, and a
-/// wedged lock must leave a trace without spamming every keystroke.
-/// Engine has no logger; the daemon captures stderr.
+/// Stderr traces for poisoned ranking locks, bounded: the first few
+/// (one per known call site) print, then silence. Callers degrade to
+/// cold defaults either way. Engine has no logger; the daemon captures
+/// stderr.
 pub(crate) fn warn_poison_once(what: &str) {
-    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    static WARNED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if WARNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
         eprintln!("nerv: {what} lock poisoned — ranking degraded to cold defaults");
     }
 }
@@ -433,7 +428,7 @@ mod tests {
     fn tmp_paths_are_unique() {
         use std::collections::HashSet;
         let base = std::env::temp_dir().join("nerv-tmp-names.tsv");
-        let names: HashSet<_> = (0..1000).map(|_| unique_tmp_path(&base, "nerv-tmp-names.tsv")).collect();
+        let names: HashSet<_> = (0..1000).map(|_| unique_tmp_path(&base)).collect();
         assert_eq!(names.len(), 1000);
     }
 

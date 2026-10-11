@@ -127,6 +127,7 @@ impl MissCounter {
         }
         let now = now_unix();
         let Ok(mut st) = self.state.lock() else {
+            crate::paths::warn_poison_once("miss record");
             return;
         };
         if !st.table.contains_key(name) && st.table.len() >= MAX_ENTRIES {

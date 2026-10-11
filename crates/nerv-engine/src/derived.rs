@@ -193,20 +193,23 @@ fn is_current(out: &Path, bin: &Path) -> bool {
 /// fallback that does work would never run. Only the parser can tell.
 fn help_spec(name: &str, bin: &Path) -> Option<Subcommand> {
     for args in HELP_ARGS {
-        if let Some((out, err)) = run_help(bin, args) {
+        if let Some((out, err_raw)) = run_help(bin, args) {
             // Stdout first: a chatty warning on stderr must not veto
             // real help. Stderr is still tried (many CLIs print usage
             // there and nowhere else) — only after stdout fails to parse.
+            // Converted lazily: the common stdout-parses case never
+            // pays for the stderr scan.
             if let Some(spec) = parse_help(name, &out) {
                 return Some(spec);
             }
-            if let Some(spec) = parse_help(name, &err) {
+            let err = String::from_utf8_lossy(&err_raw).into_owned();
+            if let Some(spec) = parse_help(name, &crate::complete::strip_ansi(&err)) {
                 return Some(spec);
             }
         }
     }
-    let (out, err) = man_text(bin)?;
-    parse_help(name, &out).or_else(|| parse_help(name, &err))
+    let text = man_text(bin)?;
+    parse_help(name, &text)
 }
 
 /// Run `bin args…` and capture stdout+stderr.
@@ -226,7 +229,7 @@ fn help_spec(name: &str, bin: &Path) -> Option<Subcommand> {
 /// manager — `zeph --help` printed `env: node: No such file or
 /// directory` and derived nothing. Inheriting costs no safety here,
 /// because the binary is already resolved to an absolute path.
-fn run_help(bin: &Path, args: &[&str]) -> Option<(String, String)> {
+fn run_help(bin: &Path, args: &[&str]) -> Option<(String, Vec<u8>)> {
     let mut cmd = sandboxed(bin);
     cmd.args(args)
         .env("HOME", std::env::temp_dir())
@@ -260,8 +263,9 @@ fn inherited_path() -> std::ffi::OsString {
 
 /// `man <name>` as a last resort, for tools that predate `--help`.
 /// The absolute path matters: many users alias `man` to something else
-/// entirely, and an alias would not be a man page.
-fn man_text(bin: &Path) -> Option<(String, String)> {
+/// entirely, and an alias would not be a man page. Stdout only: stderr
+/// is nulled, so there is no second stream to try.
+fn man_text(bin: &Path) -> Option<String> {
     let name = bin.file_name()?.to_str()?;
     let man = Path::new("/usr/bin/man");
     if !man.exists() {
@@ -273,16 +277,16 @@ fn man_text(bin: &Path) -> Option<(String, String)> {
         .env("MANPAGER", "cat")
         .env("PAGER", "cat")
         .stderr(std::process::Stdio::null());
-    capture(cmd)
+    let (out, _) = capture(cmd)?;
+    Some(out)
 }
 
 /// Spawn, read both pipes on their own threads (a child that fills one
 /// pipe while the parent reads the other deadlocks), and give up after
-/// [`HELP_TIMEOUT`]. Returns both streams separately: the caller tries
-/// stdout first and falls back to stderr on parse failure (many CLIs
-/// print usage to stderr, and some ship a chatty warning next to real
-/// help on stdout — length alone cannot tell them apart).
-fn capture(mut cmd: std::process::Command) -> Option<(String, String)> {
+/// [`HELP_TIMEOUT`]. Stdout comes back converted; stderr raw — the
+/// caller converts it only when stdout fails to parse, so the common
+/// case never pays for the stderr scan.
+fn capture(mut cmd: std::process::Command) -> Option<(String, Vec<u8>)> {
     use std::io::Read;
     use std::sync::mpsc;
     let mut child = cmd.spawn().ok()?;
@@ -312,8 +316,7 @@ fn capture(mut cmd: std::process::Command) -> Option<(String, String)> {
         }
     };
     let out = String::from_utf8_lossy(&out).into_owned();
-    let err = String::from_utf8_lossy(&err).into_owned();
-    Some((crate::complete::strip_ansi(&out), crate::complete::strip_ansi(&err)))
+    Some((crate::complete::strip_ansi(&out), err))
 }
 
 #[derive(Clone, Copy)]
