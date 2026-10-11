@@ -45,7 +45,17 @@ pub enum SpecLoadError {
         #[source]
         source: serde_json::Error,
     },
+    /// Decompressed source exceeds the heap-safety cap — fail closed
+    /// instead of materialising gigabytes from a small `.json.gz`
+    /// (any layer, overlay included, can carry one).
+    #[error("spec file too large: {path} decompresses past {cap} bytes")]
+    TooLarge { path: String, cap: u64 },
 }
+
+/// Upper bound on decompressed spec source. Legit ceiling is `aws` at
+/// ~117MB; the cap keeps 2× headroom while a crafted archive fails
+/// closed on the background populator thread.
+pub const SPEC_GZ_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 impl SpecLoadError {
     /// The spec file this error is about — lets a caller attribute it to
@@ -53,7 +63,9 @@ impl SpecLoadError {
     pub fn path(&self) -> &str {
         match self {
             Self::NotFound(p) => p,
-            Self::Io { path, .. } | Self::Parse { path, .. } => path,
+            Self::Io { path, .. } | Self::Parse { path, .. } | Self::TooLarge { path, .. } => {
+                path
+            }
         }
     }
 }
@@ -80,14 +92,29 @@ pub fn load_spec_file_with_size(path: &Path) -> Result<(Spec, usize), SpecLoadEr
             path: path.display().to_string(),
             source: e,
         })?;
-        let mut decoder = GzDecoder::new(file);
-        let mut s = String::new();
+        let decoder = GzDecoder::new(file);
+        // Cap+1: `take` truncates silently (a second probe reads Ok(0)
+        // once the limit is spent), so one byte of headroom tells "at
+        // cap" from "over cap". Bytes first — a cut mid-char must not
+        // change the error routing — then UTF-8 exactly as before.
+        let mut buf = Vec::new();
         decoder
-            .read_to_string(&mut s)
+            .take(SPEC_GZ_MAX_BYTES + 1)
+            .read_to_end(&mut buf)
             .map_err(|e| SpecLoadError::Io {
                 path: path.display().to_string(),
                 source: e,
             })?;
+        if buf.len() as u64 > SPEC_GZ_MAX_BYTES {
+            return Err(SpecLoadError::TooLarge {
+                path: path.display().to_string(),
+                cap: SPEC_GZ_MAX_BYTES,
+            });
+        }
+        let s = String::from_utf8(buf).map_err(|e| SpecLoadError::Io {
+            path: path.display().to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        })?;
         s
     } else {
         fs::read_to_string(path).map_err(|e| SpecLoadError::Io {
@@ -379,6 +406,33 @@ mod tests {
         let json = write_spec_str(&spec).unwrap();
         let restored = parse_spec_str(&json, Path::new("<test>")).unwrap();
         assert_eq!(spec, restored);
+    }
+
+    /// A `.json.gz` decompressing past the cap fails closed as
+    /// `TooLarge` instead of materialising gigabytes (a small crafted
+    /// archive in any layer would otherwise OOM the background
+    /// populator thread). Zeros compress ~1000:1, so the fixture is KB
+    /// on disk while 300MB inflated.
+    #[test]
+    fn over_cap_gzip_fails_closed() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let tmp = std::env::temp_dir().join(format!(
+            "nerv-spec-loader-big-{}.json.gz",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&tmp);
+        let f = fs::File::create(&tmp).unwrap();
+        let mut enc = GzEncoder::new(f, Compression::fast());
+        enc.write_all(&vec![0u8; 300 * 1024 * 1024]).unwrap();
+        enc.finish().unwrap();
+        let err = load_spec_file_with_size(&tmp).unwrap_err();
+        assert!(
+            matches!(err, SpecLoadError::TooLarge { .. }),
+            "expected TooLarge, got {err:?}"
+        );
+        fs::remove_file(&tmp).ok();
     }
 
     /// `*.gz` extension with non-gzip bytes underneath surfaces as
