@@ -377,6 +377,24 @@ async fn write_lines(
 }
 
 /// Answer one decoded request — the same for JSON and text requests.
+/// Resolve an `ImportHistory` path against the daemon's trust boundary:
+/// the file must live under `$HOME`. Both sides are canonicalized, so
+/// `..` segments and symlinks cannot escape. A UDS client must not make
+/// the daemon ingest arbitrary files. Pure so the contract is unit
+/// testable without a daemon; [`dispatch`] maps `Err` to `Response::Error`.
+fn scoped_import_path_in(home: &std::path::Path, raw: &str) -> Result<std::path::PathBuf, String> {
+    let home_canon = home
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve HOME: {e}"))?;
+    let cand_canon = std::path::Path::new(raw)
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve import path: {e}"))?;
+    if !cand_canon.starts_with(&home_canon) {
+        return Err("history import is limited to files under $HOME".to_string());
+    }
+    Ok(cand_canon)
+}
+
 async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response {
     let Shared {
         registry,
@@ -554,8 +572,20 @@ async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response
         },
         Ok(Request::ImportHistory { path }) => {
             let history = history.clone();
+            let resolved = match std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| "HOME is not set".to_string())
+                .and_then(|home| scoped_import_path_in(&home, &path))
+            {
+                Ok(p) => p,
+                Err(message) => {
+                    return Response::Error {
+                        message: format!("history import refused: {message}"),
+                    };
+                }
+            };
             let res = tokio::task::spawn_blocking(move || {
-                history.import_zsh_history(std::path::Path::new(&path))
+                history.import_zsh_history(&resolved)
             })
             .await;
             match res {
@@ -1425,6 +1455,58 @@ mod tests {
         frecency.record("zeph", "x");
         let names = cache.names(&registry, &frecency);
         assert!(names.is_complete_name("zeph") && names.is_complete_name("bar"));
+    }
+
+    /// `ImportHistory` must not become an arbitrary-file read: only files
+    /// under `$HOME` resolve. Canonicalized both sides, so `..` and
+    /// symlinks cannot escape. Hermetic — synthetic home, no env touch.
+    #[test]
+    fn import_path_is_scoped_to_home() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        let inside = home.path().join("hist.txt");
+        std::fs::write(&inside, "cmd\n").expect("write");
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "secret\n").expect("write");
+
+        // Legit file under home resolves.
+        assert_eq!(
+            scoped_import_path_in(home.path(), inside.to_str().unwrap()).unwrap(),
+            inside.canonicalize().unwrap()
+        );
+        // Outside file refused.
+        assert!(
+            scoped_import_path_in(home.path(), outside_file.to_str().unwrap()).is_err(),
+            "outside file resolved"
+        );
+        // `..` escape refused: home/sub exists, the raw path walks out
+        // to the real outside file.
+        std::fs::create_dir_all(home.path().join("sub")).expect("mkdir");
+        let dotdot = home.path().join("sub").join("..").join("..").join(
+            outside
+                .path()
+                .file_name()
+                .unwrap(),
+        ).join("secret.txt");
+        assert!(
+            scoped_import_path_in(home.path(), dotdot.to_str().unwrap()).is_err(),
+            "`..` escape resolved"
+        );
+        // Symlink inside home pointing out refused.
+        #[cfg(unix)]
+        {
+            let link_out = home.path().join("sub").join("link-out");
+            std::os::unix::fs::symlink(&outside_file, &link_out).expect("symlink");
+            assert!(
+                scoped_import_path_in(home.path(), link_out.to_str().unwrap()).is_err(),
+                "symlink escape resolved"
+            );
+        }
+        // Missing file fails closed (canonicalize errors), never Ok.
+        assert!(
+            scoped_import_path_in(home.path(), home.path().join("nope.txt").to_str().unwrap())
+                .is_err()
+        );
     }
 
     /// Sessions union into the shell-name list, deduped, capped at 4096
