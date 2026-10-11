@@ -360,6 +360,29 @@ mod tests {
         out
     }
 
+    /// The admissibility gate the miss tally and `--help` derivation
+    /// both trust: table-driven over the documented contract (2–64
+    /// chars, leading alnum, `[A-Za-z0-9_.+-]`, no paths/whitespace).
+    #[test]
+    fn is_command_stem_table() {
+        let long = "x".repeat(65);
+        let cases: Vec<(&str, bool)> = vec![
+            ("git", true),
+            ("g++", true),
+            ("foo-bar_v1.2", true),
+            ("a", false),
+            ("./x", false),
+            ("/usr/bin/x", false),
+            ("", false),
+            ("a b", false),
+            ("a\tb", false),
+            (&long, false),
+        ];
+        for (s, want) in cases {
+            assert_eq!(is_command_stem(s), want, "stem {s:?}");
+        }
+    }
+
     /// A failed write leaves no temp file behind — `nerv uninstall`
     /// rewrites rc files through here and is specced for trace zero
     /// even when a step fails.
