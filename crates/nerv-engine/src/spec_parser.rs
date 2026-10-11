@@ -606,11 +606,17 @@ pub(crate) fn find_option_inherited<'a>(
     needle: &str,
 ) -> Option<&'a Opt> {
     // Walk leaf → root. Leaf can match any option; ancestors only
-    // contribute options with is_persistent = true.
+    // contribute options with is_persistent = true. A stale segment
+    // (renamed subcommand, missed stub) stops the walk instead of
+    // failing it — the surviving prefix is searched, agreeing with
+    // `walk_to_current`'s lenient fallback. Fully-valid paths walk
+    // identically to before.
     let mut node: &Spec = root;
     let mut chain: Vec<&Spec> = vec![root];
     for name in path.iter().skip(1) {
-        let next = find_subcommand(node, name)?;
+        let Some(next) = find_subcommand(node, name) else {
+            break;
+        };
         chain.push(next);
         node = next;
     }
@@ -1809,6 +1815,20 @@ mod tests {
         // isPersistent → should still bind.
         let opt = find_option_inherited(&s, &["git".into(), "commit".into()], "--help");
         assert!(opt.is_some(), "persistent --help should resolve in commit");
+    }
+
+    /// A stale path (renamed subcommand, missed external stub) resolves
+    /// the surviving prefix instead of giving up: `walk_to_current`
+    /// falls back leniently, so option lookup must agree — otherwise
+    /// option-arg dispatch silently skips while positional emit runs.
+    #[test]
+    fn stale_path_searches_the_resolved_prefix() {
+        let s = root_with_persistent_help();
+        let opt = find_option_inherited(&s, &["git".into(), "renamed-away".into()], "--help");
+        assert!(
+            opt.is_some(),
+            "root persistent --help should bind on a stale path"
+        );
     }
 
     #[test]

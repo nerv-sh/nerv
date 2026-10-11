@@ -81,6 +81,27 @@ fn reads_help_from_stderr_too() {
     assert!(written.exists());
 }
 
+/// Stdout wins over a longer stderr: a chatty warning on stderr must
+/// not veto real help on stdout (stdout parses, so stderr is never
+/// consulted — longer-stream-wins would derive nothing here).
+#[test]
+fn stdout_help_beats_longer_stderr_warning() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let warning = "WARNING: this tool is deprecated, migrate soon!\n".repeat(200);
+    let bin = write_bin(
+        tmp.path(),
+        "chatty",
+        &format!("cat <<'NERV_EOF'\n{HELP}\nNERV_EOF\nprintf '%s' '{warning}' >&2\n"),
+    );
+    let out_dir = tmp.path().join("derived");
+    let written = derive_from_binary("chatty", &bin, &out_dir).expect("derived from stdout");
+    assert!(written.exists());
+    let registry = SpecRegistry::at_dir(&out_dir);
+    let spec = registry.lookup("chatty").expect("spec loads");
+    let subs: Vec<&str> = spec.subcommands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(subs, ["build", "clean", "publish"]);
+}
+
 /// A command that answers `--help` with an error must not become a
 /// spec, and must not leave a file behind.
 #[test]
