@@ -115,8 +115,15 @@ impl FrecencyStore {
     /// Record an accepted suggestion. Increments the count and stamps
     /// the current time. Marks the store dirty for a later flush.
     pub fn record(&self, spec: &str, insertion: &str) {
+        // The load-time invariant (no empties) holds at write time too:
+        // a bad caller must not inject a blank popup row or fork
+        // disk/memory (the row would vanish on reload).
+        if spec.is_empty() || insertion.is_empty() {
+            return;
+        }
         let now = now_unix();
         let Ok(mut st) = self.state.lock() else {
+            crate::paths::warn_poison_once("frecency record");
             return;
         };
         let known = st
@@ -158,9 +165,12 @@ impl FrecencyStore {
         spec: &str,
         insertions: impl IntoIterator<Item = &'a str>,
     ) -> Vec<f64> {
-        let st = self.state.lock().ok();
-        let picks = st.as_ref().and_then(|st| st.table.get(spec));
+        let Ok(st) = self.state.lock() else {
+            crate::paths::warn_poison_once("frecency scores");
+            return insertions.into_iter().map(|_| 0.0).collect();
+        };
         let now = now_unix();
+        let picks = st.table.get(spec);
         insertions
             .into_iter()
             .map(|ins| {
@@ -177,6 +187,7 @@ impl FrecencyStore {
     /// alphabetically so the list is stable across calls.
     pub fn spec_names(&self) -> Vec<String> {
         let Ok(mut st) = self.state.lock() else {
+            crate::paths::warn_poison_once("frecency names");
             return vec![];
         };
         let now = now_unix();
@@ -337,6 +348,34 @@ mod tests {
     #[test]
     fn spec_names_is_empty_without_history() {
         assert!(FrecencyStore::empty().spec_names().is_empty());
+    }
+
+    /// A poisoned lock degrades to cold defaults (zeros / empty) with a
+    /// stderr trace — never a hang, never stale-looking data.
+    #[test]
+    fn poisoned_lock_returns_cold_defaults() {
+        let s = FrecencyStore::empty();
+        s.record("git", "status");
+        assert!(!s.spec_names().is_empty());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = s.state.lock().unwrap();
+            panic!("poison the mutex");
+        }));
+        assert!(r.is_err());
+        assert_eq!(s.scores("git", ["status"]), vec![0.0]);
+        assert!(s.spec_names().is_empty());
+    }
+
+    /// Empty spec/insertion records nothing: the load-time invariant
+    /// (no empties) holds at write time too, so a bad caller can't
+    /// inject a blank popup row or fork disk/memory.
+    #[test]
+    fn empty_record_writes_no_row() {
+        let s = FrecencyStore::empty();
+        s.record("", "");
+        s.record("git", "");
+        s.record("", "status");
+        assert!(s.spec_names().is_empty());
     }
 
     /// Command-name ranking sums a name's rows: `git` (two accepts on

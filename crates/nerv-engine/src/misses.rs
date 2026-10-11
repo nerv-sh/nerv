@@ -85,7 +85,9 @@ impl MissCounter {
 
     /// Load (or initialise) a counter backed by `path`. A missing file
     /// is an empty tally; malformed rows are skipped individually so a
-    /// corrupted file can never break completion.
+    /// corrupted file can never break completion. An oversized file is
+    /// trimmed to the most-recorded names here (not trickled out one
+    /// per `record`), mirroring the frecency store.
     pub fn load(path: &std::path::Path) -> Self {
         let mut map: HashMap<String, Entry> = HashMap::new();
         if let Ok(text) = std::fs::read_to_string(path) {
@@ -95,10 +97,22 @@ impl MissCounter {
                 }
             }
         }
+        let dirty = map.len() > MAX_ENTRIES;
+        if dirty {
+            let mut rows: Vec<_> = map.into_iter().collect();
+            rows.sort_by(|a, b| {
+                b.1.count
+                    .cmp(&a.1.count)
+                    .then(b.1.last_unix.cmp(&a.1.last_unix))
+            });
+            rows.truncate(MAX_ENTRIES);
+            map = rows.into_iter().collect();
+        }
         Self {
             path: Some(path.to_path_buf()),
             state: Mutex::new(State {
                 table: map,
+                dirty,
                 ..Default::default()
             }),
         }
@@ -113,6 +127,7 @@ impl MissCounter {
         }
         let now = now_unix();
         let Ok(mut st) = self.state.lock() else {
+            crate::paths::warn_poison_once("miss record");
             return;
         };
         if !st.table.contains_key(name) && st.table.len() >= MAX_ENTRIES {
@@ -133,6 +148,7 @@ impl MissCounter {
     /// stable across runs.
     pub fn top_n(&self, n: usize) -> Vec<(String, u32)> {
         let Ok(st) = self.state.lock() else {
+            crate::paths::warn_poison_once("miss tally");
             return Vec::new();
         };
         let mut rows: Vec<(&String, &Entry)> = st.table.iter().collect();
@@ -513,5 +529,37 @@ mod tests {
         }
         assert!(c.len() <= MAX_ENTRIES, "len was {}", c.len());
         assert_eq!(c.top_n(1), vec![("zeph".to_string(), 50)]);
+    }
+
+    /// An oversized file is trimmed on load (not trickled out one per
+    /// record): a typo-storm file must not stay resident. Keeps the
+    /// most-recorded names, like the `record`-path eviction.
+    #[test]
+    fn load_trims_oversized_file() {
+        let path = std::env::temp_dir().join(format!("nerv-misses-big-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut text = String::from("zeph\t50\t1700000000\n");
+        for i in 0..500 {
+            text.push_str(&format!("noise{i}\t1\t1700000000\n"));
+        }
+        std::fs::write(&path, &text).unwrap();
+        let c = MissCounter::load(&path);
+        assert!(c.len() <= MAX_ENTRIES, "len was {}", c.len());
+        assert_eq!(c.top_n(1), vec![("zeph".to_string(), 50)]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A poisoned lock degrades to an empty tally with a stderr trace.
+    #[test]
+    fn poisoned_lock_returns_empty_tally() {
+        let c = MissCounter::empty();
+        c.record("zeph");
+        assert_eq!(c.top_n(1), vec![("zeph".to_string(), 1)]);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = c.state.lock().unwrap();
+            panic!("poison the mutex");
+        }));
+        assert!(r.is_err());
+        assert!(c.top_n(5).is_empty());
     }
 }
