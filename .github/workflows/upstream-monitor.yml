@@ -43,6 +43,7 @@ jobs:
             pin_label: M0-1 (v0.6)
             pinned_sha: b654a1beb880951dd2343120bb867659622eecd9
     steps:
+      - uses: actions/checkout@v4
       - name: Inspect upstream
         id: upstream
         env:
