@@ -2,7 +2,7 @@
 
 > **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 §5.4 정합.
 > **출시 차단 요건**: 본 문서의 *모든* 인수 기준이 e2e 자동 테스트에서 통과해야 v1.0 출시.
-> **v0.6 정합**: marker 블록 식별/제거 로직은 `nerv-shell` (자작, 보존) + `nerv-integrations` (← upstream `fig_integrations`, 흡수) 에 분산. uninstall 절차 자체는 변경 없음. nerv-pty (M1 figterm opt-in) 도입 시 PTY shim 바이너리 (`~/.local/bin/nerv-pty`) 가 §2 인벤토리에 8번으로 추가됨 — §11 참조.
+> **v0.6 정합**: marker 블록 식별/제거 로직은 `nerv-shell` (자작, 보존) + `nerv-integrations` (← upstream `fig_integrations`, 흡수) 에 분산. uninstall 절차 자체는 변경 없음. nerv-pty (M1 figterm opt-in, `NERV_PTY=1`) 도입 시 sibling 바이너리 + `NERV_PTY_BIN` export + per-shell bootstrap이 §2 인벤토리에 추가됨 — §11 참조.
 
 ---
 
@@ -35,7 +35,7 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 
 > **v1.0 비대상**: LaunchAgent (`~/Library/LaunchAgents/sh.nerv.nervd.plist`) — v1.0 은 `nerv start` / `stop` 수동 라이프사이클만. 자동 기동 도입 (v1.x) 시점에 본 인벤토리에 8번으로 추가하고 §4 step 6 도 함께 부활한다.
 >
-> **v1.0 M0 비대상 (M1 도입 예정)**: `nerv-pty` (← upstream figterm) PTY shim 바이너리 — PRD v0.6 §5.8 의 opt-in path 도입 시 `~/.local/bin/nerv-pty` + `pre.sh` 의 `exec -a` 라인이 §2 인벤토리에 추가됨. uninstall 절차도 PTY shim 종료 + 바이너리 삭제 + pre.sh 라인 제거 단계 추가. §11 참조.
+> **v1.0 M0 비대상 (M1 도입 예정)**: `nerv-pty` (← upstream figterm) PTY shim 바이너리 — PRD v0.6 §5.8 의 opt-in path (`NERV_PTY=1`) 도입 시 sibling 바이너리 + `NERV_PTY_BIN` export 라인 + per-shell bootstrap이 §2 인벤토리에 추가됨. §11 참조.
 
 > **macOS 경로 일관성 원칙**: 캐시 = `~/Library/Caches/nerv/`, 로그 = `~/Library/Logs/nerv/`, 설정 = `~/.config/nerv/`.
 
@@ -277,14 +277,13 @@ uninstall 자체의 로그는 §4 step 5 ("로그 삭제")에서 제거되지 �
 
 ## 11. M1 figterm (`nerv-pty`) opt-in 시 인벤토리 추가분
 
-PRD v0.6 §5.8 의 opt-in path 가 활성화되면 (`nerv init zsh --pty`) 본 §2 표에 다음 항목이 추가된다:
+PRD v0.6 §5.8 의 opt-in path 는 환경 변수 게이트 (`NERV_PTY=1`, `--pty` 플래그 없음) — 활성화되면 본 §2 표에 다음 항목이 추가된다:
 
 | # | 종류 | 경로 / 리소스 | 생성 주체 | `--keep-config` 시 |
 |---|------|---------------|----------|-------------------|
-| 8 | PTY shim 바이너리 | `~/.local/bin/nerv-pty` | `nerv init zsh --pty` | 삭제 |
-| 9 | pre.sh 의 `exec -a "<shell> (nerv-pty)" nerv-pty` 라인 | `~/.zshrc` 의 마커 블록 내부 (또는 `nerv-integrations/pre.sh` 가 sourcing 된 위치) | `nerv init zsh --pty` | 삭제 |
-| 10 | runtime 소켓 디렉터리 | `$XDG_RUNTIME_DIR/nervrun/` (Linux) / `$TMPDIR/nervrun/` (macOS) | `nerv-pty` 첫 기동 | 삭제 |
-| 11 | data 디렉터리 | `~/Library/Application Support/nerv/` (macOS) / `$XDG_DATA_HOME/nerv/` (Linux) | `nerv-pty` settings/state | **보존** |
+| 8 | PTY shim 바이너리 | `nerv` 옆의 sibling (`NERV_PTY_BIN` export 로 고정) | brew/tarball 동봉 | 삭제 |
+| 9 | `export NERV_PTY_BIN=…` (zsh/bash) / `set -gx NERV_PTY_BIN …` (fish) 라인 | 셸 rc 마커 블록 내부 (`eval "$(nerv init <shell>)"` 가 영속화) | `nerv init <shell>` (NERV_PTY=1 시) | 삭제 |
+| 10 | PTY bootstrap 스크립트 (`_nerv-pty.zsh` / `_nerv-pty.bash` / `_nerv-pty.fish`) | ZLE 위젯 대신 emit (`shell-integrations/`) | `nerv init <shell>` (NERV_PTY=1 시, 위젯과 상호배타) | 삭제 |
 
 **브랜드 정합 참고**: figterm path 가 활성화되면 다음 env var 와 설정
 키가 사용자 환경에 잔존할 수 있다 — uninstall 은 이들을 *직접*
@@ -301,12 +300,11 @@ uninstall 절차 (§4) 에 PTY shim 종료 단계 추가:
 
 ```
 2.5. PTY shim 종료:
-     a. 모든 활성 zsh 세션에 SIGTERM (사용자 confirm 후, ─force 시 자동)
-        — 또는 pre.sh 의 exec 교체만 제거하고 새 셸부터 ZLE 복귀
-     b. ~/.local/bin/nerv-pty 삭제
+     a. 모든 활성 PTY 세션에 SIGTERM (사용자 confirm 후, ─force 시 자동)
+     b. rc 마커 블록의 `NERV_PTY_BIN` export 라인 제거 (새 셸부터 ZLE 복귀)
 ```
 
-ZLE-only 사용자는 본 §11 무관 (인벤토리 §2 그대로). figterm
+ZLE-only 사용자는 본 §11 무관 (인벤토리 §2 그대로). `NERV_PTY=1`
 opt-in 사용자만 §11 추가분도 검증 대상.
 
 ---
