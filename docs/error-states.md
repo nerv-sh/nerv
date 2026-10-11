@@ -24,7 +24,7 @@
 | **E2** | spec 파일 손상 / 파싱 실패 | 데몬 시작 시 + lazy load 시 | JSON parse error (`nerv-engine::spec_loader`, M0-6 = upstream `loadSpec.ts` 포팅분) | 해당 spec만 비활성, stderr 1줄 (§3.2) |
 | **E3** | zsh < 5.8 | `nerv init zsh` 실행 시 | `$ZSH_VERSION` 비교 | stderr 경고 + `exit 0`, 자동완성 비활성 (§3.3) |
 | **E4** | ZLE 위젯 충돌 | `nerv init zsh` 실행 시 + 데몬 시작 시 | 환경 변수 / 알려진 시그니처 휴리스틱 | stderr 경고 + URL (§3.4) |
-| **E5** | spec 버전 불일치 | 데몬 시작 시 | `specs-prebuilt/manifest.json` 의 schema 버전 vs 데몬 빌드 버전 | stderr 1줄 + `doctor` (§3.5) |
+| **E5** | spec 버전 불일치 | 데몬 시작 시 | spec 층 디렉터리의 `manifest.json` schema 버전 vs 데몬 빌드 버전 (`SUPPORTED_SCHEMA_VERSION = 3`) | stderr 1줄 + `doctor` (§3.5) |
 
 위 5개 외의 모든 에러는 **fail-quiet** — 자동완성을 끄고 stderr 한 줄 + 다음 키 입력에 영향 없음.
 
@@ -161,18 +161,17 @@ THEN:
 `init zsh` 단계 — 환경에서 알려진 라이벌 도구의 흔적 검사:
 
 - `$ZSH_AUTOSUGGEST_USE_ASYNC` 정의 → zsh-autosuggestions 사용 중
-- `$ZSH_AUTOCOMPLETE` 또는 `_zsh_autocomplete` 함수 정의 → zsh-autocomplete 사용 중
-- `bindkey -M menuselect` 출력 비어있지 않음 → fzf-tab 또는 유사 도구
-- `_fzf_complete` 함수 → fzf 자동완성 통합
-- `q init zsh` 흔적 (`# Amazon Q` 문자열) — Amazon Q 와 동시 사용
+- `$_FZF_COMPLETION_DIR` 정의 → fzf completion 사용 중
+- `$FZF_DEFAULT_OPTS` 정의 → fzf (general) 사용 중
+- `$STARSHIP_SHELL` 정의 → starship prompt (참고용 표시, 충돌 아님)
 
 데몬 시작 단계 — ZLE 진단 ping (`zle -lL` 출력 분석) 으로 widget 등록 충돌 검사.
 
 **사용자 화면** (stderr, init zsh 시):
 
 ```
-[nerv] detected zsh-autocomplete — Nerv runs alongside but key bindings may conflict.
-       See: https://nerv.sh/docs/conflicts#zsh-autocomplete
+[nerv] detected zsh-autosuggestions — Nerv runs alongside but key bindings may conflict.
+       See: https://nerv.sh/docs/conflicts#zsh-autosuggestions
 ```
 
 여러 도구가 감지되면 모두 1줄씩.
@@ -494,7 +493,7 @@ nerv doctor
   ✓ zsh version          5.9 (>= 5.8)
   ✓ shell hook           ~/.zshrc 마커 블록 1개 (멱등 OK)
   ✓ daemon               nervd running (pid 12345, uptime 2h)
-  ✓ spec schema          v2 (matches daemon)
+  ✓ spec schema          v3 (matches daemon)
   ℹ specs                built 47 days ago
                          → run: brew upgrade nerv  (선택)
   ⚠ widget conflicts     zsh-autosuggestions detected
