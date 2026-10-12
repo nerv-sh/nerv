@@ -5601,13 +5601,30 @@ region = us-east-1
             2,
             "both generators must contribute once warm: {out:?}"
         );
-        // Parallel, not serial. Two sequential 400ms sleeps cannot finish
-        // under 800ms by construction, so that is the bound — any slack
-        // below it is margin a loaded CI runner eats (observed 762ms on
-        // a 3-core macos-14 runner with the suite in parallel).
+        // Parallel, not serial: compare per-generator completion instants,
+        // not the wall-clock total. The total mixes in spawn, scheduling
+        // and poll overshoot, so a loaded CI box can push two concurrent
+        // 400ms sleeps past any fixed total (observed 806ms vs the old
+        // 800ms bound on a macos-14 runner, #71 merge CI red). Completion
+        // skew is load-independent: run serially, the second 400ms sleep
+        // cannot start before the first finishes, so the two cache-insert
+        // instants land >= 400ms apart by construction; run in parallel
+        // they land together up to scheduling jitter.
+        let skew = GENERATOR_CACHE
+            .lock()
+            .map(|c| {
+                let a = c.get(&ka).map(|e| e.at);
+                let b = c.get(&kb).map(|e| e.at);
+                a.zip(b).map(|(a, b)| {
+                    a.saturating_duration_since(b)
+                        .max(b.saturating_duration_since(a))
+                })
+            })
+            .expect("generator cache lock must not be poisoned")
+            .expect("both generator cache entries must exist after wait_for");
         assert!(
-            warm_elapsed.as_millis() < 800,
-            "expected concurrent cold generators, took {warm_elapsed:?}"
+            skew < Duration::from_millis(400),
+            "expected concurrent cold generators, completion skew was {skew:?} (total {warm_elapsed:?})"
         );
     }
 
