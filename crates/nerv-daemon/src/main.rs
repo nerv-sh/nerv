@@ -1653,6 +1653,73 @@ mod tests {
         );
     }
 
+    /// `dispatch` refuses an ImportHistory path outside HOME instead of importing it.
+    /// Sync test + `block_on` (not `#[tokio::test]`): HOME_LOCK must be
+    /// held for the whole test including the dispatch future, and holding
+    /// a std guard across `.await` trips `await_holding_lock`.
+    #[test]
+    fn import_dispatch_outside_home_is_refused() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialized by HOME_LOCK.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, "secret\n").expect("write");
+        let shared = test_shared();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let resp = rt.block_on(dispatch(
+            Ok(Request::ImportHistory {
+                path: secret.to_str().unwrap().to_string(),
+            }),
+            &shared,
+        ));
+        assert!(
+            matches!(&resp, Response::Error { message } if message.contains("refused")),
+            "outside-HOME import must be refused, got: {resp:?}"
+        );
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    /// `dispatch` imports a home history file and reports the count.
+    /// Sync test + `block_on`, same HOME_LOCK reason as above.
+    #[test]
+    fn import_dispatch_reads_a_home_history_file() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialized by HOME_LOCK.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let hist = home.path().join("hist.txt");
+        std::fs::write(&hist, "alpha\nbeta\n").expect("write");
+        let shared = test_shared();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let resp = rt.block_on(dispatch(
+            Ok(Request::ImportHistory {
+                path: hist.to_str().unwrap().to_string(),
+            }),
+            &shared,
+        ));
+        assert!(
+            matches!(&resp, Response::Empty { reason: Some(r), .. } if r.starts_with("imported")),
+            "home history import must report a count, got: {resp:?}"
+        );
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
     /// Sessions union into the shell-name list, deduped, capped at 4096
     /// with the oldest dropped (plan slice 02). Free-standing so the cap
     /// contract is testable without a daemon.
