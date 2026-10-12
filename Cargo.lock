@@ -1944,15 +1944,11 @@ name = "nerv-test-utils"
 version = "0.1.39"
 dependencies = [
  "bytes",
- "hex",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
- "nerv-os",
- "nerv-util",
  "reqwest",
- "ring",
  "tokio",
  "tokio-util",
 ]
