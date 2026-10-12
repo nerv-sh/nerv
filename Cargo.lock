@@ -1764,14 +1764,12 @@ dependencies = [
  "nerv-util",
  "nix 0.29.0",
  "pin-project-lite",
- "rand 0.9.4",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
  "uuid",
- "whoami",
 ]
 
 [[package]]
