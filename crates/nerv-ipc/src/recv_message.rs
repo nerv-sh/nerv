@@ -155,4 +155,33 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn exhausted_stream_yields_none() {
+        let mut mock = mock(vec![]);
+        assert_eq!(
+            mock.recv_message::<nerv_proto::local::LocalMessage>()
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_frame_is_unexpected_eof() {
+        let mut writer = Cursor::new(vec![]);
+        writer.send_message(test_message_small()).await.unwrap();
+        let full = writer.into_inner();
+        assert!(full.len() > 1);
+        let mut mock = mock(full[..full.len() - 1].to_vec());
+        mock.inner.set_position(0);
+        let err = mock
+            .recv_message::<nerv_proto::local::LocalMessage>()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, RecvError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+            "truncated frame must surface UnexpectedEof, got: {err:?}"
+        );
+    }
 }
