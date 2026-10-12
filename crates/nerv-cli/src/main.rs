@@ -2306,6 +2306,57 @@ mod tests {
         assert_eq!(parse_zsh_version("v5.8"), (0, 8));
     }
 
+    /// The `$SHELL` probe only ever executes a path ending in `zsh`.
+    /// Anything else answers None without spawning anything. Samples
+    /// first, restores, asserts last — an assertion must never leave a
+    /// mutated `SHELL` behind for parallel tests.
+    #[test]
+    fn shell_probe_never_spawns_for_non_zsh() {
+        let prev = std::env::var_os("SHELL");
+        let mut got = Vec::new();
+        for shell in ["/bin/bash", "/bin/sh", "", "/usr/bin/env bash"] {
+            unsafe { std::env::set_var("SHELL", shell) };
+            got.push(detect_zsh_version_via_shell());
+        }
+        unsafe { std::env::remove_var("SHELL") };
+        got.push(detect_zsh_version_via_shell());
+        match prev {
+            Some(p) => unsafe { std::env::set_var("SHELL", p) },
+            None => unsafe { std::env::remove_var("SHELL") },
+        }
+        assert_eq!(got, vec![None, None, None, None, None]);
+    }
+
+    /// `ZSH_VERSION` wins over the `$SHELL` probe, and anything below
+    /// 5.8 errors. `SHELL` sits on bash throughout so no probe can
+    /// spawn either way — the assertions pin precedence and the floor,
+    /// not probing. Env is restored before asserting, as above.
+    #[test]
+    fn zsh_compat_prefers_env_and_enforces_the_floor() {
+        let prev_ver = std::env::var_os("ZSH_VERSION");
+        let prev_shell = std::env::var_os("SHELL");
+        unsafe {
+            std::env::set_var("SHELL", "/bin/bash");
+            std::env::set_var("ZSH_VERSION", "5.9");
+        }
+        let ok = check_zsh_env_compat().is_ok();
+        unsafe { std::env::set_var("ZSH_VERSION", "5.7") };
+        let old = check_zsh_env_compat();
+        unsafe { std::env::remove_var("ZSH_VERSION") };
+        let missing = check_zsh_env_compat();
+        match prev_ver {
+            Some(p) => unsafe { std::env::set_var("ZSH_VERSION", p) },
+            None => unsafe { std::env::remove_var("ZSH_VERSION") },
+        }
+        match prev_shell {
+            Some(p) => unsafe { std::env::set_var("SHELL", p) },
+            None => unsafe { std::env::remove_var("SHELL") },
+        }
+        assert!(ok, "5.9 via env passes");
+        assert!(old.is_err(), "5.7 errors");
+        assert!(missing.is_err(), "no version with a bash SHELL errors");
+    }
+
     /// `read_pid` parses the PID file written by `nerv start`.
     /// Whitespace and trailing newlines are trimmed before parsing.
     #[test]
