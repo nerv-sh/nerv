@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-cli"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "anyhow",
  "clap",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-daemon"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "anyhow",
  "libc",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-diag"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "cfg-if",
  "clap",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-engine"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "anyhow",
  "clap",
@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-integrations"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-ipc"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "async-trait",
  "base64",
@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-log"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "nerv-os",
  "tempfile",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-os"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "cfg-if",
  "dirs",
@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-proto"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "arbitrary",
  "bytes",
@@ -1821,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-pty"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1867,7 +1867,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-quickjs"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "anyhow",
  "rquickjs",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-settings"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "fd-lock",
  "nerv-util",
@@ -1894,11 +1894,11 @@ dependencies = [
 
 [[package]]
 name = "nerv-shell"
-version = "0.1.40"
+version = "0.1.41"
 
 [[package]]
 name = "nerv-term"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "bitflags 2.11.1",
  "nerv-os",
@@ -1913,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-test-macro"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "quote",
  "syn",
@@ -1921,7 +1921,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-test-utils"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "bytes",
  "http",
@@ -1935,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-util"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "bstr",
  "camino",
