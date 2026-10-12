@@ -176,4 +176,26 @@ mod tests {
 
         assert_eq!(message, decoded_message);
     }
+
+    #[test]
+    fn decode_incomplete_line_yields_none() {
+        let mut decoder = Base64LineCodec::<nerv_proto::local::LocalMessage>::new();
+        let mut src = BytesMut::from(&b"aGk"[..]);
+        assert!(decoder.decode(&mut src).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_corrupt_base64_is_err() {
+        let mut decoder = Base64LineCodec::<nerv_proto::local::LocalMessage>::new();
+        let mut src = BytesMut::from(&b"!!! not base64 !!!\n"[..]);
+        assert!(decoder.decode(&mut src).is_err());
+    }
+
+    #[test]
+    fn decode_corrupt_protobuf_is_err() {
+        let mut decoder = Base64LineCodec::<nerv_proto::local::LocalMessage>::new();
+        let garbage = BASE64_STANDARD.encode([0xff_u8; 4]);
+        let mut src = BytesMut::from(format!("{garbage}\n").as_bytes());
+        assert!(decoder.decode(&mut src).is_err());
+    }
 }
