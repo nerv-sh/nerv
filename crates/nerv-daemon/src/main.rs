@@ -2658,4 +2658,17 @@ mod tests {
         let order: Vec<&str> = ranked.iter().map(|s| s.display.as_str()).collect();
         assert_eq!(order, ["tak-bro", "claude-code"]);
     }
+
+    /// The pid file is the `nerv start` readiness signal, written after
+    /// the socket binds: it must name this process's pid. Pins the write
+    /// contract so a content or wrong-path regression fails here instead
+    /// of as a flaky start race.
+    #[tokio::test]
+    async fn pid_file_contains_this_process_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_path = dir.path().join("nervd.pid");
+        write_pid_file(&pid_path).await.expect("write pid file");
+        let body = std::fs::read_to_string(&pid_path).expect("read pid file");
+        assert_eq!(body, format!("{}\n", std::process::id()));
+    }
 }
