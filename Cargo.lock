@@ -1911,9 +1911,6 @@ dependencies = [
 [[package]]
 name = "nerv-shell"
 version = "0.1.39"
-dependencies = [
- "thiserror 2.0.18",
-]
 
 [[package]]
 name = "nerv-term"
