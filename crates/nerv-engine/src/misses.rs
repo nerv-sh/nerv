@@ -420,12 +420,23 @@ mod tests {
     fn flush_is_throttled_within_the_interval() {
         let path = tmp_path("throttle");
         let c = MissCounter::load(&path);
+        // Sampled around record AND flush: the row carries the record
+        // time, and either sample can straddle a second boundary
+        // (CI 2026-10-11: file …275 vs assertion …276), so the
+        // timestamp is bounded, not exact.
+        let before = now_unix();
         c.record("zeph");
         c.flush_if_dirty();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "zeph\t1\t".to_string() + &now_unix().to_string() + "\n",
-            "first flush writes immediately",
+        let after = now_unix();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        let ts = on_disk
+            .strip_prefix("zeph\t1\t")
+            .and_then(|s| s.strip_suffix('\n'))
+            .and_then(|s| s.parse::<u64>().ok())
+            .expect("first flush writes one zeph row");
+        assert!(
+            (before..=after.max(before)).contains(&ts),
+            "flush timestamp {ts} falls between samples {before} and {after}",
         );
 
         c.record("zeph");
