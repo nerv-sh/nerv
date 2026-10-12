@@ -1714,7 +1714,6 @@ dependencies = [
  "libc",
  "nerv-quickjs",
  "notify",
- "once_cell",
  "serde",
  "serde_json",
  "tempfile",
