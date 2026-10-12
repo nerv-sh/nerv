@@ -1884,7 +1884,6 @@ version = "0.1.40"
 dependencies = [
  "anyhow",
  "rquickjs",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]
