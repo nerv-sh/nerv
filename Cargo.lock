@@ -1686,25 +1686,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerv-diag"
-version = "0.1.39"
-dependencies = [
- "cfg-if",
- "clap",
- "nerv-ipc",
- "nerv-os",
- "nerv-proto",
- "nerv-util",
- "serde",
- "serde_json",
- "sysinfo",
- "time",
- "tokio",
- "toml",
- "whoami",
-]
-
-[[package]]
 name = "nerv-engine"
 version = "0.1.39"
 dependencies = [
