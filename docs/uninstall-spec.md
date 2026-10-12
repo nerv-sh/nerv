@@ -2,7 +2,7 @@
 
 > **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 §5.4 정합.
 > **출시 차단 요건**: 본 문서의 *모든* 인수 기준이 e2e 자동 테스트에서 통과해야 v1.0 출시.
-> **v0.6 정합**: marker 블록 식별/제거 로직은 `nerv-shell` (자작, 보존) + `nerv-integrations` (← upstream `fig_integrations`, 흡수) 에 분산. uninstall 절차 자체는 변경 없음. nerv-pty (M1 figterm opt-in, `NERV_PTY=1`) 도입 시 sibling 바이너리 + `NERV_PTY_BIN` export + per-shell bootstrap이 §2 인벤토리에 추가됨 — §11 참조.
+> **v0.6 정합**: marker 블록 식별/제거 로직은 `nerv-shell` 자족 (마커 상수 + `strip_blocks`, `nerv-cli`가 호출). `nerv-integrations` (upstream `fig_integrations` 흡수분)는 uninstall에 배선된 적이 없어 제거. uninstall 절차 자체는 변경 없음. nerv-pty (M1 figterm opt-in, `NERV_PTY=1`) 도입 시 sibling 바이너리 + `NERV_PTY_BIN` export + per-shell bootstrap이 §2 인벤토리에 추가됨 — §11 참조.
 
 ---
 
@@ -61,7 +61,7 @@ if [[ -r "$HOME/Library/Caches/nerv/init.zsh" ]] && source "$HOME/Library/Caches
 - 마커 사이 라인은 `nerv init zsh` 출력으로 *완전 대체* 한다 (사용자 수정 무효).
 - `nerv init zsh` 를 여러 번 실행해도 마커 블록은 **항상 1개만** 존재해야 한다.
 
-**v0.6 구현 매핑**: 마커 블록의 쓰기/탐지/삭제는 `crates/nerv-shell` (자작, 마커 상수 `MARKER_BEGIN` / `MARKER_END` + 4 unit test) 이 권위. `crates/nerv-integrations` (← upstream fig_integrations 흡수) 의 `pre.sh` / `post.zsh` 스크립트가 마커 블록 *내부* 본문을 제공. CLAUDE.md §4 invariant 의 "marker 교체 필수" 행 참조 — 흡수 시 fig 의 마커는 nerv 마커로 전수 교체됐는지 grep 검증.
+**v0.6 구현 매핑**: 마커 블록의 쓰기/탐지/삭제는 `crates/nerv-shell` (자작, 마커 상수 `MARKER_START` / `MARKER_END` + 4 unit test) 이 권위이며, 블록 본문은 `eval` 1줄이다. `crates/nerv-integrations` (upstream fig_integrations 흡수분) 의 `pre.sh` / `post.zsh` 는 마커 블록에 포함된 적이 없어 크레이트째 제거. CLAUDE.md §4 invariant 의 "marker 교체 필수" 행 참조.
 
 ---
 
@@ -315,3 +315,4 @@ opt-in 사용자만 §11 추가분도 검증 대상.
 *v1.5 — 캐시 인벤토리 정합 (2026-09-05). v1.4 → v1.5 변경: §2 행 5 에 `misses.tsv` (spec-miss 로컬 집계) 와 `derived/` (`--help` 파생 spec 캐시) 명시. 둘 다 `~/Library/Caches/nerv/` 아래라 §4 step 4 의 `rm -rf` 가 이미 덮는다 — 절차 무변경, 인벤토리 문서화만. 구현 측: rc 파일 재작성이 공용 `paths::write_atomic` 으로 통일돼 퍼미션 보존 + 실패 시 temp 파일 unlink (흔적 0 계약이 실패 경로까지 적용). 변경 트리거: 캐시 디렉터리 밖에 새 산출물이 생길 때.*
 
 *v1.6 — 명령 기록·init 캐시 (2026-09-27). §2 행 5 에 `history.tsv`·`history.tsv.lock`·`init.zsh` 명시, §3 zsh 블록이 캐시를 먼저 source 하고 없거나 낡으면(다른 nerv 바이너리 — 크기·mtime·inode 스탬프) eval. 캐시 디렉터리 아래라 §4 step 4 가 이미 덮는다 — 절차 무변경.*
+*v1.7 — 고아 크레이트 제거 정합. `nerv-integrations` (upstream fig_integrations 흡수분) 가 uninstall에 배선된 적이 없어 크레이트째 제거 + 머리말 v0.6 정합행·§5.1 매핑 정정 (마커는 nerv-shell 자족, 본문 eval 1줄; MARKER_BEGIN/END 오기명 → START/END). 인수 기준 / 절차 자체는 무변경.*
