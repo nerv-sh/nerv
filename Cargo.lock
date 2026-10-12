@@ -1808,7 +1808,6 @@ dependencies = [
  "flate2",
  "hex",
  "nerv-util",
- "nix 0.29.0",
  "prost",
  "prost-build",
  "prost-reflect",
