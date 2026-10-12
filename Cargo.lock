@@ -1779,8 +1779,6 @@ name = "nerv-log"
 version = "0.1.39"
 dependencies = [
  "nerv-os",
- "nerv-util",
- "parking_lot",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
