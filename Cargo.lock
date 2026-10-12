@@ -1901,7 +1901,6 @@ name = "nerv-term"
 version = "0.1.40"
 dependencies = [
  "bitflags 2.11.1",
- "camino",
  "nerv-os",
  "serde",
  "serde_json",
