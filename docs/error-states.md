@@ -2,7 +2,7 @@
 
 > **Status**: 인수 기준 (글이 코드보다 먼저). PLAN.md v0.6 §5.5 정합.
 > **원칙**: *"고장은 조용히 알리고, 고치는 한 줄을 함께 보여준다."*
-> **v0.6 정합**: 5종 에러 카탈로그 (E1–E5) 와 doctor 자동 실행 트리거 (§3.6) 자체는 변경 없음. `nerv doctor` 구현은 v0.5 의 자작 골격에서 `crates/nerv-diag` (← upstream fig_diagnostic 흡수) 의 진단 수집기를 활용하는 형태로 *내부 구조 전환*. spec 경로는 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` 이동 (PRD §8 / §11 보강).
+> **v0.6 정합**: 5종 에러 카탈로그 (E1–E5) 와 doctor 자동 실행 트리거 (§3.6) 자체는 변경 없음. `nerv doctor` 구현은 `crates/nerv-cli` 의 `cmd_doctor()` 자족 (도메인 규칙 수집·필터링·포맷팅 한 곳). `crates/nerv-diag` (upstream fig_diagnostic 흡수분)는 배선 없이 방치된 것이 확인되어 제거. spec 경로는 `specs-prebuilt/` → `~/Library/Caches/nerv/specs/` 이동 (PRD §8 / §11 보강).
 
 ---
 
@@ -518,10 +518,9 @@ Result: 4 OK, 1 info, 1 warning, 1 error
 
 각 항목은 본 §2 표에 추가 등재 없이 doctor 전용. 자동 표시 없음.
 
-**v0.6 구현 매핑**: 위 점검 항목들은 `crates/nerv-diag` (← upstream
-fig_diagnostic 흡수) 의 진단 수집기가 후보 데이터를 제공하고,
-`crates/nerv-cli` 의 `cmd_doctor()` 가 nerv 도메인 규칙으로 필터링 +
-포맷팅. Q 의 chat/auth/telemetry 진단 항목은 흡수 시 strip (CLAUDE.md
+**v0.6 구현 매핑**: 위 점검 항목들은 `crates/nerv-cli` 의 `cmd_doctor()` 가
+직접 수집·필터링 + 포맷팅. `crates/nerv-diag` (upstream fig_diagnostic
+흡수분)는 doctor 에 배선된 적이 없어 제거됨. Q 의 chat/auth/telemetry 진단 항목은 흡수 시 strip (CLAUDE.md
 §4 invariant 의 strip 의존 0 행 참조).
 
 ---
@@ -563,4 +562,5 @@ PII / 사용자 입력 내용은 *기록하지 않음*. 토큰화된 위치 (서
 *v1.6 — `_complete` exit 4 (행 + 토큰 완성, 에러 아님) 명시 (2026-09-17). 5종 카탈로그 무변경.*
 *v1.7 — §3.6.7 데몬/CLI 버전 스큐 경고 신설 (2026-09-21). 실행 중 데몬 pong 의 `version` ≠ CLI 면 warning 행 1개 + `nerv stop && nerv start` 조치. version 필드 없는 pong 은 무경고, 같은 버전은 행 없음 (신규 설치 출력 불변). 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
 *v1.8 — §3.6.3 shell 이름 행 프루닝 조항 신설 (2026-09-21). 등록된 shell 함수·alias 이름을 아는 데몬이 스큐 기간에 쌓인 해당 miss 행을 shell 이름 등록 시점에 원자 재작성으로 정리한다. 판정 소스가 등록 요청으로 들어오므로 트리거는 그 한 곳, PATH 실재 바이너리 행은 보존. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
+*v1.9 — §5.1 구현 매핑 정정: `nerv-diag` 미사용 확인·크레이트 제거, doctor 는 `cmd_doctor()` 자족으로 명시. 5종 카탈로그 / 메시지 톤 / exit code 규약 무변경.*
 *v1.9 — §3.6.3b storage 행 신설 (2026-10-08): frecency·misses 행 수/상한 + 수동 비우기 경로. `history` 행에 상한 표기.*

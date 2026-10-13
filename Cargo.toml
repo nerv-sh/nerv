@@ -18,7 +18,6 @@ members = [
     "crates/nerv-util",
     "crates/nerv-settings",
     "crates/nerv-log",
-    "crates/nerv-diag",
     "crates/nerv-test-macro",
     "crates/nerv-test-utils",
     # M1 opt-in Tier C closure executor. Lives behind an opt-in feature
@@ -28,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.42"
+version = "0.1.43"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -103,7 +102,6 @@ nerv-os = { path = "crates/nerv-os" }
 nerv-util = { path = "crates/nerv-util" }
 nerv-settings = { path = "crates/nerv-settings" }
 nerv-log = { path = "crates/nerv-log" }
-nerv-diag = { path = "crates/nerv-diag" }
 nerv-test-macro = { path = "crates/nerv-test-macro" }
 nerv-test-utils = { path = "crates/nerv-test-utils" }
 
