@@ -217,8 +217,9 @@ match letters scattered across a long name.
 `[derived]` controls the `--help` fallback: when a command has no spec in
 any layer, Nerv runs `<command> --help` once (no shell, 1 s timeout, output
 capped, cached under `~/Library/Caches/nerv/derived/`) and builds a spec from
-it. Set `enabled = false` and nothing is ever spawned. Either setting is read
-once at daemon start, so restart after editing (`nerv stop && nerv start`).
+it. Set `enabled = false` and nothing is ever spawned. Both `[matching]`
+and `[derived]` are watched — edits to `nerv.toml` apply without restarting
+the daemon.
 
 In zsh, a command with no spec in the bundle or your overlay first gets the
 candidates of its own zsh completion function, the ones Tab would show. The
