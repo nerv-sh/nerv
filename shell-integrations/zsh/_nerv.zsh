@@ -907,8 +907,11 @@ __nerv_enter_runs() {
     if [[ "$w" == (\;|\&\&|\|\||\||\&) ]]; then seg=(); else seg+=("$w"); fi
   done
   # An alias stands for its body: words it brings along count as
-  # arguments below, so `alias cdp='cd ~/proj'` never runs.
-  (( ${#seg} && ${+aliases[${seg[1]}]} )) \
+  # arguments below, so `alias cdp='cd ~/proj'` never runs. A name that
+  # is already one of ours is taken as typed — zsh-z ships `z` as
+  # `alias z='zshz 2>&1'`, and `alias cd='cd -P'` is still `cd`.
+  (( ${#seg} )) && [[ "${seg[1]}" != (cd|pushd|z) ]] \
+    && (( ${+aliases[${seg[1]}]} )) \
     && seg=("${(z)aliases[${seg[1]}]}" "${(@)seg[2,-1]}")
   while (( ${#seg} )) && [[ "${seg[1]}" == (builtin|command|noglob|nocorrect) ]]; do
     shift seg

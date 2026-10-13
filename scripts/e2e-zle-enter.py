@@ -285,6 +285,10 @@ def main():
         alias_runs, plain5e = one_enter([b"go2 w"])
         # 5f: the command word is the one after `&&`.
         chain_runs, plain5f = one_enter([b"true && cd w"])
+        # 5g: `cd` itself aliased with arguments (`alias cd='cd -q'`, or
+        # zsh-z's `alias z='zshz 2>&1'`) is still the directory changer.
+        self_alias_runs, plain5g = one_enter([b"alias cd='cd -q'\n", b"cd w"])
+        log(f"case5g self_alias_runs={self_alias_runs}")
         log(
             f"case5c midline_stays={midline_stays} 5d option_stays={option_stays} "
             f"5e alias_runs={alias_runs} 5f chain_runs={chain_runs}"
@@ -337,6 +341,7 @@ def main():
             and option_stays
             and alias_runs
             and chain_runs
+            and self_alias_runs
             and label_run
             and label_insert
             and label_cd_run
@@ -361,6 +366,7 @@ def main():
             log(f"  case5d tail: {plain5d[-300:]!r}")
             log(f"  case5e tail: {plain5e[-300:]!r}")
             log(f"  case5f tail: {plain5f[-300:]!r}")
+            log(f"  case5g tail: {plain5g[-300:]!r}")
             log(f"  case6c tail: {out6c[-300:]!r}")
             log(f"  case6a tail: {out6a[-300:]!r}")
             log(f"  case6b tail: {out6b[-300:]!r}")
