@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """E2E smoke for directory completion + Enter (_nerv.zsh).
 
-Model: Enter on a highlighted row inserts, Enter on the sentinel runs.
-When the popup highlights a directory completion (insertion ends in `/`
-— a dotnav pin `../` or a real folder `cli/`), the first Enter only
-INSERTS it; the line now ends at a segment boundary, so the popup comes
-back with the sentinel selected and the second Enter runs the line.
+Model: under `cd` a highlighted row is the whole command, so one Enter
+inserts it AND runs the line — a dotnav pin `../` or a real folder
+`cli/` alike. (Other commands stay insert-only: `e2e-zle-enter.py`
+case 5b.)
 
-Case 1: `cd ..` + Enter + Enter → cwd is the parent (dotnav pin).
-Case 2: `cd zz` + Enter + Enter → cwd is `<probe>/zzdeep` (real subdir).
+Case 1: `cd ..` + Enter → cwd is the parent (dotnav pin).
+Case 2: `cd zz` + Enter → cwd is `<probe>/zzdeep` (real subdir).
 
 The marker prints the resulting cwd, which is only reachable if the
-inserted path was the right one and the second Enter ran the line. That
-the first Enter alone does not run is `e2e-zle-enter.py` case 5.
+inserted path was the right one and that single Enter ran the line.
 
 Run from repo root:  python3 scripts/e2e-zle-dotnav.py
 Requires: cargo-built debug binaries, zsh on PATH.
@@ -90,16 +88,14 @@ def kill(master, proc):
 
 
 def cwd_after(env, keys):
-    """Open a shell (already cd'd into <probe>), send `keys`, Enter to
-    insert the highlighted directory, Enter to run, then a marker that
+    """Open a shell (already cd'd into <probe>), send `keys`, one Enter to
+    insert the highlighted directory and run, then a marker that
     prints $PWD. Return the printed cwd."""
     master, proc = new_shell(env)
     pump(master, 2.0)  # reach prompt
     os.write(master, keys)
     pump(master, 1.5)  # popup opens, directory highlighted
-    os.write(master, b"\r")  # inserts the highlighted directory
-    pump(master, 1.5)  # popup re-queries, sentinel selected
-    os.write(master, b"\r")  # runs the line
+    os.write(master, b"\r")  # inserts the highlighted directory and runs
     pump(master, 1.0)
     os.write(master, b'print -r -- "CWDMARK=$PWD"\r')
     out = pump(master, 1.5)
@@ -151,10 +147,10 @@ def main():
         log(f"case2 subdir cwd={cwd2!r} -> {'OK' if c2 else 'FAIL'}")
 
         if c1 and c2:
-            log("PASS — Enter inserts the directory, the next Enter runs the line")
+            log("PASS — one Enter inserts the directory and runs the line")
             rc = 0
         else:
-            log("FAIL — insert-then-run did not land in the directory")
+            log("FAIL — Enter did not land in the directory")
             log(f"  case1 tail: {out1[-300:]!r}")
             log(f"  case2 tail: {out2[-300:]!r}")
     finally:
