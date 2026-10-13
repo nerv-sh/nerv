@@ -169,6 +169,12 @@ async fn main() -> anyhow::Result<()> {
     // watcher) only logs — the daemon keeps boot-time values.
     let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::channel::<()>(8);
     let _config_watcher = start_config_watcher(cfg_tx);
+    if _config_watcher.is_none() {
+        warn!(
+            path = ?Config::config_file_path(),
+            "nerv.toml watcher unavailable — config edits need a restart"
+        );
+    }
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
