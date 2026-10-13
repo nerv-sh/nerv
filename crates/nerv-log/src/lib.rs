@@ -77,11 +77,7 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
 
             // We delete the old log file when requested each time the logger is initialized, otherwise we only
             // delete the file when it has grown too large.
-            if args.delete_old_log_file {
-                std::fs::remove_file(log_path).ok();
-            } else if log_path.exists() && std::fs::metadata(log_path)?.len() > MAX_FILE_SIZE {
-                std::fs::remove_file(log_path)?;
-            }
+            rotate_log_file(log_path, args.delete_old_log_file)?;
 
             // Create the new log file or append to the existing one.
             let file = if args.delete_old_log_file {
@@ -136,6 +132,19 @@ pub fn initialize_logging<T: AsRef<Path>>(args: LogArgs<T>) -> Result<LogGuard, 
         _file_guard,
         _stdout_guard,
     })
+}
+
+/// Delete the log file when asked, otherwise only when it has grown
+/// past `MAX_FILE_SIZE`. Split from `initialize_logging` so the rotation
+/// branches are pinnable without initializing the global tracing default
+/// twice (which panics).
+fn rotate_log_file(log_path: &Path, delete_old_log_file: bool) -> std::io::Result<()> {
+    if delete_old_log_file {
+        std::fs::remove_file(log_path).ok();
+    } else if log_path.exists() && std::fs::metadata(log_path)?.len() > MAX_FILE_SIZE {
+        std::fs::remove_file(log_path)?;
+    }
+    Ok(())
 }
 
 /// Get the current log level by first seeing if it is set in application, then environment, then
@@ -305,5 +314,46 @@ mod tests {
     #[test]
     fn max_file_size_constant_locked() {
         assert_eq!(MAX_FILE_SIZE, 10 * 1024 * 1024);
+    }
+
+    fn sized_log(dir: &tempfile::TempDir, name: &str, len: u64) -> std::path::PathBuf {
+        use std::io::Write;
+        let path = dir.path().join(name);
+        let mut f = File::create(&path).unwrap();
+        f.write_all(b"keep").unwrap();
+        f.set_len(len).unwrap();
+        path
+    }
+
+    #[test]
+    fn rotation_removes_oversized_log() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = sized_log(&dir, "big.log", MAX_FILE_SIZE + 1);
+        rotate_log_file(&path, false).unwrap();
+        assert!(!path.exists(), "oversized log must be rotated away");
+    }
+
+    #[test]
+    fn rotation_keeps_small_log() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = sized_log(&dir, "small.log", 1024);
+        rotate_log_file(&path, false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap()[..4], *b"keep");
+    }
+
+    #[test]
+    fn rotation_delete_old_removes_regardless_of_size() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = sized_log(&dir, "old.log", 1024);
+        rotate_log_file(&path, true).unwrap();
+        assert!(!path.exists(), "delete_old must remove even a small log");
+    }
+
+    #[test]
+    fn rotation_missing_file_is_ok() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("absent.log");
+        rotate_log_file(&path, false).unwrap();
+        rotate_log_file(&path, true).unwrap();
     }
 }
