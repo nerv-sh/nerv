@@ -14,7 +14,6 @@ members = [
     "crates/nerv-term",
     "crates/nerv-ipc",
     "crates/nerv-proto",
-    "crates/nerv-integrations",
     "crates/nerv-os",
     "crates/nerv-util",
     "crates/nerv-settings",
@@ -99,7 +98,6 @@ nerv-pty = { path = "crates/nerv-pty" }
 nerv-term = { path = "crates/nerv-term" }
 nerv-ipc = { path = "crates/nerv-ipc" }
 nerv-proto = { path = "crates/nerv-proto" }
-nerv-integrations = { path = "crates/nerv-integrations" }
 nerv-os = { path = "crates/nerv-os" }
 nerv-util = { path = "crates/nerv-util" }
 nerv-settings = { path = "crates/nerv-settings" }
