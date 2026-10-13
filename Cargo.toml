@@ -28,7 +28,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.39"
+version = "0.1.42"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -149,7 +149,6 @@ reqwest = { version = "0.12.14", default-features = false, features = [
     "socks",
     "cookies",
 ] }
-ring = "0.17.14"
 rusqlite = { version = "0.32.1", features = ["bundled", "serde_json"] }
 shell-color = "1.0.0"
 notify = { version = "7.0", default-features = false, features = ["macos_fsevent"] }

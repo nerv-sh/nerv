@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-cli"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "clap",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-daemon"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "libc",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-diag"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "cfg-if",
  "clap",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-engine"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "clap",
@@ -1726,7 +1726,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-ipc"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "async-trait",
  "base64",
@@ -1737,23 +1737,19 @@ dependencies = [
  "nerv-util",
  "nix 0.29.0",
  "pin-project-lite",
- "rand 0.9.4",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
  "uuid",
- "whoami",
 ]
 
 [[package]]
 name = "nerv-log"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "nerv-os",
- "nerv-util",
- "parking_lot",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -1763,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-os"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "cfg-if",
  "dirs",
@@ -1776,14 +1772,13 @@ dependencies = [
 
 [[package]]
 name = "nerv-proto"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "arbitrary",
  "bytes",
  "flate2",
  "hex",
  "nerv-util",
- "nix 0.29.0",
  "prost",
  "prost-build",
  "prost-reflect",
@@ -1799,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-pty"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1813,7 +1808,6 @@ dependencies = [
  "filedescriptor",
  "flume",
  "fnv",
- "indoc",
  "lazy_static",
  "memmem",
  "mimalloc",
@@ -1827,22 +1821,15 @@ dependencies = [
  "nerv-util",
  "nix 0.29.0",
  "num-traits",
- "parking_lot",
  "pin-project",
  "portable-pty",
  "predicates",
- "regex",
- "serde",
- "serde_json",
  "shared_library",
  "shell-color",
  "shlex",
  "sysinfo",
- "tempfile",
- "time",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "unicode-width 0.2.2",
  "uuid",
  "which",
@@ -1853,18 +1840,17 @@ dependencies = [
 
 [[package]]
 name = "nerv-quickjs"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "anyhow",
  "rquickjs",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "nerv-settings"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "fd-lock",
  "nerv-util",
@@ -1876,24 +1862,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
 name = "nerv-shell"
-version = "0.1.39"
-dependencies = [
- "thiserror 2.0.18",
-]
+version = "0.1.42"
 
 [[package]]
 name = "nerv-term"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "bitflags 2.11.1",
- "camino",
  "nerv-os",
  "serde",
  "serde_json",
@@ -1906,7 +1886,7 @@ dependencies = [
 
 [[package]]
 name = "nerv-test-macro"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "quote",
  "syn",
@@ -1914,25 +1894,21 @@ dependencies = [
 
 [[package]]
 name = "nerv-test-utils"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "bytes",
- "hex",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
- "nerv-os",
- "nerv-util",
  "reqwest",
- "ring",
  "tokio",
  "tokio-util",
 ]
 
 [[package]]
 name = "nerv-util"
-version = "0.1.39"
+version = "0.1.42"
 dependencies = [
  "bstr",
  "camino",

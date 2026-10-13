@@ -148,16 +148,6 @@ impl<T: GridCell + Default + PartialEq + Clone> Grid<T> {
         }
     }
 
-    /// Update the size of the scrollback history.
-    pub fn update_history(&mut self, history_size: usize) {
-        let current_history_size = self.history_size();
-        if current_history_size > history_size {
-            self.raw.shrink_lines(current_history_size - history_size);
-        }
-        self.display_offset = min(self.display_offset, history_size);
-        self.max_scroll_limit = history_size;
-    }
-
     pub fn scroll_display(&mut self, scroll: Scroll) {
         self.display_offset = match scroll {
             Scroll::Delta(count) => min(
@@ -406,17 +396,6 @@ impl<T> Grid<T> {
     #[inline]
     pub fn iter_from(&self, point: Point) -> GridIterator<'_, T> {
         let end = Point::new(self.bottommost_line(), self.last_column());
-        GridIterator {
-            grid: self,
-            point,
-            end,
-            post_increment: false,
-        }
-    }
-
-    /// Iterate over all cells in the grid starting at a specific point.
-    #[inline]
-    pub fn iter_from_to(&self, point: Point, end: Point) -> GridIterator<'_, T> {
         GridIterator {
             grid: self,
             point,
