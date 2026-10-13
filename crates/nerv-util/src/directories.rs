@@ -251,22 +251,6 @@ pub fn sockets_dir() -> Result<PathBuf> {
 /// - MacOS: $TMPDIR/nervrun
 /// - Windows: %TEMP%\sockets
 pub fn host_sockets_dir() -> Result<PathBuf> {
-    // TODO: make this work again
-    // #[cfg(target_os = "linux")]
-    // if crate::system_info::in_wsl() {
-    //     use std::ffi::OsStr;
-    //     use std::os::unix::prelude::OsStrExt;
-    //     use std::process::Command;
-
-    //     use bstr::ByteSlice;
-
-    //     let socket_dir = Command::new("fig.exe").args(["_", "sockets-dir"]).output()?;
-    //     let wsl_socket = Command::new("wslpath")
-    //         .arg(OsStr::from_bytes(socket_dir.stdout.trim()))
-    //         .output()?;
-    //     return Ok(PathBuf::from(OsStr::from_bytes(wsl_socket.stdout.trim())));
-    // }
-
     sockets_dir()
 }
 

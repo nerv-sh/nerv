@@ -1891,11 +1891,9 @@ dependencies = [
 name = "nerv-util"
 version = "0.1.46"
 dependencies = [
- "bstr",
  "camino",
  "cfg-if",
  "clap",
- "core-foundation",
  "dirs",
  "hex",
  "indoc",
@@ -1910,7 +1908,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "strum 0.27.2",
- "sysinfo",
  "thiserror 2.0.18",
  "time",
  "tokio",
