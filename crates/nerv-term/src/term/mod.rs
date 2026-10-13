@@ -14,9 +14,9 @@ use unicode_width::UnicodeWidthChar;
 use self::cell::FigFlags;
 use crate::ansi::{self, Attr, CharsetIndex, Color, Handler, NamedColor, StandardCharset};
 use crate::event::{DelayedEvent, Event, EventListener};
-use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
-use crate::index::{self, Boundary, Column, Direction, Line, Point, Rect};
-use crate::term::cell::{Cell, LineLength, ShellFlags};
+use crate::grid::{Dimensions, Grid, Scroll};
+use crate::index::{self, Column, Line, Point, Rect};
+use crate::term::cell::{Cell, ShellFlags};
 use crate::term::color::{Colors, Rgb};
 
 pub mod cell;
@@ -88,11 +88,6 @@ impl SizeInfo {
             screen_lines,
             columns,
         }
-    }
-
-    #[inline]
-    pub fn reserve_lines(&mut self, count: usize) {
-        self.screen_lines = max(self.screen_lines.saturating_sub(count), MIN_SCREEN_LINES);
     }
 }
 
@@ -303,115 +298,7 @@ impl<T> Term<T> {
         Self::new(size, event_proxy, max_scroll_limit, session_id)
     }
 
-    /// Convert range between two points to a String.
-    pub fn bounds_to_string(&self, start: Point, end: Point) -> String {
-        let mut res = String::new();
-
-        for line in (start.line.0..=end.line.0).map(Line::from) {
-            let start_col = if line == start.line {
-                start.column
-            } else {
-                Column(0)
-            };
-            let end_col = if line == end.line {
-                end.column
-            } else {
-                self.last_column()
-            };
-
-            res += &self.line_to_string(line, start_col..end_col, line == end.line);
-        }
-
-        res
-    }
-
-    /// Convert a single line in the grid to a String.
-    fn line_to_string(
-        &self,
-        line: Line,
-        mut cols: Range<Column>,
-        include_wrapped_wide: bool,
-    ) -> String {
-        let mut text = String::new();
-
-        let grid_line = &self.grid[line];
-        let line_length = min(grid_line.line_length(), cols.end + 1);
-
-        // Include wide char when trailing spacer is selected.
-        if grid_line[cols.start]
-            .flags
-            .contains(ShellFlags::WIDE_CHAR_SPACER)
-        {
-            cols.start -= 1;
-        }
-
-        let mut tab_mode = false;
-        for column in (cols.start.0..line_length.0).map(Column::from) {
-            let cell = &grid_line[column];
-
-            // Skip over cells until next tab-stop once a tab was found.
-            if tab_mode {
-                if self.tabs[column] || cell.c != ' ' {
-                    tab_mode = false;
-                } else {
-                    continue;
-                }
-            }
-
-            if cell.c == '\t' {
-                tab_mode = true;
-            }
-
-            if !cell
-                .flags
-                .intersects(ShellFlags::WIDE_CHAR_SPACER | ShellFlags::LEADING_WIDE_CHAR_SPACER)
-            {
-                // Push cells primary character.
-                text.push(cell.c);
-
-                // Push zero-width characters.
-                for c in cell.zerowidth().into_iter().flatten() {
-                    text.push(*c);
-                }
-            }
-        }
-
-        if cols.end >= self.columns() - 1
-            && (line_length.0 == 0
-                || !self.grid[line][line_length - 1]
-                    .flags
-                    .contains(ShellFlags::WRAPLINE))
-        {
-            text.push('\n');
-        }
-
-        // If wide char is not part of the selection, but leading spacer is, include it.
-        if line_length == self.columns()
-            && line_length.0 >= 2
-            && grid_line[line_length - 1]
-                .flags
-                .contains(ShellFlags::LEADING_WIDE_CHAR_SPACER)
-            && include_wrapped_wide
-        {
-            text.push(self.grid[line - 1i32][Column(0)].c);
-        }
-
-        text
-    }
-
-    /// Terminal content required for rendering.
-    #[inline]
-    pub fn renderable_content(&self) -> RenderableContent<'_>
-    where
-        T: EventListener,
-    {
-        RenderableContent::new(self)
-    }
-
     /// Access to the raw grid data structure.
-    ///
-    /// This is a bit of a hack; when the window is closed, the event processor
-    /// serializes the grid state to a file.
     pub fn grid(&self) -> &Grid<Cell> {
         &self.grid
     }
@@ -544,55 +431,6 @@ impl<T> Term<T> {
         T: EventListener,
     {
         trace!("Exit");
-    }
-
-    pub fn scroll_to_point(&mut self, point: Point)
-    where
-        T: EventListener,
-    {
-        let display_offset = self.grid.display_offset() as i32;
-        let screen_lines = self.grid.screen_lines() as i32;
-
-        if point.line < -display_offset {
-            let lines = point.line + display_offset;
-            self.scroll_display(Scroll::Delta(-lines.0));
-        } else if point.line >= (screen_lines - display_offset) {
-            let lines = point.line + display_offset - screen_lines + 1i32;
-            self.scroll_display(Scroll::Delta(-lines.0));
-        }
-    }
-
-    /// Jump to the end of a wide cell.
-    pub fn expand_wide(&self, mut point: Point, direction: Direction) -> Point {
-        let flags = self.grid[point.line][point.column].flags;
-
-        match direction {
-            Direction::Right if flags.contains(ShellFlags::LEADING_WIDE_CHAR_SPACER) => {
-                point.column = Column(1);
-                point.line += 1;
-            }
-            Direction::Right if flags.contains(ShellFlags::WIDE_CHAR) => {
-                point.column = min(point.column + 1, self.last_column());
-            }
-            Direction::Left
-                if flags.intersects(ShellFlags::WIDE_CHAR | ShellFlags::WIDE_CHAR_SPACER) =>
-            {
-                if flags.contains(ShellFlags::WIDE_CHAR_SPACER) {
-                    point.column -= 1;
-                }
-
-                let prev = point.sub(self, Boundary::Grid, 1);
-                if self.grid[prev]
-                    .flags
-                    .contains(ShellFlags::LEADING_WIDE_CHAR_SPACER)
-                {
-                    point = prev;
-                }
-            }
-            _ => (),
-        }
-
-        point
     }
 
     /// Insert a linebreak at the current cursor position.
@@ -2047,125 +1885,6 @@ impl Index<Column> for TabStops {
 impl IndexMut<Column> for TabStops {
     fn index_mut(&mut self, index: Column) -> &mut bool {
         self.tabs.index_mut(index.0)
-    }
-}
-
-/// Terminal cursor rendering information.
-#[derive(Copy, Clone)]
-pub struct RenderableCursor {
-    pub point: Point,
-}
-
-impl RenderableCursor {
-    fn new<T>(term: &Term<T>) -> Self {
-        // Cursor position.
-        let mut point = term.grid.cursor.point;
-        if term.grid[point]
-            .flags
-            .contains(ShellFlags::WIDE_CHAR_SPACER)
-        {
-            point.column -= 1;
-        }
-
-        Self { point }
-    }
-}
-
-/// Visible terminal content.
-///
-/// This contains all content required to render the current terminal view.
-pub struct RenderableContent<'a> {
-    pub display_iter: GridIterator<'a, Cell>,
-    pub cursor: RenderableCursor,
-    pub display_offset: usize,
-    pub colors: &'a color::Colors,
-    pub mode: TermMode,
-}
-
-impl<'a> RenderableContent<'a> {
-    fn new<T>(term: &'a Term<T>) -> Self {
-        Self {
-            display_iter: term.grid().display_iter(),
-            display_offset: term.grid().display_offset(),
-            cursor: RenderableCursor::new(term),
-            colors: &term.colors,
-            mode: *term.mode(),
-        }
-    }
-}
-
-/// Terminal test helpers.
-pub mod test {
-    use unicode_width::UnicodeWidthChar;
-
-    use super::*;
-    use crate::index::Column;
-
-    /// Construct a terminal from its content as string.
-    ///
-    /// A `\n` will break line and `\r\n` will break line without wrapping.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use nerv_term::term::test::mock_term;
-    ///
-    /// // Create a terminal with the following cells:
-    /// //
-    /// // [h][e][l][l][o] <- WRAPLINE flag set
-    /// // [:][)][ ][ ][ ]
-    /// // [t][e][s][t][ ]
-    /// mock_term(
-    ///     "\
-    ///     hello\n:)\r\ntest",
-    /// );
-    /// ```
-    pub fn mock_term(content: &str) -> Term<()> {
-        let lines: Vec<&str> = content.split('\n').collect();
-        let num_cols = lines
-            .iter()
-            .map(|line| {
-                line.chars()
-                    .filter(|c| *c != '\r')
-                    .map(|c| c.width().unwrap())
-                    .sum()
-            })
-            .max()
-            .unwrap_or(0);
-
-        // Create terminal with the appropriate dimensions.
-        let size = SizeInfo::new(lines.len(), num_cols);
-        let mut term = Term::new(size, (), 100, "1234567890".into());
-
-        // Fill terminal with content.
-        for (line, text) in lines.iter().enumerate() {
-            let line = Line(line as i32);
-            if !text.ends_with('\r') && line + 1 != lines.len() {
-                term.grid[line][Column(num_cols - 1)]
-                    .flags
-                    .insert(ShellFlags::WRAPLINE);
-            }
-
-            let mut index = 0;
-            for c in text.chars().take_while(|c| *c != '\r') {
-                term.grid[line][Column(index)].c = c;
-
-                // Handle fullwidth characters.
-                let width = c.width().unwrap();
-                if width == 2 {
-                    term.grid[line][Column(index)]
-                        .flags
-                        .insert(ShellFlags::WIDE_CHAR);
-                    term.grid[line][Column(index + 1)]
-                        .flags
-                        .insert(ShellFlags::WIDE_CHAR_SPACER);
-                }
-
-                index += width;
-            }
-        }
-
-        term
     }
 }
 

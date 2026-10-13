@@ -319,15 +319,6 @@ pub fn utc_backup_dir() -> Result<PathBuf> {
     Ok(backups_dir()?.join(now))
 }
 
-/// The desktop app socket path
-///
-/// - MacOS: `$TMPDIR/nervrun/desktop.sock`
-/// - Linux: `$XDG_RUNTIME_DIR/nervrun/desktop.sock`
-/// - Windows: `%TEMP%\sockets\desktop.sock`
-pub fn desktop_socket_path() -> Result<PathBuf> {
-    Ok(host_sockets_dir()?.join("desktop.sock"))
-}
-
 /// The path to remote socket
 // - Linux/MacOS on ssh: At the value of `NERV_PARENT`
 // - Linux/MacOS not on ssh:
@@ -654,13 +645,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_fig_socket_path() {
-        linux!(desktop_socket_path(), @"$XDG_RUNTIME_DIR/nervrun/desktop.sock");
-        macos!(desktop_socket_path(), @"$TMPDIR/nervrun/desktop.sock");
-        windows!(desktop_socket_path(), @r"C:\Users\$USER\AppData\Local\Temp\AmazonQ\sockets\desktop.sock");
-    }
-
-    #[test]
     fn snapshot_remote_socket_path() {
         linux!(remote_socket_path(), @"$XDG_RUNTIME_DIR/nervrun/remote.sock");
         macos!(remote_socket_path(), @"$TMPDIR/nervrun/remote.sock");
@@ -707,10 +691,6 @@ mod tests {
         let pty_socket = figterm_socket_path(uuid.clone()).unwrap();
         let pty_socket_bytes = pty_socket.as_os_str().as_bytes().len();
         assert!(pty_socket_bytes <= MAX_SOCKET_LEN);
-
-        let fig_socket = desktop_socket_path().unwrap();
-        let fig_socket_bytes = fig_socket.as_os_str().as_bytes().len();
-        assert!(fig_socket_bytes <= MAX_SOCKET_LEN);
 
         let secure_socket = remote_socket_path().unwrap();
         let secure_socket_bytes = secure_socket.as_os_str().as_bytes().len();
