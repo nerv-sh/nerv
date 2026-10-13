@@ -497,12 +497,13 @@ __nerv_show_popup() {
   # segment boundary (browsing), where it's row 0 and highlighted by
   # default (SELECTED==0). Hidden while the user filters a token. The
   # label names what Enter does from the CURRENT selection — run on the
-  # sentinel, insert on an item — so the meaning is visible before the
+  # sentinel, insert on an item (run again where the item is the whole
+  # command, __nerv_enter_runs) — so the meaning is visible before the
   # keypress. Width-measured so the right border stays aligned even if
   # the glyph renders as 2 cells.
   if (( __NERV_HAS_SENTINEL )); then
     local sent_act=run
-    (( __NERV_SELECTED != 0 )) && sent_act=insert
+    (( __NERV_SELECTED != 0 )) && ! __nerv_enter_runs && sent_act=insert
     local sent_txt="↩ Immediately execute — Enter: $sent_act"
     local sent_w=${(m)#sent_txt}
     # Narrow window: truncate the label on a cell boundary so the
@@ -874,6 +875,57 @@ __nerv_shell_knows() {
 __nerv_row_span() {
   local -a fields=("${(@ps:\t:)1}")
   REPLY="${fields[5]}"
+}
+
+# True when Enter on the highlighted row should run the line as well as
+# insert the row: the command at the cursor only ever goes to a
+# directory (`cd`, `pushd`, `z`, or an alias of one), so the picked row
+# is the whole command and a second Enter would be pure ceremony.
+# Everywhere else a row is one step of a longer line (`cat src/`,
+# `git checkout`) and Enter stays insert-only. It never runs:
+# - an option row or a command-word correction;
+# - with text after the cursor, or with any other argument on the
+#   command (`cd -P src`, zsh's `cd old new`) — the row has to be the
+#   only argument;
+# - under `cd`/`pushd`, a row that does not continue what was typed (a
+#   fuzzy or history row the user never spelled). `z` is exempt: picking
+#   by a fragment is what it is for.
+# Precommand modifiers are looked through (`builtin cd`, also inside an
+# alias body).
+__nerv_enter_runs() {
+  (( __NERV_SELECTED >= 1 && __NERV_SELECTED <= ${#__NERV_ITEMS} )) || return 1
+  [[ -z "$RBUFFER" ]] || return 1
+  local row="${__NERV_ITEMS[$__NERV_SELECTED]}"
+  local ins="${row%%$'\t'*}"
+  [[ "$ins" == -* ]] && return 1
+  local REPLY; __nerv_row_span "$row"
+  [[ -n "$REPLY" ]] && return 1
+  # Words of the simple command under the cursor (`a && cd x`).
+  local -a words=("${(z)LBUFFER}") seg=()
+  local w
+  for w in "${words[@]}"; do
+    if [[ "$w" == (\;|\&\&|\|\||\||\&) ]]; then seg=(); else seg+=("$w"); fi
+  done
+  # An alias stands for its body: words it brings along count as
+  # arguments below, so `alias cdp='cd ~/proj'` never runs.
+  (( ${#seg} && ${+aliases[${seg[1]}]} )) \
+    && seg=("${(z)aliases[${seg[1]}]}" "${(@)seg[2,-1]}")
+  while (( ${#seg} )) && [[ "${seg[1]}" == (builtin|command|noglob|nocorrect) ]]; do
+    shift seg
+  done
+  local typed=""
+  if [[ "$LBUFFER" == *[[:space:]] ]]; then
+    (( ${#seg} == 1 )) || return 1
+  else
+    # One word is the command name still being typed: rows are commands.
+    (( ${#seg} == 2 )) || return 1
+    typed="${(Q)seg[2]}"
+  fi
+  case "${seg[1]}" in
+    z) return 0 ;;
+    cd|pushd) [[ "${(L)ins}" == "${(L)typed}"* ]] ;;
+    *) return 1 ;;
+  esac
 }
 
 # Expand a leading alias so the engine sees the real command: with
@@ -1655,34 +1707,38 @@ __nerv_insert_and_requery() {
 # Enter: select if popup, else execute
 __nerv_line_finish() {
   # Enter inserts the highlighted item ONLY when a real item is selected
-  # (SELECTED >= 1) — and never runs it, not even a directory: an
-  # arrowed-to `apps/` + Enter lands `cd apps/` on the line and stays,
-  # so a mis-highlight costs nothing (a second Enter runs the line).
+  # (SELECTED >= 1). It does not run it: an arrowed-to `src/` after
+  # `cat ` lands on the line and stays, so a mis-highlight costs nothing
+  # (a second Enter runs the line). The one exception is a command that
+  # only goes to a directory (`cd`, `pushd`, `z` — __nerv_enter_runs):
+  # there the picked row is the whole command, so Enter inserts AND
+  # runs; Tab is the key that descends without running.
   # On the default "Immediately execute" sentinel (SELECTED == 0) — or
   # with no popup — Enter runs the line as typed. This is the Fig model:
   # `cd ` / `z ` + Enter execute the command; navigate to pick one.
   if (( __NERV_ACTIVE && __NERV_SELECTED >= 1 && ${#__NERV_ITEMS} > 0 )); then
-    # Insert-only, then re-query so the next level pops up at once
-    # (same chain as Tab's accept path below). Bypass the dedup guard.
-    # Non-directory items behave exactly as before; directories used to
-    # insert AND run here — that immediate `cd` on a mis-highlight is
-    # what insert-only removes. Exceptions stay: a lone command-word
-    # correction rewrites its span (no frecency either way), and a
-    # fully-typed token (rc 4) keeps the sentinel default, so Enter on
-    # it still runs what was typed.
-    __nerv_insert_and_requery
-  else
-    (( __NERV_ACTIVE )) && { __NERV_ACTIVE=0; zle -R ""; }
-    # A stale `…loading` hint must not outlive the line it belonged to.
-    __nerv_clear_loading
-    __NERV_PREV_LBUFFER=""
-    __NERV_SELECTED=0
-    __NERV_ITEMS=()
-    # An unaccepted ghost is not part of the command: keep it out of the
-    # scrollback line zsh leaves behind.
-    POSTDISPLAY=''
-    zle .accept-line
+    if __nerv_enter_runs; then
+      __nerv_insert_selected
+    else
+      # Insert-only, then re-query so the next level pops up at once
+      # (same chain as Tab's accept path below). Exceptions stay: a lone
+      # command-word correction rewrites its span (no frecency either
+      # way), and a fully-typed token (rc 4) keeps the sentinel default,
+      # so Enter on it still runs what was typed.
+      __nerv_insert_and_requery
+      return
+    fi
   fi
+  (( __NERV_ACTIVE )) && { __NERV_ACTIVE=0; zle -R ""; }
+  # A stale `…loading` hint must not outlive the line it belonged to.
+  __nerv_clear_loading
+  __NERV_PREV_LBUFFER=""
+  __NERV_SELECTED=0
+  __NERV_ITEMS=()
+  # An unaccepted ghost is not part of the command: keep it out of the
+  # scrollback line zsh leaves behind.
+  POSTDISPLAY=''
+  zle .accept-line
 }
 zle -N accept-line __nerv_line_finish
 

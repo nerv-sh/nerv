@@ -128,9 +128,11 @@ token too; their names live in the daemon's memory only, never on disk.
 
 The popup opens as you type. Its first row, **Immediately execute**, is
 highlighted by default, so Enter still runs what you typed; the list only
-takes a key once you move into it. The row always names what Enter will do
-from the current highlight — `Enter: run` on itself, `Enter: insert` on an
-item.
+takes a key once you move into it. While that row is shown it names what
+Enter will do from the current highlight — `Enter: run` on itself,
+`Enter: insert` on an item (`Enter: run` again under `cd`, where an item is
+the whole command). Once you type part of a word the row gives way to the
+matches, and the first match is highlighted.
 
 | Key | What it does |
 |---|---|
@@ -138,7 +140,7 @@ item.
 | <kbd>PageDown</kbd> / <kbd>PageUp</kbd> | Move a page at a time |
 | <kbd>Tab</kbd> | Insert the highlighted item and open the next level (a subcommand's flags, a flag's values). On *Immediately execute* it moves to the first item |
 | <kbd>Shift</kbd>+<kbd>Tab</kbd> | Move the highlight up |
-| <kbd>Enter</kbd> | On *Immediately execute*, run the line as typed. On an item, insert it and stay on the line — folders included, so a mis-highlight never `cd`s away; a second Enter runs the line |
+| <kbd>Enter</kbd> | On *Immediately execute*, run the line as typed. On an item, insert it and stay on the line; a second Enter runs it. Under `cd`, `pushd` and `z` the item is the whole command, so Enter inserts it and runs — use Tab to go a folder deeper instead. That holds only when the item is the command's one argument and, for `cd` and `pushd`, continues what you typed |
 | <kbd>→</kbd> | Accept the grey ghost text |
 | <kbd>Esc</kbd> / <kbd>Ctrl</kbd>+<kbd>G</kbd> | Close the popup and its ghost text |
 
@@ -318,8 +320,8 @@ its popup; `NERV_AUTOSUGGEST=0` turns the strategy off
 ([docs/history-suggestions.md](docs/history-suggestions.md) §7).
 
 **How do I pick a suggestion from the popup?**
-Arrow down to it and press Tab to insert it, or Enter to insert it (a folder
-also runs). Right-arrow accepts the grey ghost text. Every key is in
+Arrow down to it and press Tab to insert it, or Enter to insert it (under
+`cd` that also runs the line). Right-arrow accepts the grey ghost text. Every key is in
 [Using the popup](#using-the-popup).
 
 **Can I change the popup's colors?**
