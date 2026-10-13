@@ -339,7 +339,7 @@ Tier C 의 generator 함수를 QuickJS context 에 평가 → 결과 후보 반�
 | `withfig/autocomplete` (spec 데이터) | **ISC** | ✓ v0.6 정정 (v0.5 의 "MIT" 표기 오류 — package.json 확인) |
 | `aws/amazon-q-developer-cli-autocomplete` (Rust 엔진 + TS 포팅 원본) | **Apache-2.0 + MIT** dual | ✓ v0.6 신규 (M0-1) |
 | 본 프로젝트 | **Apache-2.0** | LICENSE |
-| 흡수 crate (`crates/nerv-{pty,term,ipc,proto,integrations,os,util,settings,log,diag,test-macro,test-utils}/`) | 원본 Apache-2.0 + MIT 라이선스 헤더 보존 | `AUTHORS.md` (M1 0–4주차 작성) |
+| 흡수 crate (`crates/nerv-{pty,term,ipc,proto,integrations,os,util,settings,log,diag,test-macro}/`) | 원본 Apache-2.0 + MIT 라이선스 헤더 보존 | `AUTHORS.md` (M1 0–4주차 작성) |
 
 양립성: ISC → Apache-2.0 prebuilt artifact OK, Apache+MIT → Apache-2.0 OK.
 
