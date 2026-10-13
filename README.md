@@ -24,7 +24,7 @@ for the macOS terminal: a Rust daemon plus a zsh widget that shows the next
 token — subcommands, flags, git branches, npm scripts, kubectl resources — as
 you type, with descriptions, inside the terminal you already use. It is a successor to
 Fig's autocomplete: it runs the Fig completion engine that AWS open-sourced and
-the 715 community specs from `withfig/autocomplete`, without Fig's cloud, login,
+the 700+ community specs from `withfig/autocomplete`, without Fig's cloud, login,
 AI, or Electron app. Apache-2.0, installed with Homebrew.
 
 | | |
@@ -33,7 +33,7 @@ AI, or Electron app. Apache-2.0, installed with Homebrew.
 | **Platform** | macOS on Apple Silicon; zsh ≥ 5.8 default, bash and fish via opt-in PTY mode |
 | **Install** | `brew install nerv-sh/tap/nerv && eval "$(nerv init zsh)"` |
 | **Language** | Rust (`nerv` CLI 2.8 MB + `nervd` daemon 3.8 MB, static) + one zsh script |
-| **Specs** | 715 commands converted from `withfig/autocomplete`, 15 MB gzipped, shipped in the package |
+| **Specs** | 700+ commands converted from `withfig/autocomplete`, ~10 MB gzipped, shipped in the package |
 | **Latency** | 0.055 ms engine p95 against a 25 ms per-keystroke budget |
 | **Network / accounts / telemetry** | None — documented non-goals |
 | **License** | Apache-2.0 (engine), MIT (spec corpus) |
@@ -56,7 +56,7 @@ cloud attached is now a local daemon and a zsh widget.
 
 ## Highlights
 
-- **715 CLI specs** — `git`, `docker`, `kubectl`, `aws`, `npm`, `cargo`, `gh`,
+- **700+ CLI specs** — `git`, `docker`, `kubectl`, `aws`, `npm`, `cargo`, `gh`,
   `brew`, `terraform`, … converted from `withfig/autocomplete` at build time.
 - **Live values, not just flags** — git branches, npm scripts, kubectl
   namespaces and resources, AWS profiles and resource IDs, SSH hosts, make
@@ -104,7 +104,7 @@ eval "$(nerv init zsh)"
 
 That's the whole install. The `eval` line writes an idempotent, marker-fenced
 block into your `~/.zshrc` and activates completion in the current session;
-the daemon starts itself on demand, and the 715 completion specs ship inside
+the daemon starts itself on demand, and the 700+ completion specs ship inside
 the package. Type `git ` — the popup should appear. If it doesn't, run
 `nerv doctor`: it checks the shell hook, the daemon (including a stale daemon
 left behind by an upgrade — its version mismatching the CLI is reported), the
@@ -150,7 +150,7 @@ matches, and the first match is highlighted.
  zsh ──────────────────────────────┐        ┌─ nervd (daemon) ────────────────┐
  │ ZLE widget (_nerv.zsh)          │  UDS   │ SpecRegistry — lazy, LRU-bound  │
  │   every keystroke:              ├───────►│   specs ship in the package     │
- │   nerv _complete "git ch" 6     │        │   (715 specs, 15 MB gzipped)    │
+ │   nerv _complete "git ch" 6     │        │   (700+ specs, ~10 MB gzipped)  │
  │                                 │◄───────┤ generators — git branch,        │
  │ renders ghost + popup           │ 5-field│   npm scripts, … (cached, 800ms │
  │ (raw ANSI, no alternate screen) │  lines │   hard cap, off keystroke path) │
