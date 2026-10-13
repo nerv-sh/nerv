@@ -7,25 +7,6 @@ use std::ops::{Add, AddAssign, Deref, Sub, SubAssign};
 
 use crate::grid::Dimensions;
 
-/// The side of a cell.
-pub type Side = Direction;
-
-/// Horizontal direction.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum Direction {
-    Left,
-    Right,
-}
-
-impl Direction {
-    pub fn opposite(self) -> Self {
-        match self {
-            Side::Right => Side::Left,
-            Side::Left => Side::Right,
-        }
-    }
-}
-
 /// Terminal grid boundaries.
 pub enum Boundary {
     /// Cursor's range of motion in the grid.

@@ -189,18 +189,6 @@ impl Processor {
         self.state.sync_state.timeout = None;
     }
 
-    /// Synchronized update expiration time.
-    #[inline]
-    pub fn sync_timeout(&self) -> Option<&Instant> {
-        self.state.sync_state.timeout.as_ref()
-    }
-
-    /// Number of bytes in the synchronization buffer.
-    #[inline]
-    pub fn sync_bytes_count(&self) -> usize {
-        self.state.sync_state.buffer.len()
-    }
-
     /// Process a new byte during a synchronized update.
     #[cold]
     fn advance_sync<H>(&mut self, handler: &mut H, byte: u8)
@@ -793,56 +781,6 @@ pub enum NamedColor {
     BrightForeground,
     /// Dim foreground.
     DimForeground,
-}
-
-impl NamedColor {
-    pub fn to_bright(self) -> Self {
-        match self {
-            NamedColor::Foreground => NamedColor::BrightForeground,
-            NamedColor::Black => NamedColor::BrightBlack,
-            NamedColor::Red => NamedColor::BrightRed,
-            NamedColor::Green => NamedColor::BrightGreen,
-            NamedColor::Yellow => NamedColor::BrightYellow,
-            NamedColor::Blue => NamedColor::BrightBlue,
-            NamedColor::Magenta => NamedColor::BrightMagenta,
-            NamedColor::Cyan => NamedColor::BrightCyan,
-            NamedColor::White => NamedColor::BrightWhite,
-            NamedColor::DimForeground => NamedColor::Foreground,
-            NamedColor::DimBlack => NamedColor::Black,
-            NamedColor::DimRed => NamedColor::Red,
-            NamedColor::DimGreen => NamedColor::Green,
-            NamedColor::DimYellow => NamedColor::Yellow,
-            NamedColor::DimBlue => NamedColor::Blue,
-            NamedColor::DimMagenta => NamedColor::Magenta,
-            NamedColor::DimCyan => NamedColor::Cyan,
-            NamedColor::DimWhite => NamedColor::White,
-            val => val,
-        }
-    }
-
-    pub fn to_dim(self) -> Self {
-        match self {
-            NamedColor::Black => NamedColor::DimBlack,
-            NamedColor::Red => NamedColor::DimRed,
-            NamedColor::Green => NamedColor::DimGreen,
-            NamedColor::Yellow => NamedColor::DimYellow,
-            NamedColor::Blue => NamedColor::DimBlue,
-            NamedColor::Magenta => NamedColor::DimMagenta,
-            NamedColor::Cyan => NamedColor::DimCyan,
-            NamedColor::White => NamedColor::DimWhite,
-            NamedColor::Foreground => NamedColor::DimForeground,
-            NamedColor::BrightBlack => NamedColor::Black,
-            NamedColor::BrightRed => NamedColor::Red,
-            NamedColor::BrightGreen => NamedColor::Green,
-            NamedColor::BrightYellow => NamedColor::Yellow,
-            NamedColor::BrightBlue => NamedColor::Blue,
-            NamedColor::BrightMagenta => NamedColor::Magenta,
-            NamedColor::BrightCyan => NamedColor::Cyan,
-            NamedColor::BrightWhite => NamedColor::White,
-            NamedColor::BrightForeground => NamedColor::Foreground,
-            val => val,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
