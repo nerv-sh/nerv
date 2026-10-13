@@ -370,4 +370,92 @@ mod tests {
 
         assert_eq!(message, decoded_message);
     }
+
+    fn parse_bytes(bytes: &[u8]) -> Result<(usize, FigMessage), FigMessageParseError> {
+        let mut buf: &[u8] = bytes;
+        FigMessage::parse(&mut buf)
+    }
+
+    fn framed(message_type: &[u8; 8], body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(18 + body.len());
+        out.extend_from_slice(b"\x1b@");
+        out.extend_from_slice(message_type);
+        out.extend_from_slice(&(body.len() as u64).to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    #[test]
+    fn parse_short_header_is_incomplete() {
+        match parse_bytes(b"\x1b@fig") {
+            Err(FigMessageParseError::Incomplete(FigMessageComponent::Header, 5)) => {}
+            other => panic!("expected Incomplete(Header, 5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bad_magic_is_invalid_header() {
+        match parse_bytes(b"XXfig-pbuf\x00\x00\x00\x00\x00\x00\x00\x00") {
+            Err(FigMessageParseError::InvalidHeader(_, _)) => {}
+            other => panic!("expected InvalidHeader, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_unknown_type_is_invalid_message_type() {
+        match parse_bytes(b"\x1b@fig-XXXX") {
+            Err(FigMessageParseError::InvalidMessageType(t)) => assert_eq!(&t, b"fig-XXXX"),
+            other => panic!("expected InvalidMessageType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_short_body_size_is_incomplete() {
+        let mut frame = framed(b"fig-pbuf", b"hi");
+        frame.truncate(14);
+        match parse_bytes(&frame) {
+            Err(FigMessageParseError::Incomplete(FigMessageComponent::BodySize, 4)) => {}
+            other => panic!("expected Incomplete(BodySize, 4), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_short_body_is_incomplete() {
+        let mut frame = framed(b"fig-pbuf", &[0u8; 100]);
+        frame.truncate(18);
+        match parse_bytes(&frame) {
+            Err(FigMessageParseError::Incomplete(FigMessageComponent::Body, 100)) => {}
+            other => panic!("expected Incomplete(Body, 100), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_empty_body_is_ok() {
+        let frame = framed(b"fig-json", b"");
+        let (consumed, msg) = parse_bytes(&frame).unwrap();
+        assert_eq!(consumed, 18);
+        assert!(msg.inner.is_empty());
+        assert_eq!(msg.message_type, FigMessageType::Json);
+    }
+
+    #[test]
+    fn parse_leaves_trailing_bytes() {
+        let mut frame = framed(b"fig-pbuf", b"abc");
+        frame.extend_from_slice(b"XYZ");
+        let mut buf: &[u8] = &frame;
+        let (consumed, msg) = FigMessage::parse(&mut buf).unwrap();
+        assert_eq!(consumed, 21);
+        assert_eq!(msg.inner.as_ref(), b"abc");
+        assert_eq!(buf, b"XYZ");
+    }
+
+    #[test]
+    fn parse_encode_round_trip() {
+        let body = test_message().encode_to_vec();
+        let wire = FigMessage::encode(FigMessageType::Protobuf, body.clone().into()).unwrap();
+        let (consumed, msg) = parse_bytes(&wire).unwrap();
+        assert_eq!(consumed, wire.len());
+        assert_eq!(msg.message_type, FigMessageType::Protobuf);
+        assert_eq!(msg.inner.as_ref(), body.as_slice());
+    }
 }
