@@ -1513,6 +1513,33 @@ mod tests {
         }
     }
 
+    /// Predict dispatch wiring: a seeded follow-pattern surfaces as the
+    /// ghost of the Empty reply (empty-line prediction; no test reached
+    /// this arm until now).
+    #[tokio::test]
+    async fn predict_dispatch_serves_seeded_follow_as_ghost() {
+        let history = HistoryStore::empty();
+        for _ in 0..4 {
+            run_after(&history, "git push", "git fetch");
+        }
+        let shared = Shared {
+            history: Arc::new(history),
+            ..test_shared()
+        };
+        let resp = dispatch(
+            Ok(Request::Predict {
+                prev: "git fetch".to_string(),
+                cwd: "/".to_string(),
+            }),
+            &shared,
+        )
+        .await;
+        let Response::Empty { ghost, .. } = resp else {
+            panic!("Predict must answer Empty");
+        };
+        assert_eq!(ghost.as_deref(), Some("git push"));
+    }
+
     /// `reload_config_from_file` applies matching immediately and flips
     /// the derivation gate both ways — the hot-reload contract, with an
     /// explicit path (no env touch except the locked HOME for the
