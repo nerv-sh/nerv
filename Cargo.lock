@@ -1866,14 +1866,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nerv-test-macro"
-version = "0.1.46"
-dependencies = [
- "quote",
- "syn",
-]
-
-[[package]]
 name = "nerv-test-utils"
 version = "0.1.46"
 dependencies = [
