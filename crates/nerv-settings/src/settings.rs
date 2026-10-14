@@ -245,6 +245,7 @@ mod test {
         settings.set_value("flag", "yes")?;
         assert!(settings.get_bool("flag")?.is_none());
         assert!(!settings.get_bool_or("flag", false));
+        assert!(settings.get_bool_or("flag", true));
 
         settings.set_value("word", "hi")?;
         assert!(settings.get_int("word")?.is_none());
