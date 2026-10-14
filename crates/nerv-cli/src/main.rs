@@ -3198,21 +3198,59 @@ mod tests {
             .collect()
     }
 
-    /// Serializes the HOME-mutating shell-hook tests against each other.
+    /// Serializes the HOME-mutating shell-hook tests against each other
+    /// and restores the previous HOME on drop — even on panic.
     /// (No other cli test reads process HOME.)
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
     static HOME_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl HomeGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let serial = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            // SAFETY: serialized by HOME_SERIAL; same save/restore
+            // pattern as the zsh_compat tests.
+            unsafe { std::env::set_var("HOME", home) };
+            Self {
+                prev,
+                _serial: serial,
+            }
+        }
+
+        fn unset() -> Self {
+            let serial = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            // SAFETY: see `set`.
+            unsafe { std::env::remove_var("HOME") };
+            Self {
+                prev,
+                _serial: serial,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            match self.prev.take() {
+                Some(p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
 
     /// `check_shell_hook` flags duplicate marker blocks in one file.
     /// HOME save/restore: no other cli test reads HOME (audited).
     #[test]
     fn shell_hook_reports_dup_warn() {
-        let _guard = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("HOME");
         let home = std::env::temp_dir().join(format!("nerv-hook-dup-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        // SAFETY: same save/restore pattern as the zsh_compat tests.
-        unsafe { std::env::set_var("HOME", &home) };
+        let _home = HomeGuard::set(&home);
         let block = nerv_shell::init_block("/bin/nerv", "1.0.0", "ts", "zsh");
         std::fs::write(home.join(".zshrc"), format!("{block}\n{block}")).unwrap();
         let mut r = DoctorReport::default();
@@ -3226,23 +3264,16 @@ mod tests {
             "{}",
             r.entries[0].detail
         );
-        match prev {
-            Some(p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
         let _ = std::fs::remove_dir_all(&home);
     }
 
     /// One block → Ok; no block anywhere → Warn.
     #[test]
     fn shell_hook_reports_ok_and_missing() {
-        let _guard = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("HOME");
         let home = std::env::temp_dir().join(format!("nerv-hook-ok-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        // SAFETY: same save/restore pattern as the zsh_compat tests.
-        unsafe { std::env::set_var("HOME", &home) };
+        let _home = HomeGuard::set(&home);
         let block = nerv_shell::init_block("/bin/nerv", "1.0.0", "ts", "zsh");
         std::fs::write(home.join(".zshrc"), &block).unwrap();
         let mut r = DoctorReport::default();
@@ -3265,20 +3296,13 @@ mod tests {
             "{}",
             r.entries[0].detail
         );
-        match prev {
-            Some(p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
         let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Unset HOME → Err.
     #[test]
     fn shell_hook_reports_home_unset() {
-        let _guard = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("HOME");
-        // SAFETY: same save/restore pattern as the zsh_compat tests.
-        unsafe { std::env::remove_var("HOME") };
+        let _home = HomeGuard::unset();
         let mut r = DoctorReport::default();
         check_shell_hook(&mut r);
         assert_eq!(
@@ -3286,10 +3310,6 @@ mod tests {
             [("shell hook".to_string(), "Err".into())]
         );
         assert_eq!(r.entries[0].detail, "HOME unset");
-        match prev {
-            Some(p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
     }
 
     /// Overlay present and healthy → a green `user specs` row counting only
