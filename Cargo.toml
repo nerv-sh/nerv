@@ -19,7 +19,6 @@ members = [
     "crates/nerv-settings",
     "crates/nerv-log",
     "crates/nerv-test-macro",
-    "crates/nerv-test-utils",
     # M1 opt-in Tier C closure executor. Lives behind an opt-in feature
     # in the daemon; not linked by default so the v0.1 binary stays
     # rquickjs-free. PRD §0.2 / CLAUDE.md §4 invariant.
@@ -103,7 +102,6 @@ nerv-util = { path = "crates/nerv-util" }
 nerv-settings = { path = "crates/nerv-settings" }
 nerv-log = { path = "crates/nerv-log" }
 nerv-test-macro = { path = "crates/nerv-test-macro" }
-nerv-test-utils = { path = "crates/nerv-test-utils" }
 
 # External — absorbed deps (versions pinned to upstream Cargo.toml)
 async-trait = "0.1.87"
