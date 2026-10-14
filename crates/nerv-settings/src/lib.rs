@@ -383,8 +383,9 @@ mod tests {
     use super::*;
 
     /// Serializes HOME-mutating tests and restores both HOME and the
-    /// global settings data on drop — even on panic. (No other
-    /// nerv-settings test touches either.)
+    /// global settings data on drop — even on panic. (`history_new_test`
+    /// reads HOME concurrently via `History::new`, but discards the
+    /// result, so the window is benign.)
     struct HomeGuard {
         prev: Option<std::ffi::OsString>,
         _serial: parking_lot::MutexGuard<'static, ()>,
@@ -395,6 +396,9 @@ mod tests {
     impl HomeGuard {
         fn set(home: &std::path::Path) -> Self {
             let serial = HOME_SERIAL.lock();
+            // A stale global from any earlier test would make `load`
+            // take the Global path — start clean.
+            *OldSettings::data_lock().write() = None;
             let prev = std::env::var_os("HOME");
             // SAFETY: serialized by HOME_SERIAL.
             unsafe { std::env::set_var("HOME", home) };
