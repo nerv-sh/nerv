@@ -3198,6 +3198,100 @@ mod tests {
             .collect()
     }
 
+    /// Serializes the HOME-mutating shell-hook tests against each other.
+    /// (No other cli test reads process HOME.)
+    static HOME_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `check_shell_hook` flags duplicate marker blocks in one file.
+    /// HOME save/restore: no other cli test reads HOME (audited).
+    #[test]
+    fn shell_hook_reports_dup_warn() {
+        let _guard = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("HOME");
+        let home = std::env::temp_dir().join(format!("nerv-hook-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: same save/restore pattern as the zsh_compat tests.
+        unsafe { std::env::set_var("HOME", &home) };
+        let block = nerv_shell::init_block("/bin/nerv", "1.0.0", "ts", "zsh");
+        std::fs::write(home.join(".zshrc"), format!("{block}\n{block}")).unwrap();
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(
+            doctor_labels(&r),
+            [("shell hook".to_string(), "Warn".into())]
+        );
+        assert!(
+            r.entries[0].detail.contains("2 marker blocks"),
+            "{}",
+            r.entries[0].detail
+        );
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// One block → Ok; no block anywhere → Warn.
+    #[test]
+    fn shell_hook_reports_ok_and_missing() {
+        let _guard = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("HOME");
+        let home = std::env::temp_dir().join(format!("nerv-hook-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: same save/restore pattern as the zsh_compat tests.
+        unsafe { std::env::set_var("HOME", &home) };
+        let block = nerv_shell::init_block("/bin/nerv", "1.0.0", "ts", "zsh");
+        std::fs::write(home.join(".zshrc"), &block).unwrap();
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(doctor_labels(&r), [("shell hook".to_string(), "Ok".into())]);
+        assert!(
+            r.entries[0].detail.contains("marker block in"),
+            "{}",
+            r.entries[0].detail
+        );
+        std::fs::remove_file(home.join(".zshrc")).unwrap();
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(
+            doctor_labels(&r),
+            [("shell hook".to_string(), "Warn".into())]
+        );
+        assert!(
+            r.entries[0].detail.contains("no nerv marker block"),
+            "{}",
+            r.entries[0].detail
+        );
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Unset HOME → Err.
+    #[test]
+    fn shell_hook_reports_home_unset() {
+        let _guard = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("HOME");
+        // SAFETY: same save/restore pattern as the zsh_compat tests.
+        unsafe { std::env::remove_var("HOME") };
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(
+            doctor_labels(&r),
+            [("shell hook".to_string(), "Err".into())]
+        );
+        assert_eq!(r.entries[0].detail, "HOME unset");
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
     /// Overlay present and healthy → a green `user specs` row counting only
     /// the stems it actually serves; `specs` counts the union.
     #[test]
