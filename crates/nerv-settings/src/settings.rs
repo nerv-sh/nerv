@@ -232,4 +232,24 @@ mod test {
 
         Ok(())
     }
+
+    /// Wrong-type values fall back to the default (lenient `_or` contract)
+    #[test]
+    fn or_getters_fall_back_on_wrong_type() -> Result<()> {
+        let settings = Settings::from_slice(&[]);
+
+        settings.set_value("num", 42)?;
+        assert!(settings.get_string("num")?.is_none());
+        assert_eq!(settings.get_string_or("num", "dflt".into()), "dflt");
+
+        settings.set_value("flag", "yes")?;
+        assert!(settings.get_bool("flag")?.is_none());
+        assert!(!settings.get_bool_or("flag", false));
+
+        settings.set_value("word", "hi")?;
+        assert!(settings.get_int("word")?.is_none());
+        assert_eq!(settings.get_int_or("word", 7), 7);
+
+        Ok(())
+    }
 }
