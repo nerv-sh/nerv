@@ -163,3 +163,54 @@ fn process_one(input: &Path, output_dir: &Path, stem: &str, compress: bool) -> R
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_input(dir: &Path, name: &str, contents: &str) {
+        fs::write(dir.join(name), contents).unwrap();
+    }
+
+    fn cli_for(input: PathBuf, output: PathBuf, only: Vec<String>) -> Cli {
+        Cli {
+            input,
+            output,
+            only,
+            compress: false,
+            verbose: false,
+        }
+    }
+
+    #[test]
+    fn only_filter_skips_non_matching_stems_before_parsing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("in");
+        let output = tmp.path().join("out");
+        fs::create_dir_all(&input).unwrap();
+        // Malformed on purpose: the `--only` filter must skip it before
+        // parsing, so it counts as skipped, not failed.
+        write_input(&input, "a.json", "{ invalid");
+        write_input(&input, "notes.txt", "ignored");
+        let cli = cli_for(input, output, vec!["zzz".to_string()]);
+        let summary = process_directory(&cli).unwrap();
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(summary.loaded, 0);
+    }
+
+    #[test]
+    fn malformed_json_counts_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let input = tmp.path().join("in");
+        let output = tmp.path().join("out");
+        fs::create_dir_all(&input).unwrap();
+        write_input(&input, "a.json", "{ invalid");
+        write_input(&input, "notes.txt", "ignored");
+        let cli = cli_for(input, output, Vec::new());
+        let summary = process_directory(&cli).unwrap();
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.loaded, 0);
+        assert_eq!(summary.skipped, 0);
+    }
+}
