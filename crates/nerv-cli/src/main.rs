@@ -3226,6 +3226,9 @@ mod tests {
         _serial: std::sync::MutexGuard<'static, ()>,
     }
 
+    /// Process-wide HOME lock: any future HOME-mutating cli test must go
+    /// through `HomeGuard` (not its own lock) — HOME is process-global and
+    /// two independent locks would not serialize against each other.
     static HOME_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl HomeGuard {

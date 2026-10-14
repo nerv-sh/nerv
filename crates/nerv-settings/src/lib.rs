@@ -388,6 +388,7 @@ mod tests {
     /// result, so the window is benign.)
     struct HomeGuard {
         prev: Option<std::ffi::OsString>,
+        prev_global: Option<Map>,
         _serial: parking_lot::MutexGuard<'static, ()>,
     }
 
@@ -397,13 +398,15 @@ mod tests {
         fn set(home: &std::path::Path) -> Self {
             let serial = HOME_SERIAL.lock();
             // A stale global from any earlier test would make `load`
-            // take the Global path — start clean.
-            *OldSettings::data_lock().write() = None;
+            // take the Global path — take (not just clear) so Drop can
+            // restore whatever was there for parallel Global-backend tests.
+            let prev_global = OldSettings::data_lock().write().take();
             let prev = std::env::var_os("HOME");
             // SAFETY: serialized by HOME_SERIAL.
             unsafe { std::env::set_var("HOME", home) };
             Self {
                 prev,
+                prev_global,
                 _serial: serial,
             }
         }
@@ -416,7 +419,7 @@ mod tests {
                 Some(p) => unsafe { std::env::set_var("HOME", p) },
                 None => unsafe { std::env::remove_var("HOME") },
             }
-            *OldSettings::data_lock().write() = None;
+            *OldSettings::data_lock().write() = self.prev_global.take();
         }
     }
 

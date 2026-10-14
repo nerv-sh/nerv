@@ -1507,6 +1507,44 @@ mod tests {
     /// this lock (mirrors the engine paths-tests pattern).
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Panic-safe HOME redirect for reload tests: holds HOME_LOCK, points
+    /// HOME at a tempdir, restores the previous HOME on drop. New tests
+    /// must use this instead of the manual save/restore above it.
+    struct HomeGuard {
+        _home: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        fn temp() -> Self {
+            let serial = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            let home = tempfile::tempdir().expect("tempdir");
+            // SAFETY: serialized by HOME_LOCK.
+            unsafe { std::env::set_var("HOME", home.path()) };
+            Self {
+                _home: home,
+                prev,
+                _serial: serial,
+            }
+        }
+
+        fn path(&self, name: &str) -> std::path::PathBuf {
+            self._home.path().join(name)
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `temp`.
+            match self.prev.take() {
+                Some(p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
     fn test_shared() -> Shared {
         Shared {
             registry: Arc::new(SpecRegistry::empty()),
@@ -1565,12 +1603,8 @@ mod tests {
     /// not malformed): mode back to prefix, derivation gate back on.
     #[test]
     fn config_reload_missing_file_resets_to_defaults() {
-        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        // SAFETY: serialized by HOME_LOCK.
-        unsafe { std::env::set_var("HOME", home.path()) };
-        let cfg_file = home.path().join("nerv.toml");
+        let home = HomeGuard::temp();
+        let cfg_file = home.path("nerv.toml");
         let shared = test_shared();
         std::fs::write(&cfg_file, "[matching]\nmode = \"fuzzy\"\n").unwrap();
         let applied = reload_config_from_file(&shared, &cfg_file);
@@ -1583,10 +1617,6 @@ mod tests {
             shared.config.read().unwrap().matching.mode,
             MatchMode::Prefix
         );
-        match prev {
-            Some(p) => unsafe { std::env::set_var("HOME", p) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
     }
 
     /// Directory mtime is the whole guard keeping `read_dir` off the
