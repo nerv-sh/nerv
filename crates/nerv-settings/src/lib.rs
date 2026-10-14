@@ -377,3 +377,62 @@ impl JsonStore for OldSettings {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serializes HOME-mutating tests and restores both HOME and the
+    /// global settings data on drop — even on panic. (No other
+    /// nerv-settings test touches either.)
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _serial: parking_lot::MutexGuard<'static, ()>,
+    }
+
+    static HOME_SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+    impl HomeGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let serial = HOME_SERIAL.lock();
+            let prev = std::env::var_os("HOME");
+            // SAFETY: serialized by HOME_SERIAL.
+            unsafe { std::env::set_var("HOME", home) };
+            Self {
+                prev,
+                _serial: serial,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            match self.prev.take() {
+                Some(p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+            *OldSettings::data_lock().write() = None;
+        }
+    }
+
+    /// A corrupt settings file fails `load` but `load_into_global`
+    /// heals it: the file is reset to `{}` and the next load succeeds.
+    #[test]
+    fn corrupt_settings_file_heals_on_global_load() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = HomeGuard::set(home.path());
+        let path = OldSettings::path().expect("settings path");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("settings dir");
+        }
+        std::fs::write(&path, "{ invalid").expect("corrupt settings");
+        assert!(OldSettings::load().is_err());
+        // Heal-then-Err: the call reports the corruption it found, but
+        // leaves a valid empty file behind.
+        assert!(OldSettings::load_into_global().is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("healed file"), "{}");
+        assert!(OldSettings::load_into_global().is_ok());
+        assert!(OldSettings::load().is_ok());
+    }
+}
