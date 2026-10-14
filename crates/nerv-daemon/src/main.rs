@@ -1561,6 +1561,34 @@ mod tests {
         }
     }
 
+    /// A deleted config file resets to boot defaults (missing = gone,
+    /// not malformed): mode back to prefix, derivation gate back on.
+    #[test]
+    fn config_reload_missing_file_resets_to_defaults() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("HOME");
+        // SAFETY: serialized by HOME_LOCK.
+        unsafe { std::env::set_var("HOME", home.path()) };
+        let cfg_file = home.path().join("nerv.toml");
+        let shared = test_shared();
+        std::fs::write(&cfg_file, "[matching]\nmode = \"fuzzy\"\n").unwrap();
+        let applied = reload_config_from_file(&shared, &cfg_file);
+        assert_eq!(applied.matching.mode, MatchMode::Fuzzy);
+        std::fs::remove_file(&cfg_file).unwrap();
+        let applied = reload_config_from_file(&shared, &cfg_file);
+        assert_eq!(applied.matching.mode, MatchMode::Prefix);
+        assert!(applied.derived.enabled);
+        assert_eq!(
+            shared.config.read().unwrap().matching.mode,
+            MatchMode::Prefix
+        );
+        match prev {
+            Some(p) => unsafe { std::env::set_var("HOME", p) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
     /// Directory mtime is the whole guard keeping `read_dir` off the
     /// keystroke path: an unchanged layer must be served from the
     /// snapshot, and a spec landing in it (a `--help` derivation, a
