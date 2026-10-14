@@ -208,15 +208,18 @@ mod tests {
         let state = State::new_fake();
 
         state.set_value("num", 42)?;
+        assert!(state.get_value("num")?.is_some());
         assert!(state.get_string("num")?.is_none());
         assert_eq!(state.get_string_or("num", "dflt"), "dflt");
 
         state.set_value("flag", "yes")?;
+        assert!(state.get_value("flag")?.is_some());
         assert!(state.get_bool("flag")?.is_none());
         assert!(!state.get_bool_or("flag", false));
         assert!(state.get_bool_or("flag", true));
 
         state.set_value("word", "hi")?;
+        assert!(state.get_value("word")?.is_some());
         assert!(state.get_int("word")?.is_none());
         assert_eq!(state.get_int_or("word", 7), 7);
 
