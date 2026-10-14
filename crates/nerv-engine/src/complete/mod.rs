@@ -7206,6 +7206,37 @@ region = us-east-1
     }
 
     #[test]
+    fn history_entries_caps_at_200_newest_first() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let hist = tmp.path().join(".zsh_history");
+        let mut content = String::new();
+        for i in 0..250 {
+            content.push_str(&format!(": 1700000000:0;cmd{i} arg{i}\n"));
+        }
+        std::fs::write(&hist, content).unwrap();
+
+        let prev_hist = std::env::var_os("HISTFILE");
+        let prev_zdot = std::env::var_os("ZDOTDIR");
+        unsafe {
+            std::env::set_var("HISTFILE", &hist);
+            std::env::remove_var("ZDOTDIR");
+        }
+        let entries = shell_history_entries().unwrap();
+        match prev_hist {
+            Some(v) => unsafe { std::env::set_var("HISTFILE", v) },
+            None => unsafe { std::env::remove_var("HISTFILE") },
+        }
+        match prev_zdot {
+            Some(v) => unsafe { std::env::set_var("ZDOTDIR", v) },
+            None => unsafe { std::env::remove_var("ZDOTDIR") },
+        }
+        assert_eq!(entries.len(), 200);
+        assert_eq!(entries[0], "cmd249");
+        assert_eq!(entries[1], "arg249");
+    }
+
+    #[test]
     fn extract_enum_simple_pipe_list() {
         let got = extract_enum_from_description("Filter by state: {open|closed|merged|all}");
         assert_eq!(

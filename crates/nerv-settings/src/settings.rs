@@ -126,10 +126,6 @@ impl Settings {
         }
     }
 
-    pub fn get_string_opt(&self, key: impl AsRef<str>) -> Option<String> {
-        self.get_string(key).ok().flatten()
-    }
-
     pub fn get_string_or(&self, key: impl AsRef<str>, default: String) -> String {
         self.get_string(key).ok().flatten().unwrap_or(default)
     }
@@ -190,10 +186,6 @@ pub fn get_bool_or(key: impl AsRef<str>, default: bool) -> bool {
 
 pub fn get_string(key: impl AsRef<str>) -> Result<Option<String>> {
     Settings::new().get_string(key)
-}
-
-pub fn get_string_opt(key: impl AsRef<str>) -> Option<String> {
-    Settings::new().get_string_opt(key)
 }
 
 pub fn get_string_or(key: impl AsRef<str>, default: String) -> String {
