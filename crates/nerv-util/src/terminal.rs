@@ -869,11 +869,13 @@ mod tests {
 
     #[test]
     fn parent_terminal_unknown_program_falls_back_to_process_scan() {
+        // Unknown program + a detectable process chain: proves the
+        // fallback scan actually runs (not just "unknown → None").
         let ctx = Context::builder()
             .with_os(Os::Linux)
             .with_env_var("TERM_PROGRAM", "not-a-terminal")
-            .with_process_info(ProcessInfo::from_exes(vec!["q", "bash", "tmux"]))
+            .with_process_info(ProcessInfo::from_exes(vec!["q", "fish", "wezterm"]))
             .build();
-        assert_eq!(Terminal::parent_terminal(&ctx), None);
+        assert_eq!(Terminal::parent_terminal(&ctx), Some(Terminal::WezTerm));
     }
 }
