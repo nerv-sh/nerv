@@ -179,7 +179,7 @@ whoami = "1.6.0"
 assert_cmd = "2.0.17"
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
