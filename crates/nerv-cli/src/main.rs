@@ -2357,6 +2357,26 @@ mod tests {
         assert!(missing.is_err(), "no version with a bash SHELL errors");
     }
 
+    /// `zsh_quote` single-quotes eval-bound output: plain paths wrapped,
+    /// single quotes escaped, `$` left literal (no expansion inside).
+    #[test]
+    fn zsh_quote_wraps_plain_paths() {
+        assert_eq!(
+            zsh_quote("/opt/homebrew/bin/nerv"),
+            "'/opt/homebrew/bin/nerv'"
+        );
+    }
+
+    #[test]
+    fn zsh_quote_escapes_single_quotes() {
+        assert_eq!(zsh_quote("/tmp/don't/nerv"), "'/tmp/don'\\''t/nerv'");
+    }
+
+    #[test]
+    fn zsh_quote_keeps_dollar_literal() {
+        assert_eq!(zsh_quote("$HOME/bin"), "'$HOME/bin'");
+    }
+
     /// `read_pid` parses the PID file written by `nerv start`.
     /// Whitespace and trailing newlines are trimmed before parsing.
     #[test]
