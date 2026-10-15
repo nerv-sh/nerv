@@ -127,7 +127,7 @@ impl Sandbox {
     /// microtasks until the promise settles) and unwraps the resolved
     /// value. Non-promise results pass straight through. A promise that
     /// can't settle without external work (a real async host call that
-    /// never resolves) surfaces as `Javascript("would block")`.
+    /// never resolves) surfaces as `Javascript("promise did not settle")`.
     pub fn eval_resolved(&self, source: &str, budget: Duration) -> Result<Value, SandboxError> {
         let deadline = Instant::now() + budget;
         let budget_ms = budget.as_millis();
