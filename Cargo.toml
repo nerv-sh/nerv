@@ -179,13 +179,10 @@ whoami = "1.6.0"
 assert_cmd = "2.0.17"
 
 [profile.release]
-# Size experiment (2026-10-14, PR #112): opt-level 3 -> "z" (-412KB),
-# thin LTO -> fat (-530KB more). Release `nerv` 2649952 -> 1707472 bytes,
-# measured 3x deterministic. Tradeoff: fat LTO lengthens release builds;
-# opt-z trades runtime speed for size (keystroke path is sub-ms against
-# the 25ms budget). `strip = "all"` tried and discarded (breaks dep builds).
-# Revert: opt-level = 3, lto = "thin".
-opt-level = "z"
+# opt-level stays 3: "s"/"z" shrink the binary but slow cold spec JSON
+# parse 1.2x/2x (bench_spec_load), which lands on the first keystroke.
+# `strip = "all"` breaks dependency builds.
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
