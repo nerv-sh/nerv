@@ -457,4 +457,31 @@ mod tests {
         assert_eq!(msg.message_type, FigMessageType::Protobuf);
         assert_eq!(msg.inner.as_ref(), body.as_slice());
     }
+
+    #[test]
+    fn decode_rejects_corrupt_protobuf_body() {
+        let msg = FigMessage {
+            inner: Bytes::from(vec![0xff, 0xff, 0xff, 0xff, 0xff]),
+            message_type: FigMessageType::Protobuf,
+        };
+        assert!(msg.decode::<local::LocalMessage>().is_err());
+    }
+
+    #[test]
+    fn decode_rejects_invalid_json_body() {
+        let msg = FigMessage {
+            inner: Bytes::from_static(b"not json"),
+            message_type: FigMessageType::Json,
+        };
+        assert!(msg.decode::<local::LocalMessage>().is_err());
+    }
+
+    #[test]
+    fn decode_rejects_truncated_msgpack_body() {
+        let msg = FigMessage {
+            inner: Bytes::from_static(b"\x93\x01"),
+            message_type: FigMessageType::MessagePack,
+        };
+        assert!(msg.decode::<local::LocalMessage>().is_err());
+    }
 }

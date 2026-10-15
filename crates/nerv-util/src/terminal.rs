@@ -848,4 +848,34 @@ mod tests {
             "should return guake"
         );
     }
+
+    /// `parent_terminal` honors `TERM_PROGRAM` before falling back to
+    /// the process scan — the live path pty boot takes.
+    #[test]
+    fn parent_terminal_reads_term_program() {
+        for (program, expected) in [
+            ("WezTerm", Terminal::WezTerm),
+            ("ghostty", Terminal::Ghostty),
+            ("Apple_Terminal", Terminal::TerminalApp),
+        ] {
+            let ctx = Context::builder()
+                .with_os(Os::Linux)
+                .with_env_var("TERM_PROGRAM", program)
+                .with_process_info(ProcessInfo::from_exes(vec!["q", "bash", "tmux"]))
+                .build();
+            assert_eq!(Terminal::parent_terminal(&ctx), Some(expected), "{program}");
+        }
+    }
+
+    #[test]
+    fn parent_terminal_unknown_program_falls_back_to_process_scan() {
+        // Unknown program + a detectable process chain: proves the
+        // fallback scan actually runs (not just "unknown → None").
+        let ctx = Context::builder()
+            .with_os(Os::Linux)
+            .with_env_var("TERM_PROGRAM", "not-a-terminal")
+            .with_process_info(ProcessInfo::from_exes(vec!["q", "fish", "wezterm"]))
+            .build();
+        assert_eq!(Terminal::parent_terminal(&ctx), Some(Terminal::WezTerm));
+    }
 }

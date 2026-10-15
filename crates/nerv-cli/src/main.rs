@@ -2357,6 +2357,26 @@ mod tests {
         assert!(missing.is_err(), "no version with a bash SHELL errors");
     }
 
+    /// `zsh_quote` single-quotes eval-bound output: plain paths wrapped,
+    /// single quotes escaped, `$` left literal (no expansion inside).
+    #[test]
+    fn zsh_quote_wraps_plain_paths() {
+        assert_eq!(
+            zsh_quote("/opt/homebrew/bin/nerv"),
+            "'/opt/homebrew/bin/nerv'"
+        );
+    }
+
+    #[test]
+    fn zsh_quote_escapes_single_quotes() {
+        assert_eq!(zsh_quote("/tmp/don't/nerv"), "'/tmp/don'\\''t/nerv'");
+    }
+
+    #[test]
+    fn zsh_quote_keeps_dollar_literal() {
+        assert_eq!(zsh_quote("$HOME/bin"), "'$HOME/bin'");
+    }
+
     /// `read_pid` parses the PID file written by `nerv start`.
     /// Whitespace and trailing newlines are trimmed before parsing.
     #[test]
@@ -3196,6 +3216,123 @@ mod tests {
             .iter()
             .map(|e| (e.label.clone(), format!("{:?}", e.level)))
             .collect()
+    }
+
+    /// Serializes the HOME-mutating shell-hook tests against each other
+    /// and restores the previous HOME on drop — even on panic.
+    /// (No other cli test reads process HOME.)
+    struct HomeGuard {
+        prev: Option<std::ffi::OsString>,
+        _serial: std::sync::MutexGuard<'static, ()>,
+    }
+
+    /// Process-wide HOME lock: any future HOME-mutating cli test must go
+    /// through `HomeGuard` (not its own lock) — HOME is process-global and
+    /// two independent locks would not serialize against each other.
+    static HOME_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl HomeGuard {
+        fn set(home: &std::path::Path) -> Self {
+            let serial = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            // SAFETY: serialized by HOME_SERIAL; same save/restore
+            // pattern as the zsh_compat tests.
+            unsafe { std::env::set_var("HOME", home) };
+            Self {
+                prev,
+                _serial: serial,
+            }
+        }
+
+        fn unset() -> Self {
+            let serial = HOME_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os("HOME");
+            // SAFETY: see `set`.
+            unsafe { std::env::remove_var("HOME") };
+            Self {
+                prev,
+                _serial: serial,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `set`.
+            match self.prev.take() {
+                Some(p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    /// `check_shell_hook` flags duplicate marker blocks in one file.
+    /// HOME save/restore: no other cli test reads HOME (audited).
+    #[test]
+    fn shell_hook_reports_dup_warn() {
+        let home = std::env::temp_dir().join(format!("nerv-hook-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let block = nerv_shell::init_block("/bin/nerv", "1.0.0", "ts", "zsh");
+        std::fs::write(home.join(".zshrc"), format!("{block}\n{block}")).unwrap();
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(
+            doctor_labels(&r),
+            [("shell hook".to_string(), "Warn".into())]
+        );
+        assert!(
+            r.entries[0].detail.contains("2 marker blocks"),
+            "{}",
+            r.entries[0].detail
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// One block → Ok; no block anywhere → Warn.
+    #[test]
+    fn shell_hook_reports_ok_and_missing() {
+        let home = std::env::temp_dir().join(format!("nerv-hook-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let _home = HomeGuard::set(&home);
+        let block = nerv_shell::init_block("/bin/nerv", "1.0.0", "ts", "zsh");
+        std::fs::write(home.join(".zshrc"), &block).unwrap();
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(doctor_labels(&r), [("shell hook".to_string(), "Ok".into())]);
+        assert!(
+            r.entries[0].detail.contains("marker block in"),
+            "{}",
+            r.entries[0].detail
+        );
+        std::fs::remove_file(home.join(".zshrc")).unwrap();
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(
+            doctor_labels(&r),
+            [("shell hook".to_string(), "Warn".into())]
+        );
+        assert!(
+            r.entries[0].detail.contains("no nerv marker block"),
+            "{}",
+            r.entries[0].detail
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Unset HOME → Err.
+    #[test]
+    fn shell_hook_reports_home_unset() {
+        let _home = HomeGuard::unset();
+        let mut r = DoctorReport::default();
+        check_shell_hook(&mut r);
+        assert_eq!(
+            doctor_labels(&r),
+            [("shell hook".to_string(), "Err".into())]
+        );
+        assert_eq!(r.entries[0].detail, "HOME unset");
     }
 
     /// Overlay present and healthy → a green `user specs` row counting only
