@@ -361,6 +361,30 @@ mod tests {
         assert_eq!(wire_line(&fix), "zeph\tzeph\tdid you mean\t\t5,9");
     }
 
+    /// The 200-char cap is what keeps a 500–2000-char description (aws
+    /// service blurbs) from re-inflating every reply. It counts
+    /// characters, not bytes — a byte-index cut would panic on Korean
+    /// text — and collapses tabs/newlines before the count.
+    #[test]
+    fn wire_desc_caps_descriptions_by_character() {
+        assert_eq!(wire_desc("a\tb"), "a b");
+        // At the cap exactly, nothing is cut.
+        assert_eq!(wire_desc(&"a".repeat(200)).chars().count(), 200);
+        // One over: cut to 200 and marked with an ellipsis.
+        assert_eq!(wire_desc(&"a".repeat(201)), format!("{}…", "a".repeat(200)));
+        // Multibyte text truncates on a char boundary, not a byte one:
+        // 70 Korean chars are 210 bytes but under the cap as characters.
+        assert_eq!(wire_desc(&"가".repeat(70)), "가".repeat(70));
+        let korean = wire_desc(&"가".repeat(250));
+        assert_eq!(korean.chars().count(), 201);
+        assert!(korean.ends_with('…'));
+        // A tab is collapsed before the cut, even past the cap.
+        assert_eq!(
+            wire_desc(&("a".repeat(199) + "\t" + &"b".repeat(50))),
+            format!("{} …", "a".repeat(199))
+        );
+    }
+
     #[test]
     fn ghost_line_is_one_marked_row() {
         assert_eq!(ghost_line("git status"), "\x1fghost\tgit status");
