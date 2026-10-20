@@ -22,14 +22,6 @@ use crate::term::color::{Colors, Rgb};
 pub mod cell;
 pub mod color;
 
-/// Minimum number of columns.
-///
-/// A minimum of 2 is necessary to hold fullwidth unicode characters.
-pub const MIN_COLUMNS: usize = 2;
-
-/// Minimum number of visible lines.
-pub const MIN_SCREEN_LINES: usize = 1;
-
 /// Max size of the window title stack.
 const TITLE_STACK_MAX_DEPTH: usize = 4096;
 

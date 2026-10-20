@@ -1,4 +1,4 @@
-use crate::term::{CommandInfo, ShellState, SizeInfo};
+use crate::term::{CommandInfo, ShellState};
 
 #[derive(Debug, Clone)]
 pub enum DelayedEvent {
@@ -16,11 +16,6 @@ pub enum Event<'a> {
     PreExec,
     ShellChanged,
     CommandInfo(&'a CommandInfo),
-}
-
-/// Types that are interested in when the display is resized.
-pub trait OnResize {
-    fn on_resize(&mut self, size: &SizeInfo);
 }
 
 /// Event Loop for sending info about terminal events.
