@@ -188,20 +188,18 @@ cargo run -p nerv-engine --bin build-specs -- \
 
 ### 4.3 CI 통합
 
-GitHub Actions 매트릭스:
+TS → JSON 변환은 `tools/ts-to-json` (bun) 이 맡고, `build-specs` 는 그 산출물인 JSON 만 읽는다 — `--input` 디렉터리에서 `*.json` / `*.json.gz` 만 스캔하고 TS 는 건너뛴다. 워크플로가 실제로 도는 경로는 둘:
 
-```yaml
-- run: cargo run -p nerv-engine --bin build-specs -- \
-       --input vendor/withfig-autocomplete/src/ \
-       --output target/specs-build/
-- run: ./scripts/check-spec-regression.sh target/specs-build/
-```
+- **PR smoke** (`.github/workflows/ci.yml` 의 `build-specs-smoke`) — `crates/nerv-engine/tests/fixtures/specs/` 를 입력으로 plain 과 `--compress` 를 한 번씩 돌려 `git.json` / `git.json.gz` 가 나오는지만 확인한다.
+- **Release** (`.github/workflows/release.yml`) — `tools/ts-to-json` 의 `bun run convert:all` (입력 `vendor/withfig-autocomplete/src/`, 출력 `crates/nerv-engine/tests/fixtures/converted/`) → `build-specs --input crates/nerv-engine/tests/fixtures/converted/ --output staged-specs/ --compress` → `manifest.json` 존재와 `aws` 가 per-subcommand 디렉터리로 쪼개졌는지 확인.
 
-`check-spec-regression.sh` 가 검증:
+아직 배선되지 않은 검증 (이 절이 계획으로 적어 둔 것):
 
-- Tier 분포가 이전 릴리즈 대비 후퇴 없음 (B → C 또는 A → C 신규 발생 시 PR fail).
-- `manifest.json` 의 50개 spec 모두 존재.
-- 새 spec 의 SHA 가 변경되었으면 changelog 갱신 강제.
+- Tier 분포 회귀 — B → C 또는 A → C 신규 발생 시 실패.
+- `manifest.json` 의 spec 수/완전성 — `manifest::write_manifest` 는 현재 `specs: []` 로 쓴다 (§4.1 노트).
+- 새 spec 의 SHA 가 변경되었을 때 changelog 갱신 강제.
+
+셋 다 스크립트가 필요하다. 그전까지 위 두 워크플로가 유일한 자동 검증이고, 핀 변경 PR 은 §5.1 대로 수동 확인한다.
 
 ### 4.4 Tier C 회복 — rquickjs opt-in (M1, PRD §5.7) ★ 신설
 
@@ -260,7 +258,7 @@ Tier C 의 generator 함수를 QuickJS context 에 평가 → 결과 후보 반�
         https://github.com/withfig/autocomplete.git \
         aef52acff84c45edde61ae610cc2c964802b9a38 --squash
     ```
-- 핀 변경은 별도 PR (`subtree update: <date> <commit>`) — 매 변경 시 §4.3 회귀 검증 필수.
+- 핀 변경은 별도 PR (`subtree update: <date> <commit>`) — 매 변경 시 §4.3 의 수동 회귀 확인 (tier 분포·spec 수) 필수.
 - 모니터링: `.github/workflows/upstream-monitor.yml` 가 매 2주 (1·15일) 자동 점검.
 
 ### 5.2 패치 통합 정책
@@ -541,3 +539,4 @@ v0.5 의 M0-9 산출물 5개 중 3개는 v0.5 에서 완료, 2개는 v0.6 폐기
 *v1.4 — `limited_args` / §5.1 힌트 UX 폐기 반영. v1.3 → v1.4 변경: §1 v1.0 결정을 "동적 generator 런타임 실행" (Tier B 직접 spawn + recognizer 회복) 으로 갱신 + v1.4 갱신 박스 추가, §4.1 manifest 예제에서 `limited_args` 제거 (스키마 v2 `SpecMeta = {name, tier, sha256}`). 폐기 근거: M1 에서 Tier B 실행 + well-known recognizer 가 동적완성을 실제로 작동시켜 마킹/힌트 메커니즘 (`Response::DynamicHint` / `LimitedArg`) 이 불필요해짐 → 코드 삭제 (CLAUDE.md §3, first-5-min §8, PLAN §5.1). §2 Tier 분류 / §3~§11 정책 본문은 무변경 (본문의 `limited_args` 언급은 역사적 설계 기록).*
 *v1.5 — 파생 spec 층 신설 (2026-09-05). v1.4 → v1.5 변경: **§6.2 신설** — 어느 층에도 spec 이 없는 명령의 `--help`(fallback `man`) 를 데몬이 파싱해 `~/Library/Caches/nerv/derived/` 에 캐시하는 자동 경로. 층 순서 `[overlay, primary, derived]`, `[derived] enabled = false` 스위치, 소스 선택 기준 = 파싱 성공 (모양 기준은 `ls -h` 목록에 속음), 실행 안전장치 (셸 미경유·절대경로·env 초기화·PATH 만 상속·timeout·cap), 백그라운드 populator 에서만 실행, binary mtime 재파생, 파손 파일 negative 유지, doctor/spec list 읽기 전용. §6.1 overlay 계약 무변경 — 파생은 그 *뒤*에 붙는다. Tier A/B/C 분류 / §3~§5 / §7 무변경. 변경 트리거: 새 help 레이아웃 (fixture 4종 밖) 이 파싱 실패로 보고될 때, 컬럼 히스토그램 파서 재설계 착수 시.*
 *v1.6 — 셸 자체 완성 폴백 (2026-09-27). v1.5 → v1.6 변경: **§6.4 신설** — 손으로 쓴 spec 이 없는 명령(`unspecced`, 파일 층으로 판정)에서 ZLE 위젯이 zsh compsys 완성 함수의 후보를 쓴다. `_complete --compsys` 종료 코드 5·6. 단어당 1회 캡처 + 셸 내 필터, 300/1000 ms 초과 명령 자동 제외, `NERV_COMPSYS=0`. 층 순서·§6.1~§6.3 무변경. 변경 트리거: PTY 경로(zpty 숨은 셸) 착수, bash·fish 브리지 착수 시.*
+*v1.7 — CI 통합 정정 (2026-10-20). v1.6 → v1.7 변경: **§4.3 을 실제 워크플로로 교체** — 존재하지 않는 `scripts/check-spec-regression.sh`, TS 를 `--input` 으로 주는 명령, "manifest.json 의 50개 spec" 문구를 삭제하고 `ci.yml` 의 `build-specs-smoke`(fixture JSON)와 `release.yml` 의 `convert:all` → `build-specs --compress` 두 경로를 기록. 미배선 검증(tier 분포 회귀·manifest 수·SHA/changelog)은 계획으로 명시. §5.1 핀 변경 문구를 수동 확인으로 동기화. Tier 분류 / §1~§3 / §4.1~§4.2 / §5.2~§11 무변경. 변경 트리거: 회귀 스크립트 배선 시.*
