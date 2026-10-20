@@ -30,12 +30,12 @@ uninstall 이 식별·제거해야 할 모든 경로/리소스의 권위 있는 
 | 3 | 데몬 소켓 | `~/Library/Caches/nerv/nervd.sock` | nervd | 삭제 |
 | 4 | 데몬 로그 | `~/Library/Logs/nerv/nervd.log` (+ 회전 파일) | nervd | 삭제 |
 | 5 | 캐시 디렉터리 | `~/Library/Caches/nerv/` 전체 — `specs/`, `frecency.tsv`, **`misses.tsv`** (spec 없는 명령 로컬 집계, `nerv doctor` 의 `spec misses` 행 출처), **`derived/`** (명령의 `--help` 에서 자동 추출한 spec — spec-conversion-policy §6.2), **`history.tsv`**·`history.tsv.lock` (실행한 명령 기록, 0600 — history-suggestions.md §2), **`init.zsh`** (`nerv init zsh --shell-script` 가 쓰는 위젯 스크립트 캐시 — rc 블록이 source), **`autosuggest-seen`** (위젯이 zsh-autosuggestions 를 찾았을 때의 모드 — 안내 1회·`nerv doctor` 행, history-suggestions.md §7), **`terminal-seen`** (매트릭스 밖 터미널 고지를 이미 낸 터미널 이름 — terminal-compat.md §1) 포함 | 다양 | 삭제 |
-| 6 | 설정 디렉터리 | `~/.config/nerv/` (XDG_CONFIG_HOME 존중) — `nerv.toml` + **`specs/` 사용자 overlay spec** (spec-conversion-policy §6.1) 포함 | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존 — overlay spec 도 `--keep-config` 로만 살아남는다) |
+| 6 | 설정 디렉터리 | `~/.config/nerv/` (macOS v1.0 은 `XDG_CONFIG_HOME` 무시 — `crates/nerv-engine/src/paths.rs` 의 `config_dir`) — `nerv.toml` + **`specs/` 사용자 overlay spec** (spec-conversion-policy §6.1) 포함 | 사용자 또는 `nerv init` | **삭제** (옵션 시 보존 — overlay spec 도 `--keep-config` 로만 살아남는다) |
 | 7 | Homebrew 흔적 | `/opt/homebrew/bin/nerv`, 동봉 spec (`…/share/nerv/specs/`), formula 메타 | `brew install` | brew 가 처리 |
 
 > **v1.0 비대상**: LaunchAgent (`~/Library/LaunchAgents/sh.nerv.nervd.plist`) — v1.0 은 `nerv start` / `stop` 수동 라이프사이클만. 자동 기동 도입 (v1.x) 시점에 본 인벤토리에 8번으로 추가하고 §4 step 6 도 함께 부활한다.
 >
-> **v1.0 M0 비대상 (M1 도입 예정)**: `nerv-pty` (← upstream figterm) PTY shim 바이너리 — PRD v0.6 §5.8 의 opt-in path (`NERV_PTY=1`) 도입 시 sibling 바이너리 + `NERV_PTY_BIN` export 라인 + per-shell bootstrap이 §2 인벤토리에 추가됨. §11 참조.
+> **M1 PTY path (출하됨)**: `nerv-pty` (← upstream figterm) shim 은 `NERV_PTY=1` opt-in 으로 이미 출하된다 — sibling 바이너리(brew/tarball 동봉), `NERV_PTY_BIN` export 라인, per-shell bootstrap 의 인벤토리·절차는 §11 에 있다. ZLE-only 사용자는 §11 무관.
 
 > **macOS 경로 일관성 원칙**: 캐시 = `~/Library/Caches/nerv/`, 로그 = `~/Library/Logs/nerv/`, 설정 = `~/.config/nerv/`.
 
@@ -316,3 +316,4 @@ opt-in 사용자만 §11 추가분도 검증 대상.
 
 *v1.6 — 명령 기록·init 캐시 (2026-09-27). §2 행 5 에 `history.tsv`·`history.tsv.lock`·`init.zsh` 명시, §3 zsh 블록이 캐시를 먼저 source 하고 없거나 낡으면(다른 nerv 바이너리 — 크기·mtime·inode 스탬프) eval. 캐시 디렉터리 아래라 §4 step 4 가 이미 덮는다 — 절차 무변경.*
 *v1.7 — 고아 크레이트 제거 정합. `nerv-integrations` (upstream fig_integrations 흡수분) 가 uninstall에 배선된 적이 없어 크레이트째 제거 + 머리말 v0.6 정합행·§5.1 매핑 정정 (마커는 nerv-shell 자족, 본문 eval 1줄; MARKER_BEGIN/END 오기명 → START/END). 인수 기준 / 절차 자체는 무변경.*
+*v1.8 — 출하 상태 정합 (2026-10-20). §2 행 6 의 `XDG_CONFIG_HOME 존중` 삭제 (macOS v1.0 은 무시 — `paths.rs` 의 `config_dir`), `nerv-pty` 를 "M1 도입 예정"에서 출하됨으로 갱신하고 §11 을 가리킴. 인수 기준 / 절차 무변경.*
