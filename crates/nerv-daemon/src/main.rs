@@ -106,6 +106,21 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Arc::new(MissCounter::load(&misses_path))
     };
+    // An older daemon could not tell a shell builtin from a program, so
+    // the tally may hold rows like `cd` that make doctor advise an
+    // overlay spec that cannot exist. Drop those rows once here — the
+    // daemon owns this state; doctor only reads it. Only the builtin
+    // test runs: it does not depend on PATH. The daemon's own PATH is
+    // not the user's (`brew services` starts it under launchd's
+    // `/usr/bin:/bin:/usr/sbin:/sbin`), so an on-PATH test here would
+    // delete rows for real tools in `/opt/homebrew/bin`. Doctor applies
+    // the PATH test at display time with the user's PATH.
+    if misses_path != std::path::PathBuf::from("-") {
+        let dropped = misses.prune_with(&|name| !nerv_engine::derived::is_shell_builtin(name));
+        if dropped > 0 {
+            info!(dropped, "pruned un-runnable rows from the miss tally");
+        }
+    }
     info!(
         path = %misses_path.display(),
         entries = misses.len(),
@@ -567,7 +582,9 @@ async fn dispatch(request: Result<Request, String>, shared: &Shared) -> Response
                             // (`const x = …`) and mashed keys reach here
                             // as command words too, and a spec for them
                             // is not what is missing.
-                            if !registry.is_loading(binary) && on_path(binary) {
+                            if !registry.is_loading(binary)
+                                && recordable_miss(binary, &path_dirs_now())
+                            {
                                 misses.record(binary);
                                 misses.flush_if_dirty();
                             }
@@ -1154,23 +1171,19 @@ fn partial_word(before_cursor: &str) -> &str {
     word.rsplit([';', '|', '&']).next().unwrap_or(word)
 }
 
-/// Whether `name` is an executable in one of `$PATH`'s directories. Asked
-/// of the disk, not of the name cache: this runs once per settled miss,
-/// and the cache can be off (`NERV_PATH_SCAN=0`).
-fn on_path(name: &str) -> bool {
-    std::env::var("PATH").is_ok_and(|path| on_path_in(name, &path))
+/// `$PATH` split into directories. Read per settled miss, not per
+/// keystroke: [`recordable_miss`] only runs once a reply came back empty
+/// with no spec, and the name cache can be off (`NERV_PATH_SCAN=0`).
+fn path_dirs_now() -> Vec<std::path::PathBuf> {
+    std::env::var("PATH").map_or_else(|_| Vec::new(), |p| nerv_engine::complete::path_dirs(&p))
 }
 
-fn on_path_in(name: &str, path_var: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    !name.is_empty()
-        && !name.contains('/')
-        && nerv_engine::complete::path_dirs(path_var)
-            .iter()
-            .any(|dir| {
-                std::fs::metadata(dir.join(name))
-                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            })
+/// Whether a settled "no spec" reply for `name` is a real spec gap: a
+/// program on `PATH` that is not a shell builtin. Pasted code
+/// (`const x = …`) and builtins (`cd`) reach the completion as command
+/// words too; neither has a binary, so no overlay spec can close the gap.
+fn recordable_miss(name: &str, dirs: &[std::path::PathBuf]) -> bool {
+    !nerv_engine::derived::is_shell_builtin(name) && nerv_engine::paths::on_path_in(dirs, name)
 }
 
 /// Whether history rows may join this reply. Four replies are contracts
@@ -2426,13 +2439,17 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let path = format!("/nonexistent:{}", bin.path().display());
-        assert!(on_path_in("sometool", &path));
-        assert!(!on_path_in("notes", &path), "not executable");
-        assert!(!on_path_in("const", &path));
-        assert!(!on_path_in("window.__au", &path));
-        assert!(!on_path_in("./sometool", &path));
-        assert!(!on_path_in("", &path));
+        let dirs = vec![
+            std::path::PathBuf::from("/nonexistent"),
+            bin.path().to_path_buf(),
+        ];
+        assert!(recordable_miss("sometool", &dirs));
+        assert!(!recordable_miss("notes", &dirs), "not executable");
+        assert!(!recordable_miss("const", &dirs));
+        assert!(!recordable_miss("window.__au", &dirs));
+        assert!(!recordable_miss("./sometool", &dirs));
+        assert!(!recordable_miss("", &dirs));
+        assert!(!recordable_miss("cd", &dirs), "shell builtin, no binary");
     }
 
     /// While the command word itself is typed, a line whose next word is

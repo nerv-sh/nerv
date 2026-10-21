@@ -9,7 +9,9 @@ import {
   detectCargoMetadataPackages,
   detectFilepathsGenerator,
   detectGitBranchScript,
+  enrichGlobalOptions,
   enrichK8sNamespaces,
+  enrichKnownArgGaps,
   groupBranchesLocalFirst,
 } from "./convert";
 
@@ -568,5 +570,352 @@ describe("enrichK8sNamespaces", () => {
     });
     enrichK8sNamespaces(s as any);
     expect(arg.generators).toEqual([]);
+  });
+});
+
+describe("enrichGlobalOptions", () => {
+  const bareArg = (over: any = {}) => ({
+    name: "value",
+    description: null,
+    is_optional: false,
+    is_variadic: false,
+    suggestions: [],
+    template: null,
+    generators: [] as any[],
+    ...over,
+  });
+  const opt = (names: string[], over: any = {}) => ({
+    names,
+    description: null,
+    args: [bareArg()],
+    exclusive_on: [],
+    depends_on: [],
+    is_required: false,
+    is_repeatable: false,
+    hidden: false,
+    ...over,
+  });
+  const spec = (over: any = {}) => ({
+    name: "kubectl",
+    aliases: [],
+    description: null,
+    subcommands: [],
+    options: [],
+    args: [],
+    requires_double_dash: false,
+    hidden: false,
+    ...over,
+  });
+
+  test("adds kubectl's missing global flags as persistent root options", () => {
+    const s = spec();
+    enrichGlobalOptions(s as any, "kubectl");
+    const names = s.options.map((o) => o.names[0]);
+    expect(names).toEqual(["--context", "--cluster", "--user", "--kubeconfig"]);
+    for (const o of s.options) expect(o.isPersistent).toBe(true);
+
+    const context = s.options.find((o) => o.names[0] === "--context")!;
+    expect(context.args[0].generators).toEqual([
+      {
+        type: "template",
+        script: ["kubectl", "config", "get-contexts", "-o", "name"],
+      },
+    ]);
+    // `get-clusters`/`get-users` do not exist — jsonpath is the local list.
+    const cluster = s.options.find((o) => o.names[0] === "--cluster")!;
+    expect((cluster.args[0].generators[0] as any).script).toContain(
+      'jsonpath={range .clusters[*]}{.name}{"\\n"}{end}',
+    );
+    // A path is not a command.
+    const kubeconfig = s.options.find((o) => o.names[0] === "--kubeconfig")!;
+    expect(kubeconfig.args[0].generators).toEqual([
+      { type: "filepaths", folders_only: false },
+    ]);
+  });
+
+  test("fills docker's --context from the docker context list", () => {
+    const s = spec({ name: "docker" });
+    enrichGlobalOptions(s as any, "docker");
+    expect(s.options.map((o) => o.names)).toEqual([["--context"]]);
+    expect(s.options[0].args[0].generators).toEqual([
+      {
+        type: "template",
+        script: ["docker", "context", "ls", "--format", "{{.Name}}"],
+      },
+    ]);
+  });
+
+  test("fills an existing empty option in a subcommand without duplicating the root", () => {
+    const s = spec({
+      options: [opt(["--context"], { isPersistent: false })],
+      subcommands: [
+        spec({
+          name: "get",
+          options: [opt(["--context"], { isPersistent: false })],
+        }),
+      ],
+    });
+    enrichGlobalOptions(s as any, "kubectl");
+    // The root option already exists: no second copy, and its own
+    // persistence is left alone (the pass only sets what it adds).
+    expect(s.options.filter((o) => o.names[0] === "--context").length).toBe(1);
+    expect(s.options[0].isPersistent).toBe(false);
+    expect(s.options[0].args[0].generators[0].type).toBe("template");
+    expect(s.subcommands[0].options[0].args[0].generators[0].type).toBe("template");
+  });
+
+  test("never overwrites an arg that already has a source", () => {
+    const s = spec({
+      options: [
+        opt(["--context"], {
+          args: [bareArg({ suggestions: ["from-corpus"] })],
+        }),
+      ],
+    });
+    enrichGlobalOptions(s as any, "kubectl");
+    expect(s.options[0].args[0].suggestions).toEqual(["from-corpus"]);
+    expect(s.options[0].args[0].generators).toEqual([]);
+  });
+
+  test("is idempotent", () => {
+    const s = spec();
+    enrichGlobalOptions(s as any, "kubectl");
+    const once = JSON.stringify(s);
+    enrichGlobalOptions(s as any, "kubectl");
+    expect(JSON.stringify(s)).toBe(once);
+    expect(s.options.length).toBe(4);
+  });
+
+  test("leaves a stem outside the table untouched", () => {
+    const s = spec({ name: "git" });
+    enrichGlobalOptions(s as any, "git");
+    expect(s.options).toEqual([]);
+  });
+
+  test("fills gcloud globals from the native config generator, not a spawn", () => {
+    const s = spec({ name: "gcloud" });
+    enrichGlobalOptions(s as any, "gcloud");
+    const byName = Object.fromEntries(s.options.map((o) => [o.names[0], o]));
+    expect(Object.keys(byName)).toEqual([
+      "--configuration",
+      "--project",
+      "--region",
+      "--zone",
+    ]);
+    for (const o of s.options) {
+      expect(o.isPersistent).toBe(true);
+      expect(o.args[0].generators).toEqual([
+        { type: "gcloud_config", field: o.names[0].replace(/^--/, "") },
+      ]);
+    }
+  });
+
+  test("fills every empty gcloud --project in the tree", () => {
+    const s = spec({
+      name: "gcloud",
+      subcommands: [
+        spec({
+          name: "compute",
+          options: [opt(["--project"])],
+        }),
+      ],
+    });
+    enrichGlobalOptions(s as any, "gcloud");
+    expect(s.subcommands[0].options[0].args[0].generators).toEqual([
+      { type: "gcloud_config", field: "project" },
+    ]);
+    // Root gained the four globals; the subcommand kept its own --project.
+    expect(s.options.filter((o) => o.names[0] === "--project").length).toBe(1);
+    expect(s.subcommands[0].options.length).toBe(1);
+  });
+
+  test("aws --region is a static list and --output is the CLI vocabulary", () => {
+    const s = spec({ name: "aws" });
+    enrichGlobalOptions(s as any, "aws");
+    const region = s.options.find((o) => o.names[0] === "--region")!;
+    const output = s.options.find((o) => o.names[0] === "--output")!;
+    expect(region.isPersistent).toBe(true);
+    expect(output.isPersistent).toBe(true);
+    // Known-good commercial regions — not a spawn, not a network call.
+    expect(region.args[0].suggestions).toEqual(
+      expect.arrayContaining(["us-east-1", "eu-west-1", "ap-northeast-1"]),
+    );
+    expect(region.args[0].generators).toEqual([]);
+    expect(output.args[0].suggestions).toEqual([
+      "json",
+      "yaml",
+      "yaml-stream",
+      "text",
+      "table",
+    ]);
+  });
+
+  test("gcloud is idempotent", () => {
+    const s = spec({ name: "gcloud" });
+    enrichGlobalOptions(s as any, "gcloud");
+    expect(s.options.length).toBe(4);
+    const once = JSON.stringify(s);
+    enrichGlobalOptions(s as any, "gcloud");
+    expect(JSON.stringify(s)).toBe(once);
+  });
+});
+
+describe("enrichKnownArgGaps", () => {
+  const bareArg = (name: string, over: any = {}) => ({
+    name,
+    description: null,
+    is_optional: false,
+    is_variadic: false,
+    suggestions: [],
+    template: null,
+    generators: [] as any[],
+    ...over,
+  });
+  const opt = (names: string[], argName: string, over: any = {}) => ({
+    names,
+    description: null,
+    args: [bareArg(argName)],
+    exclusive_on: [],
+    depends_on: [],
+    is_required: false,
+    is_repeatable: false,
+    hidden: false,
+    ...over,
+  });
+  const node = (name: string, over: any = {}) => ({
+    name,
+    aliases: [],
+    description: null,
+    subcommands: [],
+    options: [],
+    args: [],
+    requires_double_dash: false,
+    hidden: false,
+    ...over,
+  });
+
+  const gitRemoteUpdate = () =>
+    node("git", {
+      subcommands: [
+        node("remote", {
+          subcommands: [
+            node("update", {
+              args: [bareArg("group"), bareArg("remote")],
+            }),
+            node("set-head", {
+              args: [
+                bareArg("name", {
+                  generators: [{ type: "template", script: ["git", "remote"] }],
+                }),
+                bareArg("branch"),
+              ],
+            }),
+            node("set-branches", {
+              args: [bareArg("name"), bareArg("branch")],
+            }),
+          ],
+        }),
+        node("archive", {
+          options: [opt(["--remote"], "repo")],
+        }),
+        node("push", {
+          options: [opt(["--repo"], "repository")],
+        }),
+      ],
+    });
+
+  const GIT_REMOTE = ["git", "--no-optional-locks", "remote"];
+  const GIT_BRANCH = [
+    "git",
+    "--no-optional-locks",
+    "branch",
+    "--no-color",
+    "--sort=-committerdate",
+  ];
+  const DOCKER_IMAGES = [
+    "docker",
+    "image",
+    "ls",
+    "--format",
+    "{{.Repository}}:{{.Tag}}",
+  ];
+
+  test("fills git remote update/set-head/set-branches and archive/push flags", () => {
+    const s = gitRemoteUpdate();
+    enrichKnownArgGaps(s as any, "git");
+    const update = s.subcommands[0].subcommands[0];
+    expect(update.args[0].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+    expect(update.args[1].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+    const setHead = s.subcommands[0].subcommands[1];
+    expect(setHead.args[0].generators).toEqual([
+      { type: "template", script: ["git", "remote"] },
+    ]);
+    expect(setHead.args[1].generators).toEqual([
+      { type: "template", script: GIT_BRANCH },
+    ]);
+    const setBranches = s.subcommands[0].subcommands[2];
+    expect(setBranches.args[1].generators).toEqual([
+      { type: "template", script: GIT_BRANCH },
+    ]);
+    expect(s.subcommands[1].options[0].args[0].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+    expect(s.subcommands[2].options[0].args[0].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+  });
+
+  test("fills docker push/tag images and image build as a folder", () => {
+    const s = node("docker", {
+      subcommands: [
+        node("push", { args: [bareArg("NAME[:TAG]")] }),
+        node("tag", {
+          args: [bareArg("SOURCE_IMAGE[:TAG] TARGET_IMAGE[:TAG]")],
+        }),
+        node("image", {
+          subcommands: [
+            node("build", { args: [bareArg("path")] }),
+          ],
+        }),
+      ],
+    });
+    enrichKnownArgGaps(s as any, "docker");
+    expect(s.subcommands[0].args[0].generators).toEqual([
+      { type: "template", script: DOCKER_IMAGES },
+    ]);
+    expect(s.subcommands[1].args[0].generators).toEqual([
+      { type: "template", script: DOCKER_IMAGES },
+    ]);
+    expect(s.subcommands[2].subcommands[0].args[0].generators).toEqual([
+      { type: "filepaths", folders_only: true },
+    ]);
+  });
+
+  test("never overwrites an arg that already has a source", () => {
+    const s = gitRemoteUpdate();
+    enrichKnownArgGaps(s as any, "git");
+    const setHeadName = s.subcommands[0].subcommands[1].args[0];
+    expect(setHeadName.generators).toEqual([
+      { type: "template", script: ["git", "remote"] },
+    ]);
+  });
+
+  test("is idempotent", () => {
+    const s = gitRemoteUpdate();
+    enrichKnownArgGaps(s as any, "git");
+    expect(s.subcommands[0].subcommands[0].args[1].generators.length).toBe(1);
+    const once = JSON.stringify(s);
+    enrichKnownArgGaps(s as any, "git");
+    expect(JSON.stringify(s)).toBe(once);
+  });
+
+  test("leaves a stem outside the table untouched", () => {
+    const s = node("kubectl", { args: [bareArg("resource")] });
+    enrichKnownArgGaps(s as any, "kubectl");
+    expect(s.args[0].generators).toEqual([]);
   });
 });

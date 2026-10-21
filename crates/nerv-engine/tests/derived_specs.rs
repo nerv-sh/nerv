@@ -53,7 +53,7 @@ fn derives_a_spec_from_the_commands_own_help() {
 
     // Read it back the way the registry will.
     let registry = SpecRegistry::at_dir(&out_dir);
-    let spec = registry.lookup("mytool").expect("spec loads");
+    let spec = lookup_until(&registry, "mytool").expect("spec loads");
     assert_eq!(spec.name, "mytool");
     let subs: Vec<&str> = spec.subcommands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(subs, ["build", "clean", "publish"]);
@@ -97,7 +97,7 @@ fn stdout_help_beats_longer_stderr_warning() {
     let written = derive_from_binary("chatty", &bin, &out_dir).expect("derived from stdout");
     assert!(written.exists());
     let registry = SpecRegistry::at_dir(&out_dir);
-    let spec = registry.lookup("chatty").expect("spec loads");
+    let spec = lookup_until(&registry, "chatty").expect("spec loads");
     let subs: Vec<&str> = spec.subcommands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(subs, ["build", "clean", "publish"]);
 }
@@ -423,7 +423,7 @@ Usage: painted <command>
     derive_from_binary("painted", &bin, &out_dir).expect("derived");
 
     let registry = SpecRegistry::at_dir(&out_dir);
-    let spec = registry.lookup("painted").expect("spec loads");
+    let spec = lookup_until(&registry, "painted").expect("spec loads");
     let subs: Vec<&str> = spec.subcommands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(subs, ["build", "clean"], "escape bytes leaked into names");
 }

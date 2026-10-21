@@ -195,20 +195,33 @@ impl MissCounter {
         if shell_names.is_empty() {
             return 0;
         }
+        self.prune_with(&|name| !shell_names.contains(name))
+    }
+
+    /// Drop every row for which `keep` returns false, returning how many
+    /// went. The general form of [`Self::prune`]: the daemon uses it at
+    /// startup for rows that can never be a spec gap (a name that is not
+    /// on `PATH`, or a shell builtin with no binary at all), so a tally
+    /// written by an older build stops steering doctor's advice.
+    ///
+    /// Kept rows survive with their counts and timestamps; the rewrite
+    /// goes through the same atomic, immediate flush as `prune` (doctor
+    /// may read right after). No match → no write, so a fresh install
+    /// does not create an empty file.
+    pub fn prune_with(&self, keep: &dyn Fn(&str) -> bool) -> usize {
         let Ok(mut st) = self.state.lock() else {
             return 0;
         };
         let before = st.table.len();
-        st.table.retain(|name, _| !shell_names.contains(name));
+        st.table.retain(|name, _| keep(name));
         let removed = before - st.table.len();
         if removed == 0 {
             return 0;
         }
         st.dirty = true;
         drop(st);
-        // Force: pruning runs once per shell-name registration, and
-        // doctor may read the file right after — the throttled
-        // cadence must not sit on the cleanup for 5 seconds.
+        // Force: the throttled cadence must not sit on the cleanup for
+        // 5 seconds while doctor reads the old rows.
         self.flush_now();
         removed
     }
@@ -572,5 +585,44 @@ mod tests {
         }));
         assert!(r.is_err());
         assert!(c.top_n(5).is_empty());
+    }
+
+    /// Startup cleanup: rows for names that cannot run (not on PATH, or
+    /// shell builtins) are advisory junk — doctor would advise an
+    /// overlay spec for `cd`. Everything else keeps its count, and the
+    /// rewrite lands on disk immediately (doctor may read next).
+    #[test]
+    fn prune_with_drops_rows_the_predicate_rejects_and_keeps_the_rest() {
+        let path = tmp_path("prune-with");
+        let c = MissCounter::load(&path);
+        for _ in 0..3 {
+            c.record("kept");
+        }
+        c.record("junk");
+        c.record("cd");
+        c.flush_now();
+
+        let dropped = c.prune_with(&|name| name != "junk" && name != "cd");
+        assert_eq!(dropped, 2);
+        assert_eq!(c.top_n(5), vec![("kept".to_string(), 3)]);
+        assert_eq!(
+            MissCounter::load(&path).top_n(5),
+            vec![("kept".to_string(), 3)],
+            "prune must not wait for the 5s flush throttle"
+        );
+
+        // Nothing left to drop → no rewrite, no count.
+        assert_eq!(c.prune_with(&|name| name != "junk"), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A fresh install has no tally file. The startup prune must not
+    /// create one just to store nothing.
+    #[test]
+    fn prune_with_on_a_missing_tally_creates_no_file() {
+        let path = tmp_path("prune-empty");
+        let c = MissCounter::load(&path);
+        assert_eq!(c.prune_with(&|_| false), 0);
+        assert!(!path.exists(), "no rows → nothing to write");
     }
 }

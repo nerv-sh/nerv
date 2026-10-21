@@ -134,10 +134,21 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
     Some(spec)
 }
 
+/// Whether `name` is a shell builtin or keyword rather than a program.
+///
+/// Such a word has no binary on `PATH` to ask for `--help`, and a
+/// "no spec for <name>" reply about it is not a gap in the spec corpus.
+/// Callers that tally spec misses (`nervd`) or display them
+/// (`nerv doctor`) filter on this so the advice stays about commands
+/// an overlay spec could actually help.
+pub fn is_shell_builtin(name: &str) -> bool {
+    NOT_DERIVABLE.contains(&name)
+}
+
 /// Whether `name` may be asked for its own help: a plain executable
 /// stem ([`crate::paths::is_command_stem`]) that is not a shell builtin.
 pub fn is_derivable(name: &str) -> bool {
-    crate::paths::is_command_stem(name) && !NOT_DERIVABLE.contains(&name)
+    crate::paths::is_command_stem(name) && !is_shell_builtin(name)
 }
 
 /// Derive a spec for `name` into `dir`, returning the file written (or
@@ -999,5 +1010,19 @@ mod tests {
         assert_eq!(back.name, spec.name);
         assert_eq!(back.subcommands.len(), spec.subcommands.len());
         assert_eq!(back.options.len(), spec.options.len());
+    }
+
+    /// A "no spec for cd" reply is not a gap in the spec corpus: `cd`
+    /// has no binary to ask for `--help`. The daemon's miss tally and
+    /// doctor's display both ask this predicate, so it is locked here.
+    #[test]
+    fn shell_builtins_are_flagged_but_programs_are_not() {
+        for name in ["cd", "export", "printf", "unset", "while"] {
+            assert!(is_shell_builtin(name), "{name} is a builtin/keyword");
+            assert!(!is_derivable(name), "{name} has no binary to ask");
+        }
+        for name in ["git", "docker", "kubectl", "zeph", "aic2"] {
+            assert!(!is_shell_builtin(name), "{name} is a program");
+        }
     }
 }

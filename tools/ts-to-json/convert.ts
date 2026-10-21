@@ -358,7 +358,8 @@ type NervGenerator =
       lookup_flags: string[];
       parent_key: string;
       id_field: string | null;
-    };
+    }
+  | { type: "gcloud_config"; field: string };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -1263,6 +1264,359 @@ export const enrichK8sNamespaces = (
   for (const sub of spec.subcommands) enrichK8sNamespaces(sub, false);
 };
 
+// ---------------------------------------------------------------------------
+// Well-known gap fill: global options the corpus declares without a value
+// source — or not at all.
+//
+// The big CLIs accept flags at every subcommand (`kubectl get pods
+// --context …`, `docker run --context …`), but the upstream specs either
+// omit the option or declare it with a bare `args: { name: … }`. Faithful
+// conversion therefore ships an empty completion for the flags users type
+// most. The sources below are all local and fast:
+//
+//   * `script`  — a Tier B template the engine runs with an 800ms cap and
+//                 a 5s cache. kubectl and docker answer these from their
+//                 own config in tens of milliseconds.
+//   * `suggestions` — a fixed vocabulary (`aws --output`); no process.
+//   * `filepaths` — a path, not a command.
+//
+// NOT a template: `gcloud`. Its Python startup exceeds the engine's
+// 800ms generator cap, so gcloud values come from a Rust-native
+// generator over `~/.config/gcloud` (see `gcloud_config` below) — the
+// table entry names that generator instead of spawning the CLI.
+// ---------------------------------------------------------------------------
+
+type OptionSource =
+  | { script: string[] }
+  | { suggestions: string[] }
+  | { filepaths: true }
+  | { generator: NervGenerator };
+
+type GlobalOption = {
+  names: string[];
+  description: string;
+  source: OptionSource;
+};
+
+const KUBECTL_CONTEXTS_SCRIPT = ["kubectl", "config", "get-contexts", "-o", "name"];
+// `get-clusters` / `get-users` do not exist; jsonpath is the only local
+// listing for both, and `{"\n"}` is kubectl's own newline escape.
+const KUBECTL_CLUSTERS_SCRIPT = [
+  "kubectl",
+  "config",
+  "view",
+  "-o",
+  'jsonpath={range .clusters[*]}{.name}{"\\n"}{end}',
+];
+const KUBECTL_USERS_SCRIPT = [
+  "kubectl",
+  "config",
+  "view",
+  "-o",
+  'jsonpath={range .users[*]}{.name}{"\\n"}{end}',
+];
+const DOCKER_CONTEXTS_SCRIPT = ["docker", "context", "ls", "--format", "{{.Name}}"];
+
+const GCLOUD_CONFIG = (field: "configuration" | "project" | "region" | "zone"): OptionSource => ({
+  generator: { type: "gcloud_config", field },
+});
+
+/// Commercial AWS regions the CLI accepts for `--region`. GovCloud and
+/// China partitions are omitted: they need a different endpoint and a
+/// user who lives there already has the name. Kept as data, not a
+/// network call — `aws ec2 describe-regions` needs credentials.
+const AWS_REGIONS: string[] = [
+  "af-south-1",
+  "ap-east-1",
+  "ap-east-2",
+  "ap-northeast-1",
+  "ap-northeast-2",
+  "ap-northeast-3",
+  "ap-south-1",
+  "ap-south-2",
+  "ap-southeast-1",
+  "ap-southeast-2",
+  "ap-southeast-3",
+  "ap-southeast-4",
+  "ap-southeast-5",
+  "ap-southeast-7",
+  "ca-central-1",
+  "ca-west-1",
+  "eu-central-1",
+  "eu-central-2",
+  "eu-north-1",
+  "eu-south-1",
+  "eu-south-2",
+  "eu-west-1",
+  "eu-west-2",
+  "eu-west-3",
+  "il-central-1",
+  "me-central-1",
+  "me-south-1",
+  "mx-central-1",
+  "sa-east-1",
+  "us-east-1",
+  "us-east-2",
+  "us-west-1",
+  "us-west-2",
+];
+
+const AWS_OUTPUT_FORMATS = ["json", "yaml", "yaml-stream", "text", "table"];
+
+/// Per-stem list of global options that must exist at the root
+/// (`isPersistent`) and carry a value source everywhere they appear.
+/// Adding a CLI here is a data edit — one row per flag.
+const GLOBAL_OPTIONS: Record<string, GlobalOption[]> = {
+  kubectl: [
+    {
+      names: ["--context"],
+      description: "The name of the kubeconfig context to use",
+      source: { script: KUBECTL_CONTEXTS_SCRIPT },
+    },
+    {
+      names: ["--cluster"],
+      description: "The name of the kubeconfig cluster to use",
+      source: { script: KUBECTL_CLUSTERS_SCRIPT },
+    },
+    {
+      names: ["--user"],
+      description: "The name of the kubeconfig user to use",
+      source: { script: KUBECTL_USERS_SCRIPT },
+    },
+    {
+      names: ["--kubeconfig"],
+      description: "Path to the kubeconfig file to use for CLI requests",
+      source: { filepaths: true },
+    },
+  ],
+  docker: [
+    {
+      names: ["--context"],
+      description: "Name of the context to use",
+      source: { script: DOCKER_CONTEXTS_SCRIPT },
+    },
+  ],
+  gcloud: [
+    {
+      names: ["--configuration"],
+      description: "Named configuration to use for this invocation",
+      source: GCLOUD_CONFIG("configuration"),
+    },
+    {
+      names: ["--project"],
+      description: "Google Cloud project ID to use for this invocation",
+      source: GCLOUD_CONFIG("project"),
+    },
+    {
+      names: ["--region"],
+      description: "Compute region to use for this invocation",
+      source: GCLOUD_CONFIG("region"),
+    },
+    {
+      names: ["--zone"],
+      description: "Compute zone to use for this invocation",
+      source: GCLOUD_CONFIG("zone"),
+    },
+  ],
+  aws: [
+    {
+      names: ["--region"],
+      description: "The region to use. Overrides config/env settings",
+      source: { suggestions: AWS_REGIONS },
+    },
+    {
+      names: ["--output"],
+      description: "The output format (json, yaml, yaml-stream, text, table)",
+      source: { suggestions: AWS_OUTPUT_FORMATS },
+    },
+  ],
+};
+
+const emptyArg = (name: string): NervArg => ({
+  name,
+  description: null,
+  is_optional: false,
+  is_variadic: false,
+  suggestions: [],
+  template: null,
+  generators: [],
+});
+
+/// Whether an arg already knows where its values come from. A flag whose
+/// arg carries any source is left byte-identical — the pass only fills
+/// holes, it never overrides the corpus.
+const argHasSource = (arg: NervArg): boolean =>
+  arg.suggestions.length > 0 || arg.template !== null || arg.generators.length > 0;
+
+const applyOptionSource = (arg: NervArg, source: OptionSource): void => {
+  if ("script" in source) {
+    arg.generators.push({ type: "template", script: source.script });
+  } else if ("suggestions" in source) {
+    arg.suggestions.push(...source.suggestions);
+  } else if ("filepaths" in source) {
+    arg.generators.push({ type: "filepaths", folders_only: false });
+  } else {
+    arg.generators.push(source.generator);
+  }
+};
+
+const hasOptionNamed = (spec: NervSpec, names: string[]): boolean =>
+  spec.options.some((o) => o.names.some((n) => names.includes(n)));
+
+/// Fill the first value slot of every occurrence of `def.names` in the
+/// tree — root and subcommand-local alike — when it has no source yet.
+/// Returns how many args were filled (tests use it to prove idempotency).
+export const fillOptionArgs = (
+  spec: NervSpec,
+  defs: GlobalOption[],
+): number => {
+  let filled = 0;
+  const visit = (node: NervSpec): void => {
+    for (const opt of node.options) {
+      const def = defs.find((d) => opt.names.some((n) => d.names.includes(n)));
+      if (!def) continue;
+      const arg = opt.args[0];
+      // No args = a boolean flag; nothing to complete and nothing to add.
+      if (!arg || argHasSource(arg)) continue;
+      applyOptionSource(arg, def.source);
+      filled += 1;
+    }
+    for (const sub of node.subcommands) visit(sub);
+  };
+  visit(spec);
+  return filled;
+};
+
+/// Add each configured global option to the root when the corpus lacks it
+/// (as persistent — the real CLI accepts it after any subcommand), then
+/// fill every empty occurrence in the tree. Idempotent: a second call
+/// finds the root option present and every arg sourced, so nothing
+/// changes. Existing options keep their own `isPersistent` value — this
+/// pass only records semantics for the options it adds.
+export const enrichGlobalOptions = (spec: NervSpec, stem: string): void => {
+  const defs = GLOBAL_OPTIONS[stem];
+  if (!defs || defs.length === 0) return;
+  for (const def of defs) {
+    if (hasOptionNamed(spec, def.names)) continue;
+    spec.options.push({
+      names: [...def.names],
+      description: def.description,
+      args: [emptyArg(def.names[0].replace(/^--?/, ""))],
+      exclusive_on: [],
+      depends_on: [],
+      is_required: false,
+      is_repeatable: false,
+      hidden: false,
+      isPersistent: true,
+    });
+  }
+  fillOptionArgs(spec, defs);
+};
+
+type ArgGap = {
+  path: string[];
+  argNames?: string[];
+  optionNames?: string[];
+  source: OptionSource;
+};
+
+const GIT_REMOTES_SCRIPT = ["git", "--no-optional-locks", "remote"];
+const DOCKER_IMAGES_SCRIPT = [
+  "docker",
+  "image",
+  "ls",
+  "--format",
+  "{{.Repository}}:{{.Tag}}",
+];
+
+/// Holes the corpus leaves empty even though a sibling command in the
+/// same spec already lists the same values (`git push <remote>` vs
+/// `git remote update <remote>`). One row per hole; sourced args stay
+/// as-is. Adding a CLI here is a data edit.
+const ARG_GAPS: Record<string, ArgGap[]> = {
+  git: [
+    {
+      path: ["remote", "update"],
+      argNames: ["group", "remote"],
+      source: { script: GIT_REMOTES_SCRIPT },
+    },
+    {
+      path: ["remote", "set-head"],
+      argNames: ["branch"],
+      source: { script: GIT_LOCAL_BRANCHES },
+    },
+    {
+      path: ["remote", "set-branches"],
+      argNames: ["branch"],
+      source: { script: GIT_LOCAL_BRANCHES },
+    },
+    {
+      path: ["archive"],
+      optionNames: ["--remote"],
+      source: { script: GIT_REMOTES_SCRIPT },
+    },
+    {
+      path: ["push"],
+      optionNames: ["--repo"],
+      source: { script: GIT_REMOTES_SCRIPT },
+    },
+  ],
+  docker: [
+    {
+      path: ["push"],
+      argNames: ["NAME[:TAG]"],
+      source: { script: DOCKER_IMAGES_SCRIPT },
+    },
+    {
+      path: ["tag"],
+      argNames: ["SOURCE_IMAGE[:TAG] TARGET_IMAGE[:TAG]"],
+      source: { script: DOCKER_IMAGES_SCRIPT },
+    },
+    {
+      path: ["image", "build"],
+      argNames: ["path"],
+      source: { generator: { type: "filepaths", folders_only: true } },
+    },
+  ],
+};
+
+const subByPath = (spec: NervSpec, path: string[]): NervSpec | null => {
+  let cur: NervSpec | undefined = spec;
+  for (const name of path) {
+    cur = cur.subcommands.find((s) => s.name === name);
+    if (!cur) return null;
+  }
+  return cur;
+};
+
+/// Fill the named positional / option args along `ARG_GAPS` when they
+/// have no source yet. Missing subcommands are skipped (a corpus
+/// reshape must not break conversion). Idempotent.
+export const enrichKnownArgGaps = (spec: NervSpec, stem: string): void => {
+  const gaps = ARG_GAPS[stem];
+  if (!gaps || gaps.length === 0) return;
+  for (const gap of gaps) {
+    const node = subByPath(spec, gap.path);
+    if (!node) continue;
+    const optionNames = gap.optionNames;
+    if (optionNames) {
+      for (const option of node.options) {
+        if (!option.names.some((n) => optionNames.includes(n))) continue;
+        const arg = option.args[0];
+        if (!arg || argHasSource(arg)) continue;
+        applyOptionSource(arg, gap.source);
+      }
+    }
+    const argNames = gap.argNames;
+    if (argNames) {
+      for (const arg of node.args) {
+        if (!argNames.includes(arg.name ?? "") || argHasSource(arg)) continue;
+        applyOptionSource(arg, gap.source);
+      }
+    }
+  }
+};
+
 const loadOne = async (file: string): Promise<NervSpec | null> => {
   const abs = resolve(file);
   return loadOneAt(abs, {
@@ -1298,6 +1652,8 @@ const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
   try {
     const spec = await convertSpec(exported as FigSpec, ctx, stem);
     if (K8S_NAMESPACE_SPEC_STEMS.has(stem)) enrichK8sNamespaces(spec);
+    enrichGlobalOptions(spec, stem);
+    enrichKnownArgGaps(spec, stem);
     return spec;
   } finally {
     AWS_SERVICE_HINT = prev;

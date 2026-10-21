@@ -31,6 +31,31 @@ pub const INIT_CACHE_NAME: &str = "init.zsh";
 pub const AUTOSUGGEST_SEEN_NAME: &str = "autosuggest-seen";
 pub const DERIVED_SUBDIR: &str = "derived";
 
+/// Whether `name` is an executable file in one of `dirs`.
+///
+/// The spec-miss filter asks this of a name the daemon completed empty
+/// for: a name that is not a runnable program cannot be a missing spec.
+/// Callers pass the directory list they already hold (`$PATH` split, or
+/// a cached copy) so a keystroke never re-reads the environment.
+pub fn on_path_in(dirs: &[PathBuf], name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if name.is_empty() || name.contains('/') {
+        return false;
+    }
+    dirs.iter().any(|dir| {
+        std::fs::metadata(dir.join(name))
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
+}
+
+/// Whether `name` is an executable in one of `$PATH`'s directories.
+///
+/// The convenience form for one-shot callers (`nerv doctor`); the
+/// daemon passes its own list to [`on_path_in`].
+pub fn on_path(name: &str) -> bool {
+    std::env::var("PATH").is_ok_and(|path| on_path_in(&crate::complete::path_dirs(&path), name))
+}
+
 /// Write `content` to `path` through a sibling temp file and a rename.
 ///
 /// Every file nerv writes that another process may be reading goes
@@ -816,5 +841,40 @@ mod tests {
         assert_eq!(PID_NAME, "nervd.pid");
         assert_eq!(DAEMON_LOG_NAME, "nervd.log");
         assert_eq!(SPECS_SUBDIR, "specs");
+    }
+
+    /// The spec-miss filter asks "can this name actually run?" of a
+    /// directory list, not of `$PATH`: the daemon passes the list it
+    /// already has, and doctor passes the live one. Only a regular,
+    /// executable file counts — a directory with a matching name or a
+    /// non-executable file is not a runnable command.
+    #[test]
+    fn on_path_in_requires_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "nerv-on-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("mytool");
+        std::fs::write(&exe, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plain = dir.join("notes");
+        std::fs::write(&plain, "x").unwrap();
+        std::fs::create_dir(dir.join("adir")).unwrap();
+
+        let dirs = vec![dir.clone()];
+        assert!(on_path_in(&dirs, "mytool"));
+        assert!(!on_path_in(&dirs, "notes"), "not executable");
+        assert!(!on_path_in(&dirs, "adir"), "a directory is not a command");
+        assert!(!on_path_in(&dirs, "missing"));
+        assert!(!on_path_in(&dirs, ""), "empty name");
+        assert!(!on_path_in(&dirs, "sub/mytool"), "path-like, not a stem");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
