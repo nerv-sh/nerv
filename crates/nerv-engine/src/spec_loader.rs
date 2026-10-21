@@ -535,6 +535,9 @@ mod tests {
                     Generator::ZoxideQuery,
                     Generator::SshHosts,
                     Generator::MakefileTargets,
+                    Generator::GcloudConfig {
+                        field: "project".into(),
+                    },
                     Generator::Custom {
                         description_hint: Some("hint".into()),
                         source: Some("(()=>[\"a\"])()".into()),

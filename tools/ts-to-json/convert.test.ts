@@ -690,4 +690,71 @@ describe("enrichGlobalOptions", () => {
     enrichGlobalOptions(s as any, "git");
     expect(s.options).toEqual([]);
   });
+
+  test("fills gcloud globals from the native config generator, not a spawn", () => {
+    const s = spec({ name: "gcloud" });
+    enrichGlobalOptions(s as any, "gcloud");
+    const byName = Object.fromEntries(s.options.map((o) => [o.names[0], o]));
+    expect(Object.keys(byName)).toEqual([
+      "--configuration",
+      "--project",
+      "--region",
+      "--zone",
+    ]);
+    for (const o of s.options) {
+      expect(o.isPersistent).toBe(true);
+      expect(o.args[0].generators).toEqual([
+        { type: "gcloud_config", field: o.names[0].replace(/^--/, "") },
+      ]);
+    }
+  });
+
+  test("fills every empty gcloud --project in the tree", () => {
+    const s = spec({
+      name: "gcloud",
+      subcommands: [
+        spec({
+          name: "compute",
+          options: [opt(["--project"])],
+        }),
+      ],
+    });
+    enrichGlobalOptions(s as any, "gcloud");
+    expect(s.subcommands[0].options[0].args[0].generators).toEqual([
+      { type: "gcloud_config", field: "project" },
+    ]);
+    // Root gained the four globals; the subcommand kept its own --project.
+    expect(s.options.filter((o) => o.names[0] === "--project").length).toBe(1);
+    expect(s.subcommands[0].options.length).toBe(1);
+  });
+
+  test("aws --region is a static list and --output is the CLI vocabulary", () => {
+    const s = spec({ name: "aws" });
+    enrichGlobalOptions(s as any, "aws");
+    const region = s.options.find((o) => o.names[0] === "--region")!;
+    const output = s.options.find((o) => o.names[0] === "--output")!;
+    expect(region.isPersistent).toBe(true);
+    expect(output.isPersistent).toBe(true);
+    // Known-good commercial regions — not a spawn, not a network call.
+    expect(region.args[0].suggestions).toEqual(
+      expect.arrayContaining(["us-east-1", "eu-west-1", "ap-northeast-1"]),
+    );
+    expect(region.args[0].generators).toEqual([]);
+    expect(output.args[0].suggestions).toEqual([
+      "json",
+      "yaml",
+      "yaml-stream",
+      "text",
+      "table",
+    ]);
+  });
+
+  test("gcloud is idempotent", () => {
+    const s = spec({ name: "gcloud" });
+    enrichGlobalOptions(s as any, "gcloud");
+    expect(s.options.length).toBe(4);
+    const once = JSON.stringify(s);
+    enrichGlobalOptions(s as any, "gcloud");
+    expect(JSON.stringify(s)).toBe(once);
+  });
 });

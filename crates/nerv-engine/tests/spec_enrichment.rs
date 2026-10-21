@@ -100,3 +100,50 @@ fn docker_global_context_is_sourced() {
     // parses `--context` (the spec tree itself is unchanged).
     assert!(!sub(&spec, &["run"]).args.is_empty());
 }
+
+fn gcloud_field(o: &Opt) -> &str {
+    match &o.args[0].generators[0] {
+        Generator::GcloudConfig { field } => field,
+        other => panic!("{} is not gcloud_config: {other:?}", o.names[0]),
+    }
+}
+
+#[test]
+fn gcloud_global_flags_read_local_config() {
+    let Some(spec) = converted("gcloud") else {
+        return;
+    };
+    for (flag, field) in [
+        ("--configuration", "configuration"),
+        ("--project", "project"),
+        ("--region", "region"),
+        ("--zone", "zone"),
+    ] {
+        let o = opt(&spec, flag);
+        assert!(o.is_persistent, "{flag} must work after a subcommand");
+        assert_eq!(gcloud_field(o), field);
+    }
+}
+
+#[test]
+fn aws_region_and_output_are_static() {
+    let Some(spec) = converted("aws") else {
+        return;
+    };
+    let region = opt(&spec, "--region");
+    assert!(region.is_persistent);
+    assert!(
+        region.args[0]
+            .suggestions
+            .iter()
+            .any(|s| s.name == "us-east-1"),
+        "--region must include us-east-1"
+    );
+    let output = opt(&spec, "--output");
+    let names: Vec<_> = output.args[0]
+        .suggestions
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, ["json", "yaml", "yaml-stream", "text", "table"]);
+}

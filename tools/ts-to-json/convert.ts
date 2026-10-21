@@ -358,7 +358,8 @@ type NervGenerator =
       lookup_flags: string[];
       parent_key: string;
       id_field: string | null;
-    };
+    }
+  | { type: "gcloud_config"; field: string };
 
 /** Normalize a Fig `name` field (string | string[]) into our names array.
  *  Fig sometimes embeds `null` or sparse holes — filter to non-empty strings. */
@@ -1316,6 +1317,52 @@ const KUBECTL_USERS_SCRIPT = [
 ];
 const DOCKER_CONTEXTS_SCRIPT = ["docker", "context", "ls", "--format", "{{.Name}}"];
 
+const GCLOUD_CONFIG = (field: "configuration" | "project" | "region" | "zone"): OptionSource => ({
+  generator: { type: "gcloud_config", field },
+});
+
+/// Commercial AWS regions the CLI accepts for `--region`. GovCloud and
+/// China partitions are omitted: they need a different endpoint and a
+/// user who lives there already has the name. Kept as data, not a
+/// network call — `aws ec2 describe-regions` needs credentials.
+const AWS_REGIONS: string[] = [
+  "af-south-1",
+  "ap-east-1",
+  "ap-east-2",
+  "ap-northeast-1",
+  "ap-northeast-2",
+  "ap-northeast-3",
+  "ap-south-1",
+  "ap-south-2",
+  "ap-southeast-1",
+  "ap-southeast-2",
+  "ap-southeast-3",
+  "ap-southeast-4",
+  "ap-southeast-5",
+  "ap-southeast-7",
+  "ca-central-1",
+  "ca-west-1",
+  "eu-central-1",
+  "eu-central-2",
+  "eu-north-1",
+  "eu-south-1",
+  "eu-south-2",
+  "eu-west-1",
+  "eu-west-2",
+  "eu-west-3",
+  "il-central-1",
+  "me-central-1",
+  "me-south-1",
+  "mx-central-1",
+  "sa-east-1",
+  "us-east-1",
+  "us-east-2",
+  "us-west-1",
+  "us-west-2",
+];
+
+const AWS_OUTPUT_FORMATS = ["json", "yaml", "yaml-stream", "text", "table"];
+
 /// Per-stem list of global options that must exist at the root
 /// (`isPersistent`) and carry a value source everywhere they appear.
 /// Adding a CLI here is a data edit — one row per flag.
@@ -1347,6 +1394,40 @@ const GLOBAL_OPTIONS: Record<string, GlobalOption[]> = {
       names: ["--context"],
       description: "Name of the context to use",
       source: { script: DOCKER_CONTEXTS_SCRIPT },
+    },
+  ],
+  gcloud: [
+    {
+      names: ["--configuration"],
+      description: "Named configuration to use for this invocation",
+      source: GCLOUD_CONFIG("configuration"),
+    },
+    {
+      names: ["--project"],
+      description: "Google Cloud project ID to use for this invocation",
+      source: GCLOUD_CONFIG("project"),
+    },
+    {
+      names: ["--region"],
+      description: "Compute region to use for this invocation",
+      source: GCLOUD_CONFIG("region"),
+    },
+    {
+      names: ["--zone"],
+      description: "Compute zone to use for this invocation",
+      source: GCLOUD_CONFIG("zone"),
+    },
+  ],
+  aws: [
+    {
+      names: ["--region"],
+      description: "The region to use. Overrides config/env settings",
+      source: { suggestions: AWS_REGIONS },
+    },
+    {
+      names: ["--output"],
+      description: "The output format (json, yaml, yaml-stream, text, table)",
+      source: { suggestions: AWS_OUTPUT_FORMATS },
     },
   ],
 };

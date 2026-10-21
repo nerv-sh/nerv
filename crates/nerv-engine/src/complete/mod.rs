@@ -2787,6 +2787,32 @@ fn emit_candidates_for_arg(
                         );
                     }
                 }
+                crate::spec_parser::Generator::GcloudConfig { field } => {
+                    // The cache key includes the field: two flags over the
+                    // same files are different reads, and the shared key
+                    // would serve one flag's values for the other.
+                    let tag = format!("<nerv:gcloud-config:{field}>");
+                    let field = field.clone();
+                    if let Some(values) =
+                        cached_native_generator(&tag, None, move || gcloud_config_values(&field))
+                    {
+                        out.extend(
+                            values
+                                .into_iter()
+                                .filter(|v| matches_name(v, prefix, mode))
+                                .map(|v| Suggestion {
+                                    insertion: v.clone(),
+                                    display: v,
+                                    description: Some("gcloud config".into()),
+                                    kind: SuggestionKind::Argument,
+                                    priority: None,
+                                    icon: None,
+                                    source_ranked: false,
+                                    replace: None,
+                                }),
+                        );
+                    }
+                }
                 crate::spec_parser::Generator::MakefileTargets => {
                     let owned_cwd = cwd.map(Path::to_path_buf);
                     if let Some(targets) =
@@ -4105,6 +4131,7 @@ fn clamp_cursor_to_char_boundary(line: &str, cursor: usize) -> usize {
 // (registry, matching, emitters) plus the shared matcher helpers.
 mod aws;
 mod filepaths;
+mod gcloud;
 mod history;
 mod makefile;
 mod man;
@@ -4113,6 +4140,7 @@ mod zoxide;
 
 use self::aws::aws_profiles;
 use self::filepaths::filepath_suggestions;
+use self::gcloud::gcloud_config_values;
 use self::history::shell_history_entries;
 use self::makefile::makefile_targets;
 use self::man::man_pages;

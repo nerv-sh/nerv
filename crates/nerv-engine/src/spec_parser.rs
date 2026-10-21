@@ -456,6 +456,15 @@ pub enum Generator {
         #[serde(default)]
         id_field: Option<String>,
     },
+    /// Well-known: gcloud's global configuration values (`--project`,
+    /// `--configuration`, `--region`, `--zone`). Fig reads them through
+    /// custom closures that shell out to gcloud; the CLI's Python
+    /// startup (~1s) is past the engine's 800ms generator cap, so the
+    /// engine reads `~/.config/gcloud/configurations/config_*` (or
+    /// `$CLOUDSDK_CONFIG`) in pure Rust instead — local, offline, and
+    /// no subprocess. `field` is one of `configuration`, `project`,
+    /// `region`, `zone`; an unknown field yields no rows.
+    GcloudConfig { field: String },
     /// Well-known: aws `listCustomGenerator(tokens, exec, command,
     /// options, parentKey, childKey)` family. The helper is locally
     /// defined per aws spec file (lambda.ts / iam.ts / cloudformation.ts
@@ -1212,6 +1221,19 @@ mod tests {
         } else {
             panic!("expected Template");
         }
+    }
+
+    #[test]
+    fn gcloud_config_generator_roundtrips() {
+        let g: Generator = serde_json::from_str(r#"{"type":"gcloud_config","field":"project"}"#)
+            .expect("converter JSON must load");
+        assert!(matches!(
+            g,
+            Generator::GcloudConfig { ref field } if field == "project"
+        ));
+        let back = serde_json::to_value(&g).expect("serialize");
+        assert_eq!(back["type"], "gcloud_config");
+        assert_eq!(back["field"], "project");
     }
 
     #[test]
