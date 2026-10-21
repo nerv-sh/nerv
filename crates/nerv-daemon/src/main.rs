@@ -106,14 +106,17 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Arc::new(MissCounter::load(&misses_path))
     };
-    // The tally outlives the binaries it names. A row for a command that
-    // has since been uninstalled, or for a shell builtin the older
-    // daemon could not tell from a program, makes doctor advise an
+    // An older daemon could not tell a shell builtin from a program, so
+    // the tally may hold rows like `cd` that make doctor advise an
     // overlay spec that cannot exist. Drop those rows once here — the
-    // daemon owns this state; doctor only reads it.
+    // daemon owns this state; doctor only reads it. Only the builtin
+    // test runs: it does not depend on PATH. The daemon's own PATH is
+    // not the user's (`brew services` starts it under launchd's
+    // `/usr/bin:/bin:/usr/sbin:/sbin`), so an on-PATH test here would
+    // delete rows for real tools in `/opt/homebrew/bin`. Doctor applies
+    // the PATH test at display time with the user's PATH.
     if misses_path != std::path::PathBuf::from("-") {
-        let dirs = path_dirs_now();
-        let dropped = misses.prune_with(&|name| recordable_miss(name, &dirs));
+        let dropped = misses.prune_with(&|name| !nerv_engine::derived::is_shell_builtin(name));
         if dropped > 0 {
             info!(dropped, "pruned un-runnable rows from the miss tally");
         }
