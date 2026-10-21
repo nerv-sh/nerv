@@ -227,6 +227,22 @@ Tier C 의 generator 함수를 QuickJS context 에 평가 → 결과 후보 반�
 성공 신호 — M1 dogfooding 결과로 Tier C 회복률 측정 후 v1.1 기본
 활성화 검토.
 
+### 4.5 Well-known gap fill (변환기 패스)
+
+vendor spec 은 읽기 전용이다. 코퍼스가 빈 arg 로 두는 잘 알려진 구멍은
+`tools/ts-to-json/convert.ts` 가 변환 직후 멱등 패스로 채운다. 이미
+template / generator / suggestion 이 있는 arg 는 불변. 패스 목록:
+
+| 패스 | 대상 | 소스 |
+|------|------|------|
+| `enrichK8sNamespaces` | kubectl/helm/… `-n/--namespace` | `kubectl get ns` template |
+| `enrichGlobalOptions` | kubectl `--context/--cluster/--user/--kubeconfig`, docker `--context`, gcloud `--project/--configuration/--region/--zone`, aws `--region/--output` | template / `gcloud_config` native / 정적 suggestions |
+| `enrichKnownArgGaps` | `git remote update/set-head/set-branches`, `git archive --remote`, `git push --repo`, `docker push/tag`, `docker image build` | `git remote` / `git branch` / `docker image ls` / folders |
+
+`gcloud_config` 는 엔진 native generator (`complete/gcloud.rs`) — gcloud
+Python 시작이 800ms 상한을 넘기므로 subprocess 를 쓰지 않는다. 변환
+fixture 는 gitignore; CI 계약은 `bun test` + 엔진 단위 테스트.
+
 ---
 
 ## 5. Vendor 전략 (2개 upstream)

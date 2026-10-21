@@ -1513,6 +1513,115 @@ export const enrichGlobalOptions = (spec: NervSpec, stem: string): void => {
   fillOptionArgs(spec, defs);
 };
 
+type ArgGap = {
+  path: string[];
+  argName?: string;
+  optionNames?: string[];
+  source: OptionSource;
+};
+
+const GIT_REMOTES_SCRIPT = ["git", "--no-optional-locks", "remote"];
+const DOCKER_IMAGES_SCRIPT = [
+  "docker",
+  "image",
+  "ls",
+  "--format",
+  "{{.Repository}}:{{.Tag}}",
+];
+
+/// Holes the corpus leaves empty even though a sibling command in the
+/// same spec already lists the same values (`git push <remote>` vs
+/// `git remote update <remote>`). One row per hole; sourced args stay
+/// as-is. Adding a CLI here is a data edit.
+const ARG_GAPS: Record<string, ArgGap[]> = {
+  git: [
+    {
+      path: ["remote", "update"],
+      argName: "group",
+      source: { script: GIT_REMOTES_SCRIPT },
+    },
+    {
+      path: ["remote", "update"],
+      argName: "remote",
+      source: { script: GIT_REMOTES_SCRIPT },
+    },
+    {
+      path: ["remote", "set-head"],
+      argName: "branch",
+      source: { script: GIT_LOCAL_BRANCHES },
+    },
+    {
+      path: ["remote", "set-branches"],
+      argName: "branch",
+      source: { script: GIT_LOCAL_BRANCHES },
+    },
+    {
+      path: ["archive"],
+      optionNames: ["--remote"],
+      source: { script: GIT_REMOTES_SCRIPT },
+    },
+    {
+      path: ["push"],
+      optionNames: ["--repo"],
+      source: { script: GIT_REMOTES_SCRIPT },
+    },
+  ],
+  docker: [
+    {
+      path: ["push"],
+      argName: "NAME[:TAG]",
+      source: { script: DOCKER_IMAGES_SCRIPT },
+    },
+    {
+      path: ["tag"],
+      argName: "SOURCE_IMAGE[:TAG] TARGET_IMAGE[:TAG]",
+      source: { script: DOCKER_IMAGES_SCRIPT },
+    },
+    {
+      path: ["image", "build"],
+      argName: "path",
+      source: { generator: { type: "filepaths", folders_only: true } },
+    },
+  ],
+};
+
+const subByPath = (spec: NervSpec, path: string[]): NervSpec | null => {
+  let cur: NervSpec | undefined = spec;
+  for (const name of path) {
+    cur = cur.subcommands.find((s) => s.name === name);
+    if (!cur) return null;
+  }
+  return cur;
+};
+
+/// Fill the named positional / option args along `ARG_GAPS` when they
+/// have no source yet. Missing subcommands are skipped (a corpus
+/// reshape must not break conversion). Idempotent.
+export const enrichKnownArgGaps = (spec: NervSpec, stem: string): void => {
+  const gaps = ARG_GAPS[stem];
+  if (!gaps || gaps.length === 0) return;
+  for (const gap of gaps) {
+    const node = subByPath(spec, gap.path);
+    if (!node) continue;
+    const optionNames = gap.optionNames;
+    if (optionNames) {
+      for (const option of node.options) {
+        if (!option.names.some((n) => optionNames.includes(n))) continue;
+        const arg = option.args[0];
+        if (!arg || argHasSource(arg)) continue;
+        applyOptionSource(arg, gap.source);
+      }
+    }
+    const argName = gap.argName;
+    if (argName) {
+      for (const arg of node.args) {
+        if (arg.name !== argName || argHasSource(arg)) continue;
+        applyOptionSource(arg, gap.source);
+      }
+    }
+  }
+};
+
 const loadOne = async (file: string): Promise<NervSpec | null> => {
   const abs = resolve(file);
   return loadOneAt(abs, {
@@ -1549,6 +1658,7 @@ const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
     const spec = await convertSpec(exported as FigSpec, ctx, stem);
     if (K8S_NAMESPACE_SPEC_STEMS.has(stem)) enrichK8sNamespaces(spec);
     enrichGlobalOptions(spec, stem);
+    enrichKnownArgGaps(spec, stem);
     return spec;
   } finally {
     AWS_SERVICE_HINT = prev;

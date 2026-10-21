@@ -147,3 +147,82 @@ fn aws_region_and_output_are_static() {
         .collect();
     assert_eq!(names, ["json", "yaml", "yaml-stream", "text", "table"]);
 }
+
+fn first_template<'a>(args: &'a [nerv_engine::spec_parser::Arg], name: &str) -> &'a [String] {
+    let arg = args
+        .iter()
+        .find(|a| a.name.as_deref() == Some(name))
+        .unwrap_or_else(|| panic!("no arg named {name}"));
+    match &arg.generators[0] {
+        Generator::Template { script } => script,
+        other => panic!("{name} is not a template: {other:?}"),
+    }
+}
+
+#[test]
+fn git_remote_and_archive_holes_are_sourced() {
+    let Some(spec) = converted("git") else {
+        return;
+    };
+    let update = sub(&spec, &["remote", "update"]);
+    assert_eq!(
+        first_template(&update.args, "remote"),
+        ["git", "--no-optional-locks", "remote"]
+    );
+    let set_head = sub(&spec, &["remote", "set-head"]);
+    assert_eq!(
+        first_template(&set_head.args, "branch")[0..3],
+        ["git", "--no-optional-locks", "branch"]
+    );
+    let archive_remote = opt(sub(&spec, &["archive"]), "--remote");
+    assert_eq!(
+        template_script(archive_remote),
+        ["git", "--no-optional-locks", "remote"]
+    );
+    let push_repo = opt(sub(&spec, &["push"]), "--repo");
+    assert_eq!(
+        template_script(push_repo),
+        ["git", "--no-optional-locks", "remote"]
+    );
+}
+
+#[test]
+fn docker_push_and_tag_list_local_images() {
+    let Some(spec) = converted("docker") else {
+        return;
+    };
+    let push = sub(&spec, &["push"]);
+    assert_eq!(
+        first_template(&push.args, "NAME[:TAG]"),
+        [
+            "docker",
+            "image",
+            "ls",
+            "--format",
+            "{{.Repository}}:{{.Tag}}"
+        ]
+    );
+    let tag = sub(&spec, &["tag"]);
+    assert_eq!(
+        first_template(&tag.args, "SOURCE_IMAGE[:TAG] TARGET_IMAGE[:TAG]"),
+        [
+            "docker",
+            "image",
+            "ls",
+            "--format",
+            "{{.Repository}}:{{.Tag}}"
+        ]
+    );
+    let build_path = &sub(&spec, &["image", "build"]).args[0];
+    assert!(
+        matches!(
+            build_path.generators[0],
+            Generator::Filepaths { folders_only: true }
+        ) || matches!(
+            build_path.template,
+            Some(nerv_engine::spec_parser::TemplateKind::Folders)
+        ),
+        "docker image build path must complete directories, got {:?}",
+        build_path.generators.first()
+    );
+}

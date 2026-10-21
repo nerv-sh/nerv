@@ -11,6 +11,7 @@ import {
   detectGitBranchScript,
   enrichGlobalOptions,
   enrichK8sNamespaces,
+  enrichKnownArgGaps,
   groupBranchesLocalFirst,
 } from "./convert";
 
@@ -756,5 +757,165 @@ describe("enrichGlobalOptions", () => {
     const once = JSON.stringify(s);
     enrichGlobalOptions(s as any, "gcloud");
     expect(JSON.stringify(s)).toBe(once);
+  });
+});
+
+describe("enrichKnownArgGaps", () => {
+  const bareArg = (name: string, over: any = {}) => ({
+    name,
+    description: null,
+    is_optional: false,
+    is_variadic: false,
+    suggestions: [],
+    template: null,
+    generators: [] as any[],
+    ...over,
+  });
+  const opt = (names: string[], argName: string, over: any = {}) => ({
+    names,
+    description: null,
+    args: [bareArg(argName)],
+    exclusive_on: [],
+    depends_on: [],
+    is_required: false,
+    is_repeatable: false,
+    hidden: false,
+    ...over,
+  });
+  const node = (name: string, over: any = {}) => ({
+    name,
+    aliases: [],
+    description: null,
+    subcommands: [],
+    options: [],
+    args: [],
+    requires_double_dash: false,
+    hidden: false,
+    ...over,
+  });
+
+  const gitRemoteUpdate = () =>
+    node("git", {
+      subcommands: [
+        node("remote", {
+          subcommands: [
+            node("update", {
+              args: [bareArg("group"), bareArg("remote")],
+            }),
+            node("set-head", {
+              args: [
+                bareArg("name", {
+                  generators: [{ type: "template", script: ["git", "remote"] }],
+                }),
+                bareArg("branch"),
+              ],
+            }),
+            node("set-branches", {
+              args: [bareArg("name"), bareArg("branch")],
+            }),
+          ],
+        }),
+        node("archive", {
+          options: [opt(["--remote"], "repo")],
+        }),
+        node("push", {
+          options: [opt(["--repo"], "repository")],
+        }),
+      ],
+    });
+
+  const GIT_REMOTE = ["git", "--no-optional-locks", "remote"];
+  const GIT_BRANCH = [
+    "git",
+    "--no-optional-locks",
+    "branch",
+    "--no-color",
+    "--sort=-committerdate",
+  ];
+  const DOCKER_IMAGES = [
+    "docker",
+    "image",
+    "ls",
+    "--format",
+    "{{.Repository}}:{{.Tag}}",
+  ];
+
+  test("fills git remote update/set-head/set-branches and archive/push flags", () => {
+    const s = gitRemoteUpdate();
+    enrichKnownArgGaps(s as any, "git");
+    const update = s.subcommands[0].subcommands[0];
+    expect(update.args[0].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+    expect(update.args[1].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+    const setHead = s.subcommands[0].subcommands[1];
+    expect(setHead.args[0].generators).toEqual([
+      { type: "template", script: ["git", "remote"] },
+    ]);
+    expect(setHead.args[1].generators).toEqual([
+      { type: "template", script: GIT_BRANCH },
+    ]);
+    const setBranches = s.subcommands[0].subcommands[2];
+    expect(setBranches.args[1].generators).toEqual([
+      { type: "template", script: GIT_BRANCH },
+    ]);
+    expect(s.subcommands[1].options[0].args[0].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+    expect(s.subcommands[2].options[0].args[0].generators).toEqual([
+      { type: "template", script: GIT_REMOTE },
+    ]);
+  });
+
+  test("fills docker push/tag images and image build as a folder", () => {
+    const s = node("docker", {
+      subcommands: [
+        node("push", { args: [bareArg("NAME[:TAG]")] }),
+        node("tag", {
+          args: [bareArg("SOURCE_IMAGE[:TAG] TARGET_IMAGE[:TAG]")],
+        }),
+        node("image", {
+          subcommands: [
+            node("build", { args: [bareArg("path")] }),
+          ],
+        }),
+      ],
+    });
+    enrichKnownArgGaps(s as any, "docker");
+    expect(s.subcommands[0].args[0].generators).toEqual([
+      { type: "template", script: DOCKER_IMAGES },
+    ]);
+    expect(s.subcommands[1].args[0].generators).toEqual([
+      { type: "template", script: DOCKER_IMAGES },
+    ]);
+    expect(s.subcommands[2].subcommands[0].args[0].generators).toEqual([
+      { type: "filepaths", folders_only: true },
+    ]);
+  });
+
+  test("never overwrites an arg that already has a source", () => {
+    const s = gitRemoteUpdate();
+    enrichKnownArgGaps(s as any, "git");
+    const setHeadName = s.subcommands[0].subcommands[1].args[0];
+    expect(setHeadName.generators).toEqual([
+      { type: "template", script: ["git", "remote"] },
+    ]);
+  });
+
+  test("is idempotent", () => {
+    const s = gitRemoteUpdate();
+    enrichKnownArgGaps(s as any, "git");
+    expect(s.subcommands[0].subcommands[0].args[1].generators.length).toBe(1);
+    const once = JSON.stringify(s);
+    enrichKnownArgGaps(s as any, "git");
+    expect(JSON.stringify(s)).toBe(once);
+  });
+
+  test("leaves a stem outside the table untouched", () => {
+    const s = node("kubectl", { args: [bareArg("resource")] });
+    enrichKnownArgGaps(s as any, "kubectl");
+    expect(s.args[0].generators).toEqual([]);
   });
 });
