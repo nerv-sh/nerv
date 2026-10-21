@@ -9,6 +9,7 @@ import {
   detectCargoMetadataPackages,
   detectFilepathsGenerator,
   detectGitBranchScript,
+  enrichGlobalOptions,
   enrichK8sNamespaces,
   groupBranchesLocalFirst,
 } from "./convert";
@@ -568,5 +569,125 @@ describe("enrichK8sNamespaces", () => {
     });
     enrichK8sNamespaces(s as any);
     expect(arg.generators).toEqual([]);
+  });
+});
+
+describe("enrichGlobalOptions", () => {
+  const bareArg = (over: any = {}) => ({
+    name: "value",
+    description: null,
+    is_optional: false,
+    is_variadic: false,
+    suggestions: [],
+    template: null,
+    generators: [] as any[],
+    ...over,
+  });
+  const opt = (names: string[], over: any = {}) => ({
+    names,
+    description: null,
+    args: [bareArg()],
+    exclusive_on: [],
+    depends_on: [],
+    is_required: false,
+    is_repeatable: false,
+    hidden: false,
+    ...over,
+  });
+  const spec = (over: any = {}) => ({
+    name: "kubectl",
+    aliases: [],
+    description: null,
+    subcommands: [],
+    options: [],
+    args: [],
+    requires_double_dash: false,
+    hidden: false,
+    ...over,
+  });
+
+  test("adds kubectl's missing global flags as persistent root options", () => {
+    const s = spec();
+    enrichGlobalOptions(s as any, "kubectl");
+    const names = s.options.map((o) => o.names[0]);
+    expect(names).toEqual(["--context", "--cluster", "--user", "--kubeconfig"]);
+    for (const o of s.options) expect(o.isPersistent).toBe(true);
+
+    const context = s.options.find((o) => o.names[0] === "--context")!;
+    expect(context.args[0].generators).toEqual([
+      {
+        type: "template",
+        script: ["kubectl", "config", "get-contexts", "-o", "name"],
+      },
+    ]);
+    // `get-clusters`/`get-users` do not exist — jsonpath is the local list.
+    const cluster = s.options.find((o) => o.names[0] === "--cluster")!;
+    expect((cluster.args[0].generators[0] as any).script).toContain(
+      'jsonpath={range .clusters[*]}{.name}{"\\n"}{end}',
+    );
+    // A path is not a command.
+    const kubeconfig = s.options.find((o) => o.names[0] === "--kubeconfig")!;
+    expect(kubeconfig.args[0].generators).toEqual([
+      { type: "filepaths", folders_only: false },
+    ]);
+  });
+
+  test("fills docker's --context from the docker context list", () => {
+    const s = spec({ name: "docker" });
+    enrichGlobalOptions(s as any, "docker");
+    expect(s.options.map((o) => o.names)).toEqual([["--context"]]);
+    expect(s.options[0].args[0].generators).toEqual([
+      {
+        type: "template",
+        script: ["docker", "context", "ls", "--format", "{{.Name}}"],
+      },
+    ]);
+  });
+
+  test("fills an existing empty option in a subcommand without duplicating the root", () => {
+    const s = spec({
+      options: [opt(["--context"], { isPersistent: false })],
+      subcommands: [
+        spec({
+          name: "get",
+          options: [opt(["--context"], { isPersistent: false })],
+        }),
+      ],
+    });
+    enrichGlobalOptions(s as any, "kubectl");
+    // The root option already exists: no second copy, and its own
+    // persistence is left alone (the pass only sets what it adds).
+    expect(s.options.filter((o) => o.names[0] === "--context").length).toBe(1);
+    expect(s.options[0].isPersistent).toBe(false);
+    expect(s.options[0].args[0].generators[0].type).toBe("template");
+    expect(s.subcommands[0].options[0].args[0].generators[0].type).toBe("template");
+  });
+
+  test("never overwrites an arg that already has a source", () => {
+    const s = spec({
+      options: [
+        opt(["--context"], {
+          args: [bareArg({ suggestions: ["from-corpus"] })],
+        }),
+      ],
+    });
+    enrichGlobalOptions(s as any, "kubectl");
+    expect(s.options[0].args[0].suggestions).toEqual(["from-corpus"]);
+    expect(s.options[0].args[0].generators).toEqual([]);
+  });
+
+  test("is idempotent", () => {
+    const s = spec();
+    enrichGlobalOptions(s as any, "kubectl");
+    const once = JSON.stringify(s);
+    enrichGlobalOptions(s as any, "kubectl");
+    expect(JSON.stringify(s)).toBe(once);
+    expect(s.options.length).toBe(4);
+  });
+
+  test("leaves a stem outside the table untouched", () => {
+    const s = spec({ name: "git" });
+    enrichGlobalOptions(s as any, "git");
+    expect(s.options).toEqual([]);
   });
 });

@@ -1263,6 +1263,175 @@ export const enrichK8sNamespaces = (
   for (const sub of spec.subcommands) enrichK8sNamespaces(sub, false);
 };
 
+// ---------------------------------------------------------------------------
+// Well-known gap fill: global options the corpus declares without a value
+// source — or not at all.
+//
+// The big CLIs accept flags at every subcommand (`kubectl get pods
+// --context …`, `docker run --context …`), but the upstream specs either
+// omit the option or declare it with a bare `args: { name: … }`. Faithful
+// conversion therefore ships an empty completion for the flags users type
+// most. The sources below are all local and fast:
+//
+//   * `script`  — a Tier B template the engine runs with an 800ms cap and
+//                 a 5s cache. kubectl and docker answer these from their
+//                 own config in tens of milliseconds.
+//   * `suggestions` — a fixed vocabulary (`aws --output`); no process.
+//   * `filepaths` — a path, not a command.
+//
+// NOT a template: `gcloud`. Its Python startup exceeds the engine's
+// 800ms generator cap, so gcloud values come from a Rust-native
+// generator over `~/.config/gcloud` (see `gcloud_config` below) — the
+// table entry names that generator instead of spawning the CLI.
+// ---------------------------------------------------------------------------
+
+type OptionSource =
+  | { script: string[] }
+  | { suggestions: string[] }
+  | { filepaths: true }
+  | { generator: NervGenerator };
+
+type GlobalOption = {
+  names: string[];
+  description: string;
+  source: OptionSource;
+};
+
+const KUBECTL_CONTEXTS_SCRIPT = ["kubectl", "config", "get-contexts", "-o", "name"];
+// `get-clusters` / `get-users` do not exist; jsonpath is the only local
+// listing for both, and `{"\n"}` is kubectl's own newline escape.
+const KUBECTL_CLUSTERS_SCRIPT = [
+  "kubectl",
+  "config",
+  "view",
+  "-o",
+  'jsonpath={range .clusters[*]}{.name}{"\\n"}{end}',
+];
+const KUBECTL_USERS_SCRIPT = [
+  "kubectl",
+  "config",
+  "view",
+  "-o",
+  'jsonpath={range .users[*]}{.name}{"\\n"}{end}',
+];
+const DOCKER_CONTEXTS_SCRIPT = ["docker", "context", "ls", "--format", "{{.Name}}"];
+
+/// Per-stem list of global options that must exist at the root
+/// (`isPersistent`) and carry a value source everywhere they appear.
+/// Adding a CLI here is a data edit — one row per flag.
+const GLOBAL_OPTIONS: Record<string, GlobalOption[]> = {
+  kubectl: [
+    {
+      names: ["--context"],
+      description: "The name of the kubeconfig context to use",
+      source: { script: KUBECTL_CONTEXTS_SCRIPT },
+    },
+    {
+      names: ["--cluster"],
+      description: "The name of the kubeconfig cluster to use",
+      source: { script: KUBECTL_CLUSTERS_SCRIPT },
+    },
+    {
+      names: ["--user"],
+      description: "The name of the kubeconfig user to use",
+      source: { script: KUBECTL_USERS_SCRIPT },
+    },
+    {
+      names: ["--kubeconfig"],
+      description: "Path to the kubeconfig file to use for CLI requests",
+      source: { filepaths: true },
+    },
+  ],
+  docker: [
+    {
+      names: ["--context"],
+      description: "Name of the context to use",
+      source: { script: DOCKER_CONTEXTS_SCRIPT },
+    },
+  ],
+};
+
+const emptyArg = (name: string): NervArg => ({
+  name,
+  description: null,
+  is_optional: false,
+  is_variadic: false,
+  suggestions: [],
+  template: null,
+  generators: [],
+});
+
+/// Whether an arg already knows where its values come from. A flag whose
+/// arg carries any source is left byte-identical — the pass only fills
+/// holes, it never overrides the corpus.
+const argHasSource = (arg: NervArg): boolean =>
+  arg.suggestions.length > 0 || arg.template !== null || arg.generators.length > 0;
+
+const applyOptionSource = (arg: NervArg, source: OptionSource): void => {
+  if ("script" in source) {
+    arg.generators.push({ type: "template", script: source.script });
+  } else if ("suggestions" in source) {
+    arg.suggestions.push(...source.suggestions);
+  } else if ("filepaths" in source) {
+    arg.generators.push({ type: "filepaths", folders_only: false });
+  } else {
+    arg.generators.push(source.generator);
+  }
+};
+
+const hasOptionNamed = (spec: NervSpec, names: string[]): boolean =>
+  spec.options.some((o) => o.names.some((n) => names.includes(n)));
+
+/// Fill the first value slot of every occurrence of `def.names` in the
+/// tree — root and subcommand-local alike — when it has no source yet.
+/// Returns how many args were filled (tests use it to prove idempotency).
+export const fillOptionArgs = (
+  spec: NervSpec,
+  defs: GlobalOption[],
+): number => {
+  let filled = 0;
+  const visit = (node: NervSpec): void => {
+    for (const opt of node.options) {
+      const def = defs.find((d) => opt.names.some((n) => d.names.includes(n)));
+      if (!def) continue;
+      const arg = opt.args[0];
+      // No args = a boolean flag; nothing to complete and nothing to add.
+      if (!arg || argHasSource(arg)) continue;
+      applyOptionSource(arg, def.source);
+      filled += 1;
+    }
+    for (const sub of node.subcommands) visit(sub);
+  };
+  visit(spec);
+  return filled;
+};
+
+/// Add each configured global option to the root when the corpus lacks it
+/// (as persistent — the real CLI accepts it after any subcommand), then
+/// fill every empty occurrence in the tree. Idempotent: a second call
+/// finds the root option present and every arg sourced, so nothing
+/// changes. Existing options keep their own `isPersistent` value — this
+/// pass only records semantics for the options it adds.
+export const enrichGlobalOptions = (spec: NervSpec, stem: string): void => {
+  const defs = GLOBAL_OPTIONS[stem];
+  if (!defs || defs.length === 0) return;
+  for (const def of defs) {
+    if (hasOptionNamed(spec, def.names)) continue;
+    spec.options.push({
+      names: [...def.names],
+      description: def.description,
+      args: [emptyArg(def.names[0].replace(/^--?/, ""))],
+      exclusive_on: [],
+      depends_on: [],
+      is_required: false,
+      is_repeatable: false,
+      hidden: false,
+      isPersistent: true,
+    });
+  }
+  fillOptionArgs(spec, defs);
+};
+
 const loadOne = async (file: string): Promise<NervSpec | null> => {
   const abs = resolve(file);
   return loadOneAt(abs, {
@@ -1298,6 +1467,7 @@ const loadOneAt = async (file: string, ctx: Ctx): Promise<NervSpec | null> => {
   try {
     const spec = await convertSpec(exported as FigSpec, ctx, stem);
     if (K8S_NAMESPACE_SPEC_STEMS.has(stem)) enrichK8sNamespaces(spec);
+    enrichGlobalOptions(spec, stem);
     return spec;
   } finally {
     AWS_SERVICE_HINT = prev;
