@@ -661,29 +661,46 @@ fn check_spec_misses(r: &mut DoctorReport) {
         &path,
         paths::derived_specs_dir().as_deref(),
         paths::user_specs_dir().as_deref(),
+        &|name| !nerv_engine::derived::is_shell_builtin(name) && paths::on_path(name),
     );
 }
 
-/// Where the example overlay spec can be fetched from: it is in the
-/// repository, not in the installed package.
+/// Where the example overlay spec lives: it is in the repository, not in
+/// the installed package. It is the *format* reference for any name; only
+/// for `claude` is it also the right content to download.
 const EXAMPLE_SPEC_URL: &str =
     "https://raw.githubusercontent.com/nerv-sh/nerv/main/examples/specs/claude.json";
 
 /// Path-injected half of [`check_spec_misses`], so tests exercise the
 /// row without touching the real cache dir.
 ///
+/// `runnable` is the gap predicate: a name that is not on `PATH` (an
+/// uninstalled tool, a typo) or is a shell builtin (`cd`) has no binary
+/// for an overlay spec to describe, so counting it as a missing spec is
+/// wrong. The tally is read only — pruning is the daemon's job at
+/// startup, so doctor staying read-only keeps a report reproducible.
+///
 /// A name that has since got a spec from its own `--help` is marked
 /// `(derived)`: its count is history, and an overlay is only worth
 /// writing to improve on what was scraped. The hint is one command for
 /// the first name that still has nothing — the example spec, saved under
-/// that name — or, when every name is covered, the derived file to copy.
+/// that name (only valid for `claude`), or its path plus the format
+/// reference — and, when every name is covered, the derived file to copy.
 fn check_spec_misses_in(
     r: &mut DoctorReport,
     path: &std::path::Path,
     derived: Option<&std::path::Path>,
     overlay: Option<&std::path::Path>,
+    runnable: &dyn Fn(&str) -> bool,
 ) {
-    let top = nerv_engine::misses::MissCounter::load(path).top_n(5);
+    // Filter before the cap: a stale row must not consume one of the
+    // five slots a real gap could have used.
+    let top: Vec<_> = nerv_engine::misses::MissCounter::load(path)
+        .top_n(nerv_engine::misses::MAX_ENTRIES)
+        .into_iter()
+        .filter(|(name, _)| runnable(name))
+        .take(5)
+        .collect();
     if top.is_empty() {
         return;
     }
@@ -704,8 +721,15 @@ fn check_spec_misses_in(
         .join(", ");
     let hint = overlay.map(
         |dir| match top.iter().find(|(name, _)| derived_file(name).is_none()) {
-            Some((name, _)) => format!(
+            // `examples/specs/claude.json` IS claude's spec — downloading
+            // it under another name would hand the user the wrong
+            // subcommands. Only claude gets the one-command form.
+            Some((name, _)) if name == "claude" => format!(
                 "run: curl -fsSL --create-dirs {EXAMPLE_SPEC_URL} -o '{}/{name}.json' — then edit it",
+                dir.display()
+            ),
+            Some((name, _)) => format!(
+                "write '{}/{name}.json' — format: {EXAMPLE_SPEC_URL}",
                 dir.display()
             ),
             None => format!(
@@ -2919,38 +2943,42 @@ mod tests {
         }
         counter.flush_if_dirty();
 
+        let runnable = |name: &str| name == "zeph" || name == "aic2";
         let mut r = DoctorReport::default();
-        check_spec_misses_in(&mut r, &path, None, None);
+        check_spec_misses_in(&mut r, &path, None, None, &runnable);
         assert_eq!(
             doctor_labels(&r),
             [("spec misses".to_string(), "Ok".into())]
         );
         assert_eq!(r.entries[0].detail, "zeph 12, aic2 9");
 
-        // A name `--help` has since covered is marked, and the command
-        // in the hint is for the first name that still has nothing.
+        // A name `--help` has since covered is marked, and the hint
+        // names the first name that still has nothing.
         let dirs = std::env::temp_dir().join(format!("nerv-misses-dirs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dirs);
         let (derived, overlay) = (dirs.join("derived"), dirs.join("specs"));
         std::fs::create_dir_all(&derived).unwrap();
         std::fs::write(derived.join("zeph.json"), "{}").unwrap();
         let mut r = DoctorReport::default();
-        check_spec_misses_in(&mut r, &path, Some(&derived), Some(&overlay));
+        check_spec_misses_in(&mut r, &path, Some(&derived), Some(&overlay), &runnable);
         assert_eq!(r.entries[0].detail, "zeph 12 (derived), aic2 9");
         let hint = r.entries[0].hint.clone().expect("hint");
+        assert!(hint.starts_with("write '"), "{hint}");
         assert!(
-            hint.starts_with("run: curl -fsSL --create-dirs https://"),
+            hint.contains(&format!("{}/aic2.json", overlay.display())),
             "{hint}"
         );
+        // The example is the format reference — not this name's content.
+        assert!(hint.contains(EXAMPLE_SPEC_URL), "{hint}");
         assert!(
-            hint.contains(&format!("-o '{}/aic2.json'", overlay.display())),
-            "{hint}"
+            !hint.contains("curl"),
+            "aic2 must not fetch claude.json: {hint}"
         );
 
         // Everything covered: point at the derived files instead.
         std::fs::write(derived.join("aic2.json.gz"), "").unwrap();
         let mut r = DoctorReport::default();
-        check_spec_misses_in(&mut r, &path, Some(&derived), Some(&overlay));
+        check_spec_misses_in(&mut r, &path, Some(&derived), Some(&overlay), &runnable);
         assert_eq!(r.entries[0].detail, "zeph 12 (derived), aic2 9 (derived)");
         assert!(
             r.entries[0]
@@ -2961,6 +2989,66 @@ mod tests {
         );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dirs);
+    }
+
+    /// `examples/specs/claude.json` is claude's spec, so it is the one
+    /// name for which the download command is correct.
+    #[test]
+    fn doctor_spec_miss_hint_fetches_only_the_claude_example() {
+        let path =
+            std::env::temp_dir().join(format!("nerv-misses-claude-{}.tsv", std::process::id()));
+        let counter = nerv_engine::misses::MissCounter::load(&path);
+        for _ in 0..4 {
+            counter.record("claude");
+        }
+        counter.flush_now();
+        let overlay =
+            std::env::temp_dir().join(format!("nerv-misses-claude-o-{}", std::process::id()));
+
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path, None, Some(&overlay), &|n| n == "claude");
+        let hint = r.entries[0].hint.clone().expect("hint");
+        assert!(
+            hint.starts_with("run: curl -fsSL --create-dirs https://"),
+            "{hint}"
+        );
+        assert!(
+            hint.contains(&format!("-o '{}/claude.json'", overlay.display())),
+            "{hint}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Rows that cannot be a spec gap (a typo, an uninstalled tool, a
+    /// builtin) never reach the row — and doctor must not rewrite the
+    /// tally to hide them.
+    #[test]
+    fn doctor_spec_misses_skip_unrunnable_rows() {
+        let path =
+            std::env::temp_dir().join(format!("nerv-misses-filter-{}.tsv", std::process::id()));
+        let counter = nerv_engine::misses::MissCounter::load(&path);
+        for _ in 0..20 {
+            counter.record("asdasd");
+        }
+        counter.record("zeph");
+        counter.flush_now();
+
+        // `asdasd` ranks first; the real gap must still be shown.
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path, None, None, &|n| n == "zeph");
+        assert_eq!(r.entries[0].detail, "zeph 1");
+
+        // Nothing runnable → no row at all, rather than a false number.
+        let mut r = DoctorReport::default();
+        check_spec_misses_in(&mut r, &path, None, None, &|_| false);
+        assert!(r.entries.is_empty());
+
+        assert_eq!(
+            nerv_engine::misses::MissCounter::load(&path).top_n(5).len(),
+            2,
+            "doctor is read-only: both rows are still on disk"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -3075,7 +3163,7 @@ mod tests {
             std::env::temp_dir().join(format!("nerv-misses-none-{}.tsv", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut r = DoctorReport::default();
-        check_spec_misses_in(&mut r, &path, None, None);
+        check_spec_misses_in(&mut r, &path, None, None, &|_| true);
         assert!(r.entries.is_empty());
     }
 
