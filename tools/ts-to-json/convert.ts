@@ -1515,7 +1515,7 @@ export const enrichGlobalOptions = (spec: NervSpec, stem: string): void => {
 
 type ArgGap = {
   path: string[];
-  argName?: string;
+  argNames?: string[];
   optionNames?: string[];
   source: OptionSource;
 };
@@ -1537,22 +1537,17 @@ const ARG_GAPS: Record<string, ArgGap[]> = {
   git: [
     {
       path: ["remote", "update"],
-      argName: "group",
-      source: { script: GIT_REMOTES_SCRIPT },
-    },
-    {
-      path: ["remote", "update"],
-      argName: "remote",
+      argNames: ["group", "remote"],
       source: { script: GIT_REMOTES_SCRIPT },
     },
     {
       path: ["remote", "set-head"],
-      argName: "branch",
+      argNames: ["branch"],
       source: { script: GIT_LOCAL_BRANCHES },
     },
     {
       path: ["remote", "set-branches"],
-      argName: "branch",
+      argNames: ["branch"],
       source: { script: GIT_LOCAL_BRANCHES },
     },
     {
@@ -1569,17 +1564,17 @@ const ARG_GAPS: Record<string, ArgGap[]> = {
   docker: [
     {
       path: ["push"],
-      argName: "NAME[:TAG]",
+      argNames: ["NAME[:TAG]"],
       source: { script: DOCKER_IMAGES_SCRIPT },
     },
     {
       path: ["tag"],
-      argName: "SOURCE_IMAGE[:TAG] TARGET_IMAGE[:TAG]",
+      argNames: ["SOURCE_IMAGE[:TAG] TARGET_IMAGE[:TAG]"],
       source: { script: DOCKER_IMAGES_SCRIPT },
     },
     {
       path: ["image", "build"],
-      argName: "path",
+      argNames: ["path"],
       source: { generator: { type: "filepaths", folders_only: true } },
     },
   ],
@@ -1612,10 +1607,10 @@ export const enrichKnownArgGaps = (spec: NervSpec, stem: string): void => {
         applyOptionSource(arg, gap.source);
       }
     }
-    const argName = gap.argName;
-    if (argName) {
+    const argNames = gap.argNames;
+    if (argNames) {
       for (const arg of node.args) {
-        if (arg.name !== argName || argHasSource(arg)) continue;
+        if (!argNames.includes(arg.name ?? "") || argHasSource(arg)) continue;
         applyOptionSource(arg, gap.source);
       }
     }
