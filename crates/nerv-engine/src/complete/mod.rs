@@ -1148,9 +1148,10 @@ pub fn complete_command_name(prefix: &str, names: &CommandNames) -> Vec<Suggesti
             },
             "bin",
         ),
-        // Shell function·alias names, the session-local fourth source
-        // (plan slice 02). The widget rewrites alias rows to describe
-        // the expansion — it already reads $aliases.
+        // Shell names (alias·builtin·reserved word·function), the
+        // session-local fourth source (plan slice 02). The widget
+        // rewrites the generic label per kind — alias rows show the
+        // expansion, builtins and reserved words say so.
         (names.shell.as_slice(), "shell function"),
     ];
 

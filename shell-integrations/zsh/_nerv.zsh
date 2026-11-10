@@ -1278,10 +1278,12 @@ __nerv_complete() {
   # popup's ghost either way (`pwd` → ` pbcopy`).
   #
   # A bare token naming a shell alias, function, builtin or reserved word
-  # is already a finished command. The daemon can't see any of them, so
-  # its exact-name guard won't fire and it would keep offering longer
-  # names or a correction — Enter on a complete `k` (alias k=kubectl)
-  # would swap the line for `kubectl`, and `export` for `expo`. Leading
+  # is already a finished command. The daemon learns them only once this
+  # session registers its names (first precmd), and a function defined
+  # after that stays unseen, so its exact-name guard may not fire and it
+  # would keep offering longer names or a correction — Enter on a
+  # complete `k` (alias k=kubectl) would swap the line for `kubectl`,
+  # and `export` for `expo`. Leading
   # whitespace is stripped first: ` k` (the HIST_IGNORE_SPACE habit) is
   # the same command to the engine, whose tokenizer skips it too.
   local bare="${LBUFFER#"${LBUFFER%%[^[:space:]]*}"}"
@@ -1446,18 +1448,29 @@ __nerv_complete() {
   fi
   __nerv_clear_loading
 
-  # Shell-name rows arrive with the engine's generic description. An
-  # alias knows its expansion locally ($aliases is already loaded for
-  # line expansion) — paint `alias → body` instead.
-  local __sn_i __sn_ins tab=$'\t'
+  # Shell-name rows arrive with the engine's generic description. The
+  # shell knows what each name really is: an alias paints its expansion
+  # ($aliases is already loaded for line expansion), a builtin or
+  # reserved word says so. A function keeps the generic label.
+  local __sn_i __sn_ins __sn_desc tab=$'\t'
   for (( __sn_i = 1; __sn_i <= ${#rlines}; __sn_i++ )); do
     __sn_ins="${rlines[__sn_i]%%$tab*}"
-    (( ${+aliases[$__sn_ins]} )) || continue
+    if (( ${+aliases[$__sn_ins]} )); then
+      __sn_desc="alias → ${aliases[$__sn_ins]}"
+    elif (( ${+functions[$__sn_ins]} )); then
+      continue
+    elif (( ${+builtins[$__sn_ins]} )); then
+      __sn_desc="builtin"
+    elif (( ${reswords[(Ie)$__sn_ins]} )); then
+      __sn_desc="reserved word"
+    else
+      continue
+    fi
     local -a __sn_fields=("${(@ps:\t:)rlines[__sn_i]}")
     # Only rows the engine sourced from the shell-name registry — a spec
     # row that happens to share the name (`git gr` → `grep`) keeps its own.
     if [[ "${__sn_fields[3]}" == "shell function" ]]; then
-      __sn_fields[3]="alias → ${aliases[$__sn_ins]}"
+      __sn_fields[3]="$__sn_desc"
       rlines[__sn_i]="${(pj:\t:)__sn_fields}"
     fi
   done
@@ -2226,8 +2239,9 @@ __nerv_precmd_record() {
   __NERV_LAST_CMD=""
 }
 
-# Register this session's function·alias names with the daemon so they
-# surface as first-token candidates (docs: plan slice 02). Fires on
+# Register this session's alias·builtin·reserved-word·function names
+# with the daemon so they surface as first-token candidates (docs: plan
+# slice 02). Fires on
 # `precmd`, never at sourcing: `nerv start` is still backgrounding the
 # daemon then, and plugins like p10k define their functions after nerv
 # is sourced (same reason __nerv_rebind runs late). The transfer runs
@@ -2258,10 +2272,14 @@ __nerv_register_shell_names() {
   [[ "$dpid" == <1-> ]] || return        # daemon not up (yet)
   (( dpid == __NERV_SN_DPID )) && return  # this daemon already has them
   local -a snames
-  # Aliases first: the 2000 cap below trims from the end, and a shell
-  # with hundreds of plugin functions would otherwise drop every alias.
-  snames=( "${(@k)aliases[@]}" "${(@k)functions[@]}" )
-  snames=( "${(@)snames:#[._]*}" )          # internals: _foo, .foo
+  # Aliases, builtins and reserved words first: the 2000 cap below trims
+  # from the end, and a shell with hundreds of plugin functions would
+  # otherwise drop them. The daemon's own cap (SHELL_NAMES_CAP) drops
+  # the oldest names instead, so this order does not protect them there. Builtins (`exit`, `setopt`) are on no PATH and in
+  # no spec, so this is the only source that names them.
+  snames=( "${(@k)aliases[@]}" "${(@k)builtins[@]}" "${reswords[@]}"
+           "${(@k)functions[@]}" )
+  snames=( "${(@M)snames:#[[:alnum:]]*}" )  # drop _foo .foo [[ { ! :
   (( ${#snames} )) || { add-zsh-hook -d precmd __nerv_register_shell_names; return }
   (( ${#snames} > 2000 )) && snames=( "${(@)snames[1,2000]}" )
   __NERV_SN_TRY=$dpid

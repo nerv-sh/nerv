@@ -45,13 +45,14 @@ pub enum Request {
         /// The insertion string the user committed.
         insertion: String,
     },
-    /// Register a zsh session's shell function·alias names so they
-    /// surface as first-token completion candidates (plan slice 02).
+    /// Register a zsh session's shell names (alias·builtin·reserved
+    /// word·function) so they surface as first-token completion
+    /// candidates (plan slice 02).
     /// Fire-and-forget: the daemon keeps them memory-only and replies
     /// `Empty`. The names are dotfile content — the daemon never
     /// writes them anywhere.
     RegisterShellNames {
-        /// User-visible function·alias names (internals already
+        /// User-visible shell names (internals already
         /// filtered out by the sender).
         names: Vec<String>,
     },
@@ -217,7 +218,7 @@ mod tests {
     }
 
     /// `RegisterShellNames` (plan slice 02): one zsh session's
-    /// function·alias names ride a single request. The wire tag follows
+    /// shell names ride a single request. The wire tag follows
     /// the enum's snake_case convention.
     #[test]
     fn register_shell_names_roundtrips() {

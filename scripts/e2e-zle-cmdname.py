@@ -205,6 +205,13 @@ def main():
         # is reached through the absolute NERV_BIN the init block sets.
         f.write(f"PATH={emptybin}\n")
         f.write(f'eval "$({NERV} init zsh)"\n')
+        # One edit from `docker`, defined only after this session's
+        # names reached the daemon: the window the widget's shell-word
+        # guard exists for, now that every builtin is registered.
+        f.write("autoload -Uz add-zsh-hook\n")
+        f.write("__late() { (( __NERV_SN_DPID )) || return; "
+                "dockre() { :; }; add-zsh-hook -d precmd __late; }\n")
+        f.write("add-zsh-hook precmd __late\n")
 
     env = dict(os.environ)
     env["HOME"] = home
@@ -341,6 +348,22 @@ def main():
             failures.append("alias row did not describe its expansion")
         log(f"'q': alias offered={'qk' in text} desc={'alias → qstat' in text}")
 
+        # 2c': builtins and reserved words are shell names too — they are
+        # on no PATH and in no spec, so without registration `exi` found
+        # nothing and fell to a typo row (`exa`). `logou` / `repea` match
+        # one row each, so the footer paints that row's description.
+        for typed, name, desc in (("logou", "logout", "builtin"),
+                                  ("repea", "repeat", "reserved word")):
+            os.write(master, b"\x07\x15")
+            pump(master, 0.6)
+            os.write(master, typed.encode())
+            text = strip_ansi(pump(master, 1.5)).decode(errors="replace")
+            if name not in text:
+                failures.append(f"{desc} '{name}' was not offered for '{typed}'")
+            if desc not in text:
+                failures.append(f"'{name}' row did not say '{desc}'")
+            log(f"'{typed}': offered={name in text} desc={desc in text}")
+
         # 2d: only shell-name rows take the alias description — a spec row
         # that happens to share an alias's name keeps its own.
         os.write(master, b"\x07\x15")
@@ -428,16 +451,21 @@ def main():
         log(f"'dokcer d'+Right: {last.decode(errors='replace').strip()!r}")
 
         # Words the shell runs itself get no row once they are finished.
-        # For the builtins the engine still offers a correction and the
-        # widget silences it. `dockr` is different since slice 02: the
-        # daemon now KNOWS the function (registered shell names), so the
-        # engine itself refuses to correct it — a correction aimed at a
-        # real function is always wrong.
+        # The daemon KNOWS the registered ones (functions since slice 02,
+        # builtins and reserved words since fix/builtin-names), so the
+        # engine itself refuses to correct them — a correction aimed at a
+        # real shell word is always wrong. `dockre` was defined after
+        # registration: the engine still offers `docker`, and only the
+        # widget's own guard keeps it off screen.
+        for _ in range(2):  # a prompt or two, so __late has run
+            os.write(master, b"\x15\r")
+            pump(master, 0.8)
         for typed, engine_offers in (
             (b"dockr x", False),
-            (b"export FOO=1 ", True),
-            (b"export", True),
-            (b"hash x", True),
+            (b"export FOO=1 ", False),
+            (b"export", False),
+            (b"hash x", False),
+            (b"dockre x", True),
         ):
             line = typed.decode()
             direct = subprocess.run(
@@ -448,6 +476,8 @@ def main():
             ).stdout
             if engine_offers and "did you mean" not in direct:
                 failures.append(f"engine drew no correction for {line!r} — check is vacuous")
+            if not engine_offers and "did you mean" in direct:
+                failures.append(f"engine corrected the registered shell word in {line!r}")
             os.write(master, b"\x15")
             pump(master, 0.6)
             os.write(master, typed[:-1])
