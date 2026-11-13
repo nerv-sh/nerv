@@ -1213,6 +1213,9 @@ pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str>
     if names.path_pending {
         return None;
     }
+    if input.chars().count() == 2 {
+        return dropped_last_letter(input, &names.frecent);
+    }
     let input: Vec<char> = input.chars().collect();
     let budget = typo_distance_budget(input.len())?;
     best_within_budget(
@@ -1227,12 +1230,23 @@ pub fn did_you_mean<'a>(input: &str, names: &'a CommandNames) -> Option<&'a str>
     .map(|(_, name)| name)
 }
 
+/// Two-letter correction: the unique run name that is `input` plus one
+/// trailing letter (`gi` → `git`). Contract = error-states §3.6.3.
+fn dropped_last_letter<'a>(input: &str, frecent: &'a [String]) -> Option<&'a str> {
+    let mut hits = frecent.iter().map(String::as_str).filter(|name| {
+        name.strip_prefix(input)
+            .is_some_and(|rest| rest.chars().count() == 1)
+    });
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
+}
+
 /// How many edits may separate a typo from the name it meant. The
 /// tally's real typos are one edit at four to five characters
 /// (`zpeh`, `yanr`, `gitp`); longer words earn a second because there
 /// is more room to slip and far less chance of a coincidental match.
-/// Below three characters every name is a near neighbour, so nothing
-/// is offered.
+/// Below three characters every name is a near neighbour, so no edit
+/// budget applies — command words get only [`dropped_last_letter`].
 fn typo_distance_budget(len: usize) -> Option<usize> {
     match len {
         0..=2 => None,
@@ -6576,6 +6590,32 @@ region = us-east-1
         // Distance grows with length: two edits need a long input.
         assert_eq!(did_you_mean("dokcer2", &names), Some("docker"));
         assert_eq!(did_you_mean("dokce", &names), None);
+    }
+
+    /// Two letters get one shape only: a run name missing its last letter.
+    #[test]
+    fn two_letters_correct_only_a_run_name_missing_its_last_letter() {
+        let run = |frecent: &[&str], stems: &[&str]| {
+            CommandNames::from_parts(
+                frecent.iter().map(|s| s.to_string()).collect(),
+                stems.iter().map(|s| s.to_string()).collect(),
+                vec![],
+            )
+        };
+        assert_eq!(did_you_mean("gi", &run(&["git"], &[])), Some("git"));
+        assert_eq!(did_you_mean("gi", &run(&[], &["git"])), None, "stems never");
+        assert_eq!(did_you_mean("ig", &run(&["git"], &[])), None, "not a cut");
+        assert_eq!(
+            did_you_mean("gi", &run(&["gitk"], &[])),
+            None,
+            "one letter only"
+        );
+        assert_eq!(
+            did_you_mean("gi", &run(&["git", "gix"], &[])),
+            None,
+            "ambiguous"
+        );
+        assert_eq!(did_you_mean("gi", &run(&["gi"], &[])), None, "no-op");
     }
 
     /// PATH is thousands of names, so something is always one edit away

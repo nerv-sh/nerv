@@ -45,6 +45,19 @@ pub fn on_path_in(dirs: &[PathBuf], name: &str) -> bool {
     dirs.iter().any(|dir| {
         std::fs::metadata(dir.join(name))
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            && dir_has_exact_entry(dir, name)
+    })
+}
+
+/// Whether `dir` holds an entry spelled exactly `name`.
+///
+/// APFS is case-insensitive by default: `metadata("/usr/bin/What")`
+/// succeeds through `/usr/bin/what`. Read only after the stat matched.
+fn dir_has_exact_entry(dir: &std::path::Path, name: &str) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name().as_encoded_bytes() == name.as_bytes())
     })
 }
 
@@ -875,6 +888,9 @@ mod tests {
         assert!(!on_path_in(&dirs, "missing"));
         assert!(!on_path_in(&dirs, ""), "empty name");
         assert!(!on_path_in(&dirs, "sub/mytool"), "path-like, not a stem");
+        // A case-insensitive volume (APFS default) resolves `MyTool` to
+        // `mytool`; only the exact spelling counts.
+        assert!(!on_path_in(&dirs, "MyTool"), "case must match exactly");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
