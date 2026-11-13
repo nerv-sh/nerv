@@ -244,6 +244,21 @@ fn a_tool_without_help_flags_derives_from_its_man_page() {
         assert!(derived.is_none(), "no man binary → no derivation");
         return;
     }
+    // A machine with `man` but no `ls` page (stripped CI images) has
+    // nothing for the fallback to read.
+    let page = std::process::Command::new("/usr/bin/man")
+        .arg("ls")
+        .env("MANPAGER", "cat")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map(|o| o.stdout)
+        .unwrap_or_default();
+    if page.is_empty() {
+        eprintln!("skip: no `ls` man page on this machine");
+        assert!(derived.is_none(), "no man page → no derivation");
+        return;
+    }
     let path = derived.expect("ls derives from man");
     let spec = nerv_engine::spec_loader::load_spec_file(&path).expect("spec loads");
     assert!(
