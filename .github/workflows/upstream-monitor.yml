@@ -115,6 +115,11 @@ jobs:
           # De-duplicate per upstream: only open if no existing open issue
           # carries this upstream's slug label.
           label="fork:trigger:${SLUG}"
+          # Seed the label: `gh issue create --label` fails if it is missing.
+          # --force makes this idempotent (updates when it already exists).
+          gh label create "$label" --force \
+            --color B60205 \
+            --description "Upstream met the fork policy (spec-conversion-policy §5.3)"
           existing=$(gh issue list \
             --state open \
             --label "$label" \
