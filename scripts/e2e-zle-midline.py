@@ -12,6 +12,9 @@ Case B — a recalled line is left alone. Up on an empty prompt brings back
   Up, Up, Enter must run the command before last.
 Case C — the word after the cursor survives. With the cursor parked at the
   start of `-m`, typing `--al` and accepting `--all` must not eat `-m`.
+Case D — a cursor parked at the start of a word opens nothing. The slot
+  before it is empty, so a query would list every candidate; the popup
+  waits for a typed character (the `--al` of case C).
 
 Run from repo root:  python3 scripts/e2e-zle-midline.py
 Requires: cargo-built debug binaries, zsh, and pyte.
@@ -197,6 +200,11 @@ def main():
         sh = Shell(env)
         sh.send(b"git commit -m x")
         sh.send(b"\x1b[D" * 4)  # cursor to the start of `-m`
+        # Case D — parked at the start of a word, nothing is typed there:
+        # no popup listing every candidate for the empty slot.
+        ok["D cursor at a word start: no popup"] = "╭" not in sh.text()
+        if not ok["D cursor at a word start: no popup"]:
+            log("  D screen:\n" + sh.text())
         sh.send(b"--al")
         sh.send(b"\t")
         sh.send(b"\x18\x02", settle=0.5)
@@ -217,7 +225,7 @@ def main():
 
     for name, passed in ok.items():
         log(f"{'OK  ' if passed else 'FAIL'} {name}")
-    if ok and all(ok.values()) and len(ok) == 4:
+    if ok and all(ok.values()) and len(ok) == 5:
         log("PASS — mid-line completion keeps the hint, the history and the next word")
         return 0
     log("FAIL")

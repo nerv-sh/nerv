@@ -1263,6 +1263,18 @@ __nerv_complete() {
     return
   fi
 
+  # Cursor at the start of a word already on the line (`git worktree
+  # |remove ../x`): the token before it is empty, so a query would list
+  # every candidate for the slot. An escaped space (`My\ |Folder`) is
+  # inside a word, not before one.
+  if [[ $LBUFFER == *[[:space:]] && $LBUFFER != *\\[[:space:]] \
+        && -n $RBUFFER && $RBUFFER != [[:space:]]* ]]; then
+    __nerv_clear_loading
+    __nerv_hide_popup
+    __nerv_ghost ""
+    return
+  fi
+
   # History inline suggestion (autosuggestions / Fig) applies whether or
   # not the spec engine has anything. The daemon's ranked history answers
   # it; zsh's own `$history` only where no ranking came back — a bare
