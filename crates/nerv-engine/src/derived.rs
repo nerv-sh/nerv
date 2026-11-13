@@ -128,10 +128,29 @@ pub fn parse_help(name: &str, text: &str) -> Option<Subcommand> {
     }
 
     if spec.subcommands.is_empty() && spec.options.len() < MIN_OPTIONS {
-        return None;
+        // An argless command (`usage: whoami`) is fully described by an empty spec.
+        return takes_no_arguments(name, text).then(|| Subcommand {
+            name: name.to_string(),
+            ..Default::default()
+        });
     }
     truncate_descriptions(&mut spec);
     Some(spec)
+}
+
+/// Whether `text` holds a usage line naming the command and nothing
+/// else (`usage: whoami`, `Usage: /usr/bin/whoami`). Any placeholder,
+/// flag, or bracket after the name means arguments exist that the help
+/// did not list, so the text stays "too little to be a spec".
+fn takes_no_arguments(name: &str, text: &str) -> bool {
+    text.lines().any(|line| {
+        let Some((head, rest)) = line.trim().split_at_checked(6) else {
+            return false;
+        };
+        let rest = rest.trim();
+        head.eq_ignore_ascii_case("usage:")
+            && (rest == name || Path::new(rest).file_name() == Some(name.as_ref()))
+    })
 }
 
 /// Whether `name` is a shell builtin or keyword rather than a program.
@@ -920,6 +939,34 @@ mod tests {
             )
             .is_some(),
             "3 options clears the bar"
+        );
+    }
+
+    /// `whoami` takes nothing and says so on stderr (`usage: whoami`,
+    /// macOS). That is a full description: an empty spec, so the reply
+    /// settles instead of counting a spec miss on every use. A usage line
+    /// with anything after the name keeps the structure bar.
+    #[test]
+    fn usage_naming_only_the_command_is_an_empty_spec() {
+        let text = "whoami: illegal option -- -\nusage: whoami\n";
+        let spec = parse_help("whoami", text).expect("argless command is a spec");
+        assert_eq!(spec.name, "whoami");
+        assert!(spec.subcommands.is_empty() && spec.options.is_empty() && spec.args.is_empty());
+        assert!(
+            parse_help("whoami", "Usage: /usr/bin/whoami\n").is_some(),
+            "absolute path"
+        );
+        assert!(
+            parse_help("x", "usage: x [file ...]\n").is_none(),
+            "takes args"
+        );
+        assert!(
+            parse_help("x", "usage: y\n").is_none(),
+            "another command's usage"
+        );
+        assert!(
+            parse_help("x", "see usage: x\n").is_none(),
+            "not a usage line"
         );
     }
 

@@ -15,7 +15,7 @@ permissions:
 jobs:
   bump:
     name: bump nerv-sh/homebrew-tap Formula
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: resolve tag + version
         id: meta

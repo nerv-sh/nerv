@@ -105,7 +105,7 @@ jobs:
         # macos-13-large or cross-compile aarch64 → x86_64.
         include:
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

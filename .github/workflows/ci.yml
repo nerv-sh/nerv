@@ -17,7 +17,7 @@ env:
 jobs:
   fmt:
     name: rustfmt
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -28,7 +28,7 @@ jobs:
 
   clippy:
     name: clippy
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -54,7 +54,7 @@ jobs:
         # times made the CI signal too slow to be useful. Intel can
         # come back via a periodic build (e.g. weekly cron) once
         # there's a user reporting Intel-specific bugs.
-        os: [macos-14]
+        os: [macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +68,7 @@ jobs:
 
   build-specs-smoke:
     name: build-specs (hand-rolled fixtures)
-    runs-on: macos-14
+    runs-on: macos-15
     needs: test
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +98,7 @@ jobs:
 
   ts-to-json:
     name: ts-to-json (bun convert sample)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
