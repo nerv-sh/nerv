@@ -1,11 +1,13 @@
 name: upstream-monitor
 
-# Watch vendored upstreams for staleness and archival.
+# Watch vendored upstreams for new commits past our pin.
 # Spec contract: docs/spec-conversion-policy.md §5.3
 #
-# Triggers a `fork:trigger:<upstream>` issue when EITHER:
-#   - upstream is archived, OR
-#   - upstream's main HEAD has not advanced for >= 90 days.
+# Both upstreams went inactive (2025) and the vendor/ subtrees are now
+# forward-only forks in place. Inactivity and archival are therefore the
+# expected state and open nothing. The only actionable signal is upstream
+# resuming: opens an `upstream:new-commits:<upstream>` issue when the
+# upstream default-branch HEAD differs from the pinned SHA.
 #
 # Runs every 2 weeks (1st and 15th at 00:00 UTC) and on manual dispatch.
 #
@@ -21,9 +23,6 @@ on:
 permissions:
   issues: write
   contents: read
-
-env:
-  STALE_DAYS: 90  # spec-conversion-policy.md §5.3
 
 jobs:
   check:
@@ -87,21 +86,18 @@ jobs:
       - name: Decide trigger
         id: decide
         run: |
-          archived='${{ steps.upstream.outputs.archived }}'
-          age_days='${{ steps.upstream.outputs.age_days }}'
+          last_sha='${{ steps.upstream.outputs.last_sha }}'
+          pinned_sha='${{ matrix.pinned_sha }}'
           trigger=false
           reason=""
-          if [ "$archived" = "true" ]; then
+          if [ "$last_sha" != "$pinned_sha" ]; then
             trigger=true
-            reason="upstream is archived"
-          elif [ "$age_days" -ge "$STALE_DAYS" ]; then
-            trigger=true
-            reason="upstream has had no new commits in ${age_days} days (threshold: ${STALE_DAYS})"
+            reason="upstream HEAD moved past the pinned commit"
           fi
           echo "trigger=$trigger" >> "$GITHUB_OUTPUT"
           echo "reason=$reason"   >> "$GITHUB_OUTPUT"
 
-      - name: Open fork-trigger issue if needed
+      - name: Open new-commits issue if needed
         if: steps.decide.outputs.trigger == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -114,12 +110,12 @@ jobs:
           set -euo pipefail
           # De-duplicate per upstream: only open if no existing open issue
           # carries this upstream's slug label.
-          label="fork:trigger:${SLUG}"
+          label="upstream:new-commits:${SLUG}"
           # Seed the label: `gh issue create --label` fails if it is missing.
           # --force makes this idempotent (updates when it already exists).
           gh label create "$label" --force \
-            --color B60205 \
-            --description "Upstream met the fork policy (spec-conversion-policy §5.3)"
+            --color 0E8A16 \
+            --description "Upstream has commits past our vendor pin (spec-conversion-policy §5.3)"
           existing=$(gh issue list \
             --state open \
             --label "$label" \
@@ -132,11 +128,11 @@ jobs:
           fi
 
           gh issue create \
-            --title "fork: trigger — ${UPSTREAM_OWNER}/${UPSTREAM_REPO} inactivity" \
+            --title "upstream: new commits — ${UPSTREAM_OWNER}/${UPSTREAM_REPO}" \
             --label "$label" \
             --body "$(cat <<EOF
           The upstream \`${UPSTREAM_OWNER}/${UPSTREAM_REPO}\` repository has
-          triggered the fork policy (see \`docs/spec-conversion-policy.md\` §5.3).
+          commits past our vendor pin (see \`docs/spec-conversion-policy.md\` §5.3).
 
           - **Reason**: ${{ steps.decide.outputs.reason }}
           - **Last upstream commit**: ${{ steps.upstream.outputs.last_commit }}
@@ -144,11 +140,10 @@ jobs:
           - **Currently pinned (${PIN_LABEL})**: \`${PINNED_SHA}\`
 
           Action items:
-          1. Confirm finding — manually inspect the upstream repository.
-          2. Decide: forward-only fork to \`nerv-sh/<fork-name>\`,
-             or extend the deadline if upstream activity has resumed.
-          3. If forking, follow \`docs/spec-conversion-policy.md\` §5.3 steps 1–5
-             and update this repo's \`vendor/\` subtree + \`NOTICE\`.
+          1. Review the new upstream commits.
+          2. Pull what is worth taking with a subtree update PR
+             (\`docs/spec-conversion-policy.md\` §5.1), then bump \`pinned_sha\`
+             in this workflow. Bumping the pin without pulling also silences it.
 
           This issue was opened automatically by the \`upstream-monitor\` workflow.
           EOF
