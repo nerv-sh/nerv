@@ -45,5 +45,5 @@ Pinned upstream commit (M0-1, v0.6):
 
 Both pins are also recorded in the squash commits added by `git subtree add`,
 and are monitored every 2 weeks by `.github/workflows/upstream-monitor.yml`.
-Fork policy (3-month inactivity or archived → forward-only fork) is
-documented in `docs/spec-conversion-policy.md` §5.3.
+Both upstreams are inactive; the vendored subtrees are kept as forward-only
+forks in place (`docs/spec-conversion-policy.md` §5.3).

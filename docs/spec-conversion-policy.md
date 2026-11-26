@@ -262,7 +262,7 @@ fixture 는 gitignore; CI 계약은 `bun test` + 엔진 단위 테스트.
 `PLAN.md v0.6 §8` 의 crate 인벤토리 + `CLAUDE.md §6` 의 저장소 구조
 + `NOTICE` 의 라이선스 명시로 거버넌스. 모니터링은 두 upstream 모두
 `.github/workflows/upstream-monitor.yml` 의 matrix 가 매 2주 자동
-점검 (per-upstream dedup 라벨 `fork:trigger:{withfig,aws}`).
+점검 — 핀 이후 upstream commit 이 생길 때만 issue (dedup 라벨 `upstream:new-commits:{withfig,aws}`, §5.3).
 
 ### 5.1 Subtree 기준선
 
@@ -327,24 +327,18 @@ fixture 는 gitignore; CI 계약은 `bun test` + 엔진 단위 테스트.
 - 후보 PR 의 자동 cherry-pick — 항상 수동 게이트.
 - upstream PR 작성자에게 직접 컨택 — 정책 외 (커뮤니티 매너 영역).
 
-### 5.3 Upstream Archived 시 fork 트리거
+### 5.3 Upstream 정지 — vendor 가 fork 다
 
-> **갱신 (v1.1)**: trigger 기간을 6개월 → **3개월** 로 단축. Fig 가 Amazon Q 로 흡수된 후 `withfig/autocomplete` 의 commit 활동이 실질적으로 둔화되어 *이미 archived 에 가까운* 상태이기 때문.
+> **갱신 (v1.7, 2026-11-26)**: 두 upstream 모두 정지가 확정됐다 — `withfig/autocomplete` 마지막 commit 2025-05-05, `aws/amazon-q-developer-cli-autocomplete` 2025-11-15. 둘 다 핀 = upstream HEAD 라 가져올 변경이 없다. 그래서 별도 GitHub fork 레포(구 절차 `nerv-sh/autocomplete-specs`)를 만들지 않고, **`vendor/` subtree 자체를 forward-only fork 로 본다** (#119·#120 종결).
 
-`withfig/autocomplete` 가 archived 되거나 **3개월 이상 commit 부재** 시:
+- 수정 경로는 그대로: spec 데이터 = `vendor-patches/self/` 또는 사용자 overlay (§6.1)·파생 spec (§6.2), 엔진 코드 = `crates/nerv-*` 사본. `vendor/` 직접 편집 금지 (CLAUDE.md §4) 도 유지 — subtree 가 upstream 원본 대조 기준이다.
+- NOTICE 의 원본 라이선스·핀 기록은 무변경 (fork 메타 추가 불필요 — 저장소가 바뀌지 않았다).
 
-1. 즉시 `nerv-sh/autocomplete-specs` 로 forward-only fork.
-2. 본 문서의 vendor 경로를 fork 로 교체.
-3. NOTICE 갱신 — 원본 MIT 보존 + fork 메타.
-4. 커뮤니티 PR 채널을 nerv 측으로 이행 (자체 spec authoring 가이드 `docs/spec-authoring.md` 작성).
-5. 사용자 영향 없음 (정책 내부 변화).
+**모니터링** (`.github/workflows/upstream-monitor.yml`, cron `0 0 1,15 * *`):
 
-**판단 기준** (자동 모니터링):
-
-- 매 **2주** 마다 (기존: 30일) upstream 의 마지막 commit 날짜 점검.
-- archived 플래그 점검.
-- 둘 중 하나 충족 시 GitHub Issue 자동 생성 (`fork: trigger`).
-- M0-9 산출물에 본 모니터링 GitHub Actions workflow 포함 (cron `0 0 1,15 * *`).
+- 정지·archived 는 예상 상태라 issue 를 열지 않는다 (구 `fork:trigger` 90일 규칙 폐기 — 남겨두면 2주마다 같은 issue 를 재오픈).
+- upstream 기본 브랜치 HEAD 가 workflow 의 `pinned_sha` 와 다르면 (= upstream 재개) `upstream:new-commits:{withfig,aws}` 라벨 issue 를 연다 (라벨당 open 1건 dedup).
+- 대응: 새 commit 검토 → 가져올 게 있으면 §5.1 subtree update PR → `pinned_sha` 갱신. 안 가져와도 `pinned_sha` 를 올리면 다음 점검부터 조용해진다.
 
 ---
 
@@ -544,7 +538,7 @@ v0.5 의 M0-9 산출물 5개 중 3개는 v0.5 에서 완료, 2개는 v0.6 폐기
 
 - 두 vendor subtree (`withfig-autocomplete` / `aws-autocomplete`) 의 핀 갱신 시 §5.0 표 + §5.1 항목 갱신
 - spec schema 의 `schema_version` bump (v2 → v3) 시 §4.1 manifest 형식 갱신
-- 어느 한 upstream archived → §5.3 fork 절차 실행 + per-upstream §5.0 표 갱신
+- upstream 재개 (`upstream:new-commits` issue) → §5.1 subtree update 또는 `pinned_sha` 갱신 (§5.3)
 - M1 rquickjs opt-in 도입 commit 시 §4.4 의 "M1 산출물" 표기 → "활성 기능" 으로 승격
 - v1.1 의 동적 generator (rquickjs) 기본 활성화 검토 시 §2 Tier C 정책 본문 갱신
 
@@ -558,3 +552,4 @@ v0.5 의 M0-9 산출물 5개 중 3개는 v0.5 에서 완료, 2개는 v0.6 폐기
 *v1.5 — 파생 spec 층 신설 (2026-09-05). v1.4 → v1.5 변경: **§6.2 신설** — 어느 층에도 spec 이 없는 명령의 `--help`(fallback `man`) 를 데몬이 파싱해 `~/Library/Caches/nerv/derived/` 에 캐시하는 자동 경로. 층 순서 `[overlay, primary, derived]`, `[derived] enabled = false` 스위치, 소스 선택 기준 = 파싱 성공 (모양 기준은 `ls -h` 목록에 속음), 실행 안전장치 (셸 미경유·절대경로·env 초기화·PATH 만 상속·timeout·cap), 백그라운드 populator 에서만 실행, binary mtime 재파생, 파손 파일 negative 유지, doctor/spec list 읽기 전용. §6.1 overlay 계약 무변경 — 파생은 그 *뒤*에 붙는다. Tier A/B/C 분류 / §3~§5 / §7 무변경. 변경 트리거: 새 help 레이아웃 (fixture 4종 밖) 이 파싱 실패로 보고될 때, 컬럼 히스토그램 파서 재설계 착수 시.*
 *v1.6 — 셸 자체 완성 폴백 (2026-09-27). v1.5 → v1.6 변경: **§6.4 신설** — 손으로 쓴 spec 이 없는 명령(`unspecced`, 파일 층으로 판정)에서 ZLE 위젯이 zsh compsys 완성 함수의 후보를 쓴다. `_complete --compsys` 종료 코드 5·6. 단어당 1회 캡처 + 셸 내 필터, 300/1000 ms 초과 명령 자동 제외, `NERV_COMPSYS=0`. 층 순서·§6.1~§6.3 무변경. 변경 트리거: PTY 경로(zpty 숨은 셸) 착수, bash·fish 브리지 착수 시.*
 *v1.6.1 — §6.2 임계값 예외 (2026-11-13): 명령 이름만 있는 usage 행(`usage: whoami`)은 인자 없는 명령의 빈 spec 으로 쓴다. 층 순서·§6.1·§6.3·§6.4 무변경.*
+*v1.7 — §5.3 재정의 (2026-11-26): 두 upstream 정지 확정 → `vendor/` subtree 를 forward-only fork 로 간주, 별도 fork 레포 안 만듦. upstream-monitor 는 정지·archived 대신 핀 이후 새 commit 만 issue (`upstream:new-commits`). #119·#120 종결.*
